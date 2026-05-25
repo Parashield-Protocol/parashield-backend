@@ -1,0 +1,73 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Policy {
+  id            String    @id @default(uuid())
+  productId     String
+  policyholder  String
+  coverageXlm   Decimal   @db.Decimal(20, 7)
+  premiumPaid   Decimal   @db.Decimal(20, 7)
+  oracleKey     String
+  startTime     DateTime
+  endTime       DateTime
+  status        PolicyStatus @default(ACTIVE)
+  txHash        String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  claims        Claim[]
+
+  @@index([policyholder])
+  @@index([status])
+}
+
+model Claim {
+  id             String     @id @default(uuid())
+  policyId       String
+  policy         Policy     @relation(fields: [policyId], references: [id])
+  claimant       String
+  coverageAmount Decimal    @db.Decimal(20, 7)
+  triggerMet     Boolean    @default(false)
+  status         ClaimStatus @default(PENDING)
+  txHash         String?
+  submittedAt    DateTime   @default(now())
+  processedAt    DateTime?
+  createdAt      DateTime   @default(now())
+
+  @@index([policyId])
+  @@index([claimant])
+  @@index([status])
+}
+
+model OracleReading {
+  id          String   @id @default(uuid())
+  dataType    String
+  key         String
+  value       BigInt
+  confidence  Int
+  source      String
+  submittedAt DateTime @default(now())
+
+  @@index([key])
+  @@index([dataType, submittedAt])
+}
+
+enum PolicyStatus {
+  ACTIVE
+  EXPIRED
+  CANCELLED
+  CLAIMED
+}
+
+enum ClaimStatus {
+  PENDING
+  PROCESSING
+  PAID
+  REJECTED
+  EXPIRED
+}
