@@ -1,28 +1,106 @@
-import { Controller, Get, Param, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Param,
+  Query,
+  Body,
+  HttpCode,
+  HttpStatus,
+  NotFoundException,
+} from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiBearerAuth,
+  ApiQuery,
+  ApiParam,
+} from '@nestjs/swagger';
 import { PolicyService } from './policy.service';
+import { BuyPolicyDto } from './dto/buy-policy.dto';
 
-@Controller('policies')
+@ApiTags('policy')
+@Controller()
 export class PolicyController {
   constructor(private readonly policy: PolicyService) {}
 
-  /** GET /api/v1/policies/products — list all active insurance products */
+  /** GET /api/v1/products — list all active insurance products */
   @Get('products')
+  @ApiOperation({ summary: 'List all active insurance products' })
+  @ApiResponse({ status: 200, description: 'Returns list of active products' })
   async getProducts() {
-    return { success: true, data: await this.policy.getActiveProducts() };
+    const products = await this.policy.getActiveProducts();
+    return { success: true, data: products };
+  }
+
+  /** GET /api/v1/policies/me?wallet=<address> — get policies for a wallet */
+  @Get('policies/me')
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get all policies for a wallet address' })
+  @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
+  @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
+  async getMyPolicies(@Query('wallet') wallet: string) {
+    if (!wallet) {
+      return { success: false, error: 'wallet query param required' };
+    }
+    const policies = await this.policy.getUserPolicies(wallet);
+    return { success: true, data: policies };
   }
 
   /** GET /api/v1/policies/:id — get a single policy by ID */
-  @Get(':id')
+  @Get('policies/:id')
+  @ApiOperation({ summary: 'Get a single policy by ID' })
+  @ApiParam({ name: 'id', description: 'Policy UUID' })
+  @ApiResponse({ status: 200, description: 'Returns the policy details' })
+  @ApiResponse({ status: 404, description: 'Policy not found' })
   async getPolicy(@Param('id') id: string) {
-    const policy = await this.policy.getPolicy(id);
-    if (!policy) return { success: false, error: 'Policy not found' };
-    return { success: true, data: policy };
+    const policyData = await this.policy.getPolicy(id);
+    if (!policyData) {
+      throw new NotFoundException(`Policy ${id} not found`);
+    }
+    return { success: true, data: policyData };
   }
 
-  /** GET /api/v1/policies?wallet=<address> — get policies for a wallet */
-  @Get()
-  async getPolicies(@Query('wallet') wallet: string) {
-    if (!wallet) return { success: false, error: 'wallet query param required' };
-    return { success: true, data: await this.policy.getUserPolicies(wallet) };
+  /** POST /api/v1/policies/buy — calculate premium and initiate policy purchase */
+  @Post('policies/buy')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get premium quote and initiate policy purchase' })
+  @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
+  @ApiResponse({ status: 400, description: 'Invalid request body' })
+  async buyPolicy(@Body() dto: BuyPolicyDto) {
+    const products = await this.policy.getActiveProducts();
+    const product = products.find((p) => p.id === dto.productId);
+
+    if (!product) {
+      return { success: false, error: `Product ${dto.productId} not found` };
+    }
+
+    const validation = this.policy.validateCoverage(dto.coverageXlm, product);
+    if (!validation.valid) {
+      return { success: false, error: validation.reason };
+    }
+
+    const premiumXlm = this.policy.calculatePremium(
+      dto.coverageXlm,
+      product.premiumRate,
+      dto.duration,
+    );
+
+    return {
+      success: true,
+      data: {
+        quote: {
+          productId:   dto.productId,
+          productName: product.name,
+          coverageXlm: dto.coverageXlm,
+          premiumXlm,
+          duration:    dto.duration,
+          wallet:      dto.walletAddress,
+        },
+        message: 'Premium calculated. Submit this quote to /policies/confirm to complete purchase.',
+      },
+    };
   }
 }
