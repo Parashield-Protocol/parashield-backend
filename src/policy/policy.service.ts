@@ -27,6 +27,11 @@ export interface PolicySummary {
   status:         string;
 }
 
+export interface PremiumValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
 /**
  * PolicyService — reads policy and product data from the Policy Engine contract.
  *
@@ -39,6 +44,39 @@ export class PolicyService {
   private readonly logger = new Logger(PolicyService.name);
 
   constructor(private readonly stellar: StellarService) {}
+
+  /**
+   * Calculate the premium for a policy in XLM (whole number, rounded up).
+   * Uses basis points: premiumRate 500 = 5%, 100 = 1%.
+   * Formula: coverage * rate * (duration / 365) / 10000
+   */
+  calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
+    return Math.ceil(coverageXlm * premiumRate * (durationDays / 365) / 10000);
+  }
+
+  /**
+   * Validate that a coverage amount falls within the product's allowed range.
+   */
+  validateCoverage(coverageXlm: number, product: ProductSummary): PremiumValidationResult {
+    const min = parseFloat(product.coverageMin);
+    const max = parseFloat(product.coverageMax);
+
+    if (coverageXlm < min) {
+      return {
+        valid: false,
+        reason: `Coverage ${coverageXlm} XLM is below the minimum ${min} XLM for this product`,
+      };
+    }
+
+    if (coverageXlm > max) {
+      return {
+        valid: false,
+        reason: `Coverage ${coverageXlm} XLM exceeds the maximum ${max} XLM for this product`,
+      };
+    }
+
+    return { valid: true };
+  }
 
   async getActiveProducts(): Promise<ProductSummary[]> {
     // TODO: call policy-engine.get_active_products() via stellar.simulateInvoke
