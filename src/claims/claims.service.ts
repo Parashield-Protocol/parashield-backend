@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ConflictException } from '@nestjs/common';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -68,8 +68,35 @@ export class ClaimsService {
   /** Manually submit a claim for a policy (initiated by policyholder). */
   async submitClaim(claimant: string, policyId: string): Promise<string> {
     this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant}`);
+
+    // Duplicate claim guard: prevent double payouts
+    const existingClaim = await this.prisma.claim.findFirst({
+      where: {
+        policyId,
+        status: { in: ['PAID', 'PROCESSING'] },
+      },
+    });
+
+    if (existingClaim) {
+      this.logger.warn(
+        `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
+      );
+      throw new ConflictException('Claim already exists for this policy');
+    }
+
     // TODO: build and submit Soroban tx calling claims-processor.submit_claim(...)
-    return '0';
+    const claim = await this.prisma.claim.create({
+      data: {
+        policyId,
+        claimant,
+        coverageAmount: 0,
+        triggerMet:     false,
+        status:         'PENDING',
+      },
+    });
+
+    this.logger.log(`Manual claim submitted: id=${claim.id}`);
+    return claim.id;
   }
 
   async getClaim(claimId: string): Promise<ClaimSummary | null> {
