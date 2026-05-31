@@ -99,6 +99,27 @@ export class ClaimsService {
     return claim.id;
   }
 
+  async getClaimsByWallet(walletAddress: string): Promise<ClaimSummary[]> {
+    this.logger.log(`get_claims_by_wallet: ${walletAddress}`);
+    const claims = await this.prisma.claim.findMany({
+      where: { claimant: walletAddress },
+      orderBy: { submittedAt: 'desc' },
+    });
+
+    return claims.map((claim) => ({
+      id:             claim.id,
+      policyId:       claim.policyId,
+      claimant:       claim.claimant,
+      coverageAmount: claim.coverageAmount.toString(),
+      triggerMet:     claim.triggerMet,
+      status:         claim.status,
+      submittedAt:    Math.floor(claim.submittedAt.getTime() / 1000),
+      processedAt:    claim.processedAt
+        ? Math.floor(claim.processedAt.getTime() / 1000)
+        : null,
+    }));
+  }
+
   async getClaim(claimId: string): Promise<ClaimSummary | null> {
     this.logger.log(`get_claim: ${claimId}`);
     const claim = await this.prisma.claim.findUnique({ where: { id: claimId } });
