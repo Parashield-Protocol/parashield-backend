@@ -50,6 +50,32 @@ export class OracleService {
     };
   }
 
+  /** Fetch monthly average max temperature for a lat/lng coordinate. Returns 7-decimal fixed point (°C * 10^7). */
+  async fetchTemperature(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
+    const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
+    const endDate   = new Date(year, month, 0);
+    const endStr    = `${year}-${String(month).padStart(2, '0')}-${endDate.getDate()}`;
+
+    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+    const res = await axios.get<{ daily: { temperature_2m_max: (number | null)[] } }>(url, { timeout: 10_000 });
+
+    const readings = res.data.daily.temperature_2m_max.filter(
+      (v): v is number => v !== null && v !== undefined,
+    );
+    const avgTemp = readings.length > 0
+      ? readings.reduce((a, b) => a + b, 0) / readings.length
+      : 0;
+
+    return {
+      dataType:   'weather',
+      key:        `temperature:${lat},${lng}:${year}-${String(month).padStart(2, '0')}`,
+      value:      BigInt(Math.round(avgTemp * 1e7)),
+      confidence: 90,
+      timestamp:  Math.floor(Date.now() / 1000),
+      source:     'open-meteo',
+    };
+  }
+
   /** Fetch flight delay status. Returns delay in minutes as 7-decimal fixed point. */
   async fetchFlightDelay(flightNumber: string, date: string): Promise<OracleReading> {
     const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
