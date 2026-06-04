@@ -1,12 +1,57 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Post, Query, Param, Body } from '@nestjs/common';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiParam,
+  ApiQuery,
+} from '@nestjs/swagger';
 import { OracleService } from './oracle.service';
+import { OracleFeedRequestDto } from './dto/oracle-reading.dto';
 
+@ApiTags('oracle')
 @Controller('oracle')
 export class OracleController {
   constructor(private readonly oracle: OracleService) {}
 
-  /** GET /api/v1/oracle/rainfall?lat=...&lng=...&year=...&month=... */
+  /** GET /api/v1/oracle/latest/:key — get the latest reading for an oracle key */
+  @Get('latest/:key')
+  @ApiOperation({ summary: 'Get the latest oracle reading for a given key' })
+  @ApiParam({ name: 'key', description: 'Oracle data key (e.g. rainfall:-0.0917,34.7679:2026-06)' })
+  @ApiResponse({ status: 200, description: 'Latest oracle reading or null if not found' })
+  async getLatestReading(@Param('key') key: string) {
+    const reading = await this.oracle.getLatestReading(key);
+    if (!reading) {
+      return { success: false, error: `No reading found for key: ${key}` };
+    }
+    return { success: true, data: { ...reading, value: reading.value.toString() } };
+  }
+
+  /** POST /api/v1/oracle/fetch/rainfall — trigger rainfall fetch */
+  @Post('fetch/rainfall')
+  @ApiOperation({ summary: 'Fetch rainfall data from Open-Meteo and persist to database' })
+  @ApiResponse({ status: 201, description: 'Returns the fetched oracle reading' })
+  async fetchRainfall(@Body() dto: OracleFeedRequestDto) {
+    const reading = await this.oracle.fetchRainfall(dto.lat, dto.lng, dto.year, dto.month);
+    return { success: true, data: { ...reading, value: reading.value.toString() } };
+  }
+
+  /** POST /api/v1/oracle/fetch/temperature — trigger temperature fetch */
+  @Post('fetch/temperature')
+  @ApiOperation({ summary: 'Fetch temperature data from Open-Meteo and persist to database' })
+  @ApiResponse({ status: 201, description: 'Returns the fetched oracle reading' })
+  async fetchTemperature(@Body() dto: OracleFeedRequestDto) {
+    const reading = await this.oracle.fetchTemperature(dto.lat, dto.lng, dto.year, dto.month);
+    return { success: true, data: { ...reading, value: reading.value.toString() } };
+  }
+
+  /** GET /api/v1/oracle/rainfall — legacy: fetch rainfall via query params */
   @Get('rainfall')
+  @ApiOperation({ summary: 'Fetch rainfall (legacy query-param endpoint)' })
+  @ApiQuery({ name: 'lat', required: true })
+  @ApiQuery({ name: 'lng', required: true })
+  @ApiQuery({ name: 'year', required: true })
+  @ApiQuery({ name: 'month', required: true })
   async getRainfall(
     @Query('lat')   lat:   string,
     @Query('lng')   lng:   string,
@@ -22,8 +67,11 @@ export class OracleController {
     return { success: true, data: { ...reading, value: reading.value.toString() } };
   }
 
-  /** GET /api/v1/oracle/flight?flight=KQ100&date=2026-06-15 */
+  /** GET /api/v1/oracle/flight — fetch flight delay status */
   @Get('flight')
+  @ApiOperation({ summary: 'Fetch flight delay data from AviationStack' })
+  @ApiQuery({ name: 'flight', required: true, description: 'IATA flight number (e.g. KQ100)' })
+  @ApiQuery({ name: 'date', required: true, description: 'Flight date (YYYY-MM-DD)' })
   async getFlight(
     @Query('flight') flight: string,
     @Query('date')   date:   string,
