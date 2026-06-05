@@ -97,13 +97,37 @@ export class StellarService {
     const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
     assembledTx.sign(signer);
 
-    const sendResult = await this.rpc.sendTransaction(assembledTx);
-    if (sendResult.status === 'ERROR') {
-      throw new Error(`Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`);
+    // Retry loop: up to 3 attempts with 2-second delay between attempts
+    const MAX_ATTEMPTS = 3;
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const sendResult = await this.rpc.sendTransaction(assembledTx);
+        if (sendResult.status === 'ERROR') {
+          throw new Error(`Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`);
+        }
+        this.logger.log(
+          `Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash} (attempt ${attempt})`,
+        );
+        return sendResult.hash;
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        this.logger.warn(
+          `sendTransaction attempt ${attempt}/${MAX_ATTEMPTS} failed: ${lastError.message}`,
+        );
+        if (attempt < MAX_ATTEMPTS) {
+          await this.sleep(2000);
+        }
+      }
     }
 
-    this.logger.log(`Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash}`);
-    return sendResult.hash;
+    throw new Error(`All ${MAX_ATTEMPTS} sendTransaction attempts failed. Last error: ${lastError?.message}`);
+  }
+
+  /** Sleep for the given number of milliseconds. */
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /** Return the current network passphrase. */
