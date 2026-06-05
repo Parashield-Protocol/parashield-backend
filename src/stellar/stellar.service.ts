@@ -5,6 +5,8 @@ import {
   Keypair,
   TransactionBuilder,
   BASE_FEE,
+  Operation,
+  Contract,
   rpc as StellarRpc,
   xdr,
 } from '@stellar/stellar-sdk';
@@ -60,6 +62,48 @@ export class StellarService {
       .build();
 
     return this.rpc.simulateTransaction(tx);
+  }
+
+  /**
+   * Invoke a Soroban contract method as a write operation.
+   * Builds the transaction, simulates it, and submits it to the network.
+   * Returns the transaction hash on success.
+   */
+  async invokeContract(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+    signerKeypair?: Keypair,
+  ): Promise<string> {
+    const signer  = signerKeypair ?? this.keeperKeypair;
+    const account = await this.rpc.getAccount(signer.publicKey());
+
+    const contract = new Contract(contractId);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.network,
+    })
+      .addOperation(contract.call(method, ...args))
+      .setTimeout(30)
+      .build();
+
+    // Simulate first to get the resource footprint
+    const simResult = await this.rpc.simulateTransaction(tx);
+    if (StellarRpc.Api.isSimulationError(simResult)) {
+      throw new Error(`Simulation failed: ${simResult.error}`);
+    }
+
+    // Assemble the transaction with the simulation result
+    const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
+    assembledTx.sign(signer);
+
+    const sendResult = await this.rpc.sendTransaction(assembledTx);
+    if (sendResult.status === 'ERROR') {
+      throw new Error(`Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`);
+    }
+
+    this.logger.log(`Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash}`);
+    return sendResult.hash;
   }
 
   /** Return the current network passphrase. */
