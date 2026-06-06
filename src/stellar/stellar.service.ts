@@ -130,6 +130,24 @@ export class StellarService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  /**
+   * Get the native XLM balance for an account.
+   * Used for keeper health checks to ensure the keeper has sufficient funds.
+   */
+  async getAccountBalance(publicKey: string): Promise<string> {
+    const account = await this.rpc.getAccount(publicKey);
+    // account.balances is available on the AccountResponse object
+    const nativeBalance = (account as any).balances?.find(
+      (b: { asset_type: string; balance: string }) => b.asset_type === 'native',
+    );
+    if (!nativeBalance) {
+      this.logger.warn(`No native XLM balance found for account: ${publicKey}`);
+      return '0';
+    }
+    this.logger.log(`Account ${publicKey} balance: ${nativeBalance.balance} XLM`);
+    return nativeBalance.balance;
+  }
+
   /** Return the current network passphrase. */
   get networkPassphrase(): string {
     return this.network;
