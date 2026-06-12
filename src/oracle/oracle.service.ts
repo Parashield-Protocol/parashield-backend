@@ -74,7 +74,12 @@ export class OracleService {
     const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
     const res = await axios.get<{ daily: { precipitation_sum: (number | null)[] } }>(url, { timeout: 10_000 });
 
-    const readings = res.data.daily.precipitation_sum.filter((v): v is number => v !== null && v !== undefined);
+    // Explicitly filter null/undefined values — Open-Meteo returns null for days
+    // with no data (e.g. future dates, gaps in historical archive).
+    // Without the type predicate, TypeScript widens the array type and reduce() may receive null.
+    const readings = res.data.daily.precipitation_sum.filter(
+      (v): v is number => v !== null && v !== undefined,
+    );
     const totalMm  = readings.reduce((a, b) => a + b, 0);
 
     const oracleReading: OracleReading = {
