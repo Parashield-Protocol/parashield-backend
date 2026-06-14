@@ -1,38 +1,105 @@
 # parashield-backend
 
-NestJS API server for Parashield. Two jobs: serve the frontend, and run the keeper daemon that submits oracle data and triggers claims on-chain.
+NestJS API server for Parashield — a decentralized parametric insurance protocol on Stellar Soroban.
+
+Two responsibilities: serve the REST API consumed by the frontend, and run the keeper daemon that submits oracle data and triggers claims automatically.
 
 ---
 
-## What it does
+## Architecture
 
-**REST API** — the frontend reads insurance products, user policies, and claim status through this server. In v1, reads are proxied from the Soroban contracts via RPC simulation. A Prisma + PostgreSQL event index is the v2 path.
+ParaShield backend is built around four modules:
 
-**Keeper daemon** — two scheduled workers:
-- `OracleWorker` runs hourly. Fetches weather/flight data from external APIs and submits readings to the `oracle-verifier` contract.
-- `ClaimsWorker` runs hourly. Iterates active policies and calls `claims-processor.auto_process()` for each. If a trigger is met, the contract pays the policyholder without any user action.
+| Module | Role |
+|--------|------|
+| **Policy Engine** (`src/policy/`) | Product catalog, policy purchase, premium calculation, coverage validation |
+| **Claims Processor** (`src/claims/`) | Manual and automatic claim submission, duplicate claim prevention, claim history |
+| **Oracle Worker** (`src/oracle/`) | Fetches real-world data (rainfall, temperature, flight delays) from external APIs and persists to DB |
+| **Stellar Bridge** (`src/stellar/`) | Builds, simulates, and submits Soroban transactions. Manages the keeper keypair |
+
+Supporting infrastructure:
+- **PrismaService** — PostgreSQL integration for policy and oracle data storage
+- **AuthModule** — Stellar wallet signature verification + JWT issuance
+- **LoggingInterceptor** — Request/response duration logging
+- **ThrottleGuard** — IP-based rate limiting (60 req/min)
 
 ---
 
-## Endpoints
+## API Endpoints
 
+All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
+
+### Policy
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/api/v1/products` | List all active insurance products |
+| `GET` | `/api/v1/policies/me?wallet=<address>` | Get policies for a wallet address |
+| `GET` | `/api/v1/policies/:id` | Get a single policy by UUID |
+| `POST` | `/api/v1/policies/buy` | Calculate premium and get a purchase quote |
+
+### Claims
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/api/v1/claims/submit` | Submit a manual claim |
+| `POST` | `/api/v1/claims/:policyId/auto` | Trigger automatic claim evaluation (keeper only) |
+| `GET` | `/api/v1/claims/:id` | Get claim details by ID |
+| `GET` | `/api/v1/claims/history/:wallet` | Get all claims for a wallet address |
+
+### Oracle
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `GET` | `/api/v1/oracle/latest/:key` | Get the latest reading for an oracle key |
+| `POST` | `/api/v1/oracle/fetch/rainfall` | Fetch rainfall data from Open-Meteo |
+| `POST` | `/api/v1/oracle/fetch/temperature` | Fetch temperature data from Open-Meteo |
+| `GET` | `/api/v1/oracle/rainfall` | Legacy: fetch rainfall via query params |
+| `GET` | `/api/v1/oracle/flight` | Fetch flight delay from AviationStack |
+
+### Auth & Health
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| `POST` | `/api/v1/auth/login` | Verify Stellar wallet signature and issue JWT |
+| `GET` | `/api/v1/health` | Service health check (includes DB ping) |
+
+All responses follow the shape: `{ success: boolean, data?: any, error?: string }`.
+Values are returned in 7-decimal fixed point as strings (matching Stellar asset precision).
+
+---
+
+## Local Setup
+
+```bash
+# 1. Clone and install dependencies
+git clone <repo-url>
+cd parashield-backend
+npm install
+
+# 2. Start PostgreSQL and Redis via Docker
+docker-compose up -d
+
+# 3. Configure environment
+cp .env.example .env
+# Edit .env with your KEEPER_SECRET_KEY and contract addresses
+
+# 4. Run database migrations
+npx prisma migrate dev
+
+# 5. Start in development mode
+npm run start:dev
 ```
-GET  /api/v1/policies/products           list active insurance products
-GET  /api/v1/policies?wallet=<address>   policies owned by a wallet
-GET  /api/v1/policies/:id               single policy
 
-POST /api/v1/claims                     submit a claim manually
-                                         body: { claimant, policyId }
-POST /api/v1/claims/:policyId/auto      keeper-trigger auto evaluation
-GET  /api/v1/claims/:id                 claim status
+The API will be available at `http://localhost:3001/api/v1`.
+Swagger docs at `http://localhost:3001/docs`.
 
-GET  /api/v1/oracle/rainfall            fetch rainfall from Open-Meteo
-                                         ?lat=-0.0917&lng=34.7679&year=2026&month=6
-GET  /api/v1/oracle/flight              fetch flight delay
-                                         ?flight=KQ100&date=2026-06-15
+### Production build
+
+```bash
+npm run build
+npm run start:prod
 ```
-
-All values returned in 7-decimal fixed point as strings (matching Stellar asset precision). `1_000_000_000 = 100.0000000 USDC`.
 
 ---
 
@@ -41,7 +108,7 @@ All values returned in 7-decimal fixed point as strings (matching Stellar asset 
 | Data | Source | Key required |
 |---|---|---|
 | Rainfall, temperature, wind | [Open-Meteo](https://open-meteo.com) | No |
-| Flight delay | [AviationStack](https://aviationstack.com) | Yes |
+| Flight delay | [AviationStack](https://aviationstack.com) | Yes (`AVIATIONSTACK_API_KEY`) |
 | DeFi exploit | Stellar RPC event stream | No |
 
 ---
@@ -50,54 +117,48 @@ All values returned in 7-decimal fixed point as strings (matching Stellar asset 
 
 ```
 src/
-├── main.ts
-├── app.module.ts
+├── main.ts                          bootstrap, Swagger, global middleware
+├── app.module.ts                    root module
 ├── stellar/
 │   ├── stellar.module.ts
-│   └── stellar.service.ts       keeper keypair, RPC wrapper, tx builder
+│   └── stellar.service.ts           keeper keypair, RPC wrapper, tx builder, retry logic
 ├── oracle/
-│   ├── oracle.service.ts        fetch external data
-│   ├── oracle.worker.ts         @Cron hourly poll + on-chain submit
-│   └── oracle.controller.ts
+│   ├── oracle.service.ts            fetch external data, persist to DB
+│   ├── oracle.worker.ts             @Cron hourly poll + on-chain submit stub
+│   ├── oracle.controller.ts         REST endpoints
+│   └── dto/oracle-reading.dto.ts
 ├── policy/
-│   ├── policy.service.ts        read from policy-engine contract
-│   └── policy.controller.ts
-└── claims/
-    ├── claims.service.ts        submit/evaluate claims
-    ├── claims.worker.ts         @Cron hourly auto-process
-    └── claims.controller.ts
-```
-
----
-
-## Setup
-
-```bash
-npm install
-cp .env.example .env
-```
-
-Required env vars:
-
-```env
-STELLAR_NETWORK=testnet
-STELLAR_RPC_URL=https://soroban-testnet.stellar.org
-KEEPER_SECRET_KEY=S...                          # account that signs keeper txs
-ORACLE_VERIFIER_CONTRACT=C...
-POLICY_ENGINE_CONTRACT=C...
-CLAIMS_PROCESSOR_CONTRACT=C...
-```
-
-Optional:
-
-```env
-AVIATIONSTACK_API_KEY=...   # only needed for flight delay data
-PORT=3001
-```
-
-```bash
-npm run start:dev    # development
-npm run build && npm run start:prod
+│   ├── policy.service.ts            premium calculation, DB reads/writes
+│   ├── policy.controller.ts         REST endpoints
+│   ├── policy.module.ts
+│   ├── policy-status.machine.ts     state machine for valid policy transitions
+│   └── dto/
+│       ├── buy-policy.dto.ts
+│       └── policy-response.dto.ts
+├── claims/
+│   ├── claims.service.ts            claim submission, duplicate guard, auto-process
+│   ├── claims.worker.ts             @Cron hourly scan of expiring policies
+│   ├── claims.controller.ts         REST endpoints
+│   ├── claims.module.ts
+│   └── dto/submit-claim.dto.ts
+├── auth/
+│   ├── auth.middleware.ts           Stellar signature verification
+│   ├── auth.controller.ts           POST /auth/login
+│   ├── auth.module.ts
+│   └── jwt.service.ts               JWT sign/verify
+├── health/
+│   ├── health.controller.ts         GET /health
+│   └── health.module.ts
+├── prisma/
+│   ├── prisma.service.ts
+│   └── prisma.module.ts
+└── common/
+    ├── filters/
+    │   └── http-exception.filter.ts  structured error responses
+    ├── interceptors/
+    │   └── logging.interceptor.ts    request duration logging
+    └── guards/
+        └── throttle.guard.ts         IP-based rate limiting
 ```
 
 ---
@@ -110,23 +171,13 @@ The keeper is a Stellar account (`KEEPER_SECRET_KEY`) that signs:
 
 Fee per tx: ~0.00001 XLM. Fund via `stellar keys fund <address> --network testnet` on testnet.
 
-The keeper's address must be registered in the oracle-verifier contract:
-```bash
-stellar contract invoke --id $ORACLE_VERIFIER_CONTRACT \
-  -- add_oracle \
-  --admin $DEPLOYER \
-  --oracle $KEEPER_ADDRESS \
-  --data_type weather \
-  --weight 90
-```
-
 ---
 
 ## v2 roadmap
 
-- Prisma + PostgreSQL: index contract events for fast historical queries
-- Full Soroban SDK transaction builder for all write paths (current state: stubs with `// TODO` markers)
+- Full Soroban SDK transaction builder for all write paths (currently stubbed with `// TODO` markers)
 - WebSocket subscription for real-time policy/claim status updates
+- Redis-backed rate limiting for multi-instance deployments
 
 ---
 
