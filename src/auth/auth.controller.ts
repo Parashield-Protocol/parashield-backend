@@ -1,8 +1,10 @@
-import { Controller, Post, Body, UnauthorizedException, Logger, HttpCode, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Body, UnauthorizedException, Logger, HttpCode, HttpStatus, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { IsString, Matches } from 'class-validator';
 import { Keypair } from '@stellar/stellar-sdk';
 import { JwtService } from './jwt.service';
+import { PrismaService } from '../prisma/prisma.service';
+import * as crypto from 'crypto';
 
 class WalletLoginDto {
   @IsString()
@@ -27,7 +29,47 @@ class WalletLoginDto {
 export class AuthController {
   private readonly logger = new Logger(AuthController.name);
 
-  constructor(private readonly jwtService: JwtService) {}
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly prisma: PrismaService,
+  ) {}
+
+  /**
+   * GET /api/v1/auth/challenge
+   * Issue a server-generated nonce for a given wallet address.
+   */
+  @Get('challenge')
+  @ApiOperation({ summary: 'Obtain a server-issued nonce before login' })
+  @ApiResponse({ status: 200, description: 'Returns the challenge nonce' })
+  @ApiResponse({ status: 400, description: 'Invalid wallet address' })
+  async getChallenge(@Query('wallet') wallet: string) {
+    if (!wallet || !/^G[A-Z2-7]{55}$/.test(wallet)) {
+      throw new UnauthorizedException('Invalid or missing Stellar wallet address');
+    }
+
+    // Generate a secure, cryptographically random nonce
+    const nonce = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes TTL
+
+    // Proactively clean up any expired challenges to prevent DB bloat
+    await this.prisma.authChallenge.deleteMany({
+      where: { expiresAt: { lt: new Date() } },
+    }).catch((err) => {
+      this.logger.warn(`Error cleaning up expired challenges: ${err.message}`);
+    });
+
+    // Store the nonce keyed by wallet address (upsert if they request again)
+    await this.prisma.authChallenge.upsert({
+      where: { walletAddress: wallet },
+      update: { nonce, expiresAt, createdAt: new Date() },
+      create: { walletAddress: wallet, nonce, expiresAt },
+    });
+
+    return {
+      success: true,
+      data: nonce,
+    };
+  }
 
   /**
    * POST /api/v1/auth/login
@@ -40,6 +82,34 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid or missing wallet signature' })
   async login(@Body() dto: WalletLoginDto) {
     const { walletAddress, signature, message } = dto;
+
+    // Fetch the challenge from DB
+    const challenge = await this.prisma.authChallenge.findUnique({
+      where: { walletAddress },
+    });
+
+    if (!challenge) {
+      this.logger.warn(`Login rejected: no challenge found for ${walletAddress}`);
+      throw new UnauthorizedException('No auth challenge found. Please request a challenge first.');
+    }
+
+    // Verify it is not expired
+    if (challenge.expiresAt < new Date()) {
+      await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch(() => {});
+      this.logger.warn(`Login rejected: challenge expired for ${walletAddress}`);
+      throw new UnauthorizedException('Auth challenge expired. Please request a new one.');
+    }
+
+    // Verify that the signed message equals the stored nonce
+    if (message !== challenge.nonce) {
+      this.logger.warn(`Login rejected: message does not match stored nonce for ${walletAddress}`);
+      throw new UnauthorizedException('Invalid challenge message');
+    }
+
+    // Invalidate the nonce immediately after use (one-time use)
+    await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch((err) => {
+      this.logger.warn(`Failed to delete challenge for ${walletAddress}: ${err.message}`);
+    });
 
     try {
       const keypair      = Keypair.fromPublicKey(walletAddress);
@@ -70,3 +140,4 @@ export class AuthController {
     };
   }
 }
+

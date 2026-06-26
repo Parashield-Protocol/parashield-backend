@@ -10,6 +10,7 @@ datasource db {
 model Policy {
   id            String    @id @default(uuid())
   productId     String
+  product       Product   @relation(fields: [productId], references: [id])
   policyholder  String
   coverageXlm   Decimal   @db.Decimal(20, 7)
   premiumPaid   Decimal   @db.Decimal(20, 7)
@@ -25,6 +26,22 @@ model Policy {
   @@index([policyholder])
   @@index([status])
 }
+
+model Product {
+  id           String    @id @default(uuid())
+  name         String
+  category     String
+  triggerType  String
+  threshold    String
+  comparison   String
+  coverageMin  String
+  coverageMax  String
+  premiumRate  Int
+  maxDuration  Int
+  status       String    @default("Active")
+  policies     Policy[]
+}
+
 
 model Claim {
   id             String     @id @default(uuid())
@@ -71,3 +88,13 @@ enum ClaimStatus {
   REJECTED
   EXPIRED
 }
+
+model AuthChallenge {
+  walletAddress String   @id
+  nonce         String
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([expiresAt])
+}
+

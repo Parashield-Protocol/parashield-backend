@@ -5,8 +5,17 @@ import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 
+import { ConfigService } from '@nestjs/config';
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  const configService = app.get(ConfigService);
+  const jwtSecret = configService.get<string>('JWT_SECRET');
+  if (!jwtSecret) {
+    console.error('Fatal Error: JWT_SECRET environment variable is required');
+    process.exit(1);
+  }
 
   // Global exception filter
   app.useGlobalFilters(new GlobalExceptionFilter());
