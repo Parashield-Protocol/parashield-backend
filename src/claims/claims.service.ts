@@ -13,6 +13,7 @@ export interface ClaimSummary {
   policyId:       string;
   claimant:       string;
   coverageAmount: string;
+  payoutAmount:   string | null;
   triggerMet:     boolean;
   status:         string;
   submittedAt:    number;
@@ -117,7 +118,7 @@ export class ClaimsService {
 
     await this.prisma.claim.update({
       where: { id: claim.id },
-      data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash: txHash ?? null },
+      data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash: txHash ?? null, payoutAmount: policy.coverageXlm },
     });
 
     await this.prisma.policy.update({
@@ -182,6 +183,7 @@ export class ClaimsService {
       policyId:       claim.policyId,
       claimant:       claim.claimant,
       coverageAmount: claim.coverageAmount.toString(),
+      payoutAmount:   claim.payoutAmount?.toString() ?? null,
       triggerMet:     claim.triggerMet,
       status:         claim.status,
       submittedAt:    Math.floor(claim.submittedAt.getTime() / 1000),
@@ -201,6 +203,7 @@ export class ClaimsService {
       policyId:       claim.policyId,
       claimant:       claim.claimant,
       coverageAmount: claim.coverageAmount.toString(),
+      payoutAmount:   claim.payoutAmount?.toString() ?? null,
       triggerMet:     claim.triggerMet,
       status:         claim.status,
       submittedAt:    Math.floor(claim.submittedAt.getTime() / 1000),

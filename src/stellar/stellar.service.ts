@@ -76,34 +76,32 @@ export class StellarService {
     args: xdr.ScVal[],
     signerKeypair?: Keypair,
   ): Promise<string> {
-    const signer  = signerKeypair ?? this.keeperKeypair;
-    const account = await this.rpc.getAccount(signer.publicKey());
-
+    const signer   = signerKeypair ?? this.keeperKeypair;
     const contract = new Contract(contractId);
-    const tx = new TransactionBuilder(account, {
-      fee: BASE_FEE,
-      networkPassphrase: this.network,
-    })
-      .addOperation(contract.call(method, ...args))
-      .setTimeout(30)
-      .build();
-
-    // Simulate first to get the resource footprint
-    const simResult = await this.rpc.simulateTransaction(tx);
-    if (StellarRpc.Api.isSimulationError(simResult)) {
-      throw new Error(`Simulation failed: ${simResult.error}`);
-    }
-
-    // Assemble the transaction with the simulation result
-    const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
-    assembledTx.sign(signer);
-
-    // Retry loop: up to 3 attempts with 2-second delay between attempts
     const MAX_ATTEMPTS = 3;
     let lastError: Error | null = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
+        // Re-fetch account on every attempt to get a fresh sequence number;
+        // reusing a stale assembled transaction causes TRANSACTION_BAD_SEQ on retry.
+        const account = await this.rpc.getAccount(signer.publicKey());
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.network,
+        })
+          .addOperation(contract.call(method, ...args))
+          .setTimeout(30)
+          .build();
+
+        const simResult = await this.rpc.simulateTransaction(tx);
+        if (StellarRpc.Api.isSimulationError(simResult)) {
+          throw new Error(`Simulation failed: ${simResult.error}`);
+        }
+
+        const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
+        assembledTx.sign(signer);
+
         const sendResult = await this.rpc.sendTransaction(assembledTx);
         if (sendResult.status === 'ERROR') {
           throw new Error(`Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`);

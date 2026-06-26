@@ -33,6 +33,9 @@ export class ClaimResponseDto {
   @ApiProperty({ description: 'Coverage amount to be paid (7-decimal fixed point string)' })
   coverageAmount: string;
 
+  @ApiProperty({ description: 'Actual payout amount sent on-chain (7-decimal fixed point string)', nullable: true })
+  payoutAmount: string | null;
+
   @ApiProperty({ description: 'Whether the insurance trigger condition was met' })
   triggerMet: boolean;
 
