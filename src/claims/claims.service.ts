@@ -147,12 +147,20 @@ export class ClaimsService {
       throw new ConflictException('Claim already exists for this policy');
     }
 
+    const policy = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    if (!policy) {
+      throw new NotFoundException(`Policy ${policyId} not found`);
+    }
+    if (policy.status !== 'ACTIVE') {
+      throw new ConflictException(`Policy ${policyId} is not active`);
+    }
+
     // TODO: build and submit Soroban tx calling claims-processor.submit_claim(...)
     const claim = await this.prisma.claim.create({
       data: {
         policyId,
         claimant,
-        coverageAmount: 0,
+        coverageAmount: policy.coverageXlm,
         triggerMet:     false,
         status:         'PENDING',
       },
