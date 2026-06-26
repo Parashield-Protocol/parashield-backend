@@ -41,6 +41,15 @@ async function bootstrap() {
     .setDescription('Decentralized parametric insurance protocol on Stellar Soroban')
     .setVersion('1.0')
     .addBearerAuth()
+    .addApiKey(
+      {
+        type: 'apiKey',
+        in: 'header',
+        name: 'x-api-key',
+        description: 'Operator API key for admin-only oracle fetch endpoints',
+      },
+      'operator-api-key',
+    )
     .addTag('policy', 'Insurance product and policy management')
     .addTag('claims', 'Claim submission and processing')
     .addTag('oracle', 'Oracle data feeds and readings')

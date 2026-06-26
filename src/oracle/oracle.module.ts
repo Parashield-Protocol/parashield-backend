@@ -4,9 +4,10 @@ import { OracleController } from './oracle.controller';
 import { OracleWorker }     from './oracle.worker';
 import { PrismaModule }     from '../prisma/prisma.module';
 import { StellarModule }    from '../stellar/stellar.module';
+import { AuthModule }       from '../auth/auth.module';
 
 @Module({
-  imports:     [PrismaModule, StellarModule],
+  imports:     [PrismaModule, StellarModule, AuthModule],
   controllers: [OracleController],
   providers:   [OracleService, OracleWorker],
   exports:     [OracleService],

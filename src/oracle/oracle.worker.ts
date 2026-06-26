@@ -15,6 +15,7 @@ import { StellarService } from '../stellar/stellar.service';
 @Injectable()
 export class OracleWorker {
   private readonly logger = new Logger(OracleWorker.name);
+  private readonly retryDelayMs = 5_000;
 
   constructor(
     private readonly oracleService: OracleService,
@@ -35,16 +36,17 @@ export class OracleWorker {
 
     // Attempt 1 — primary fetch
     try {
-      reading = await this.oracleService.fetchRainfall(-0.0917, 34.7679, year, month);
+      reading = await this.oracleService.fetchRainfallReading(-0.0917, 34.7679, year, month);
       this.logger.log(
         `Rainfall reading: key=${reading.key} value=${reading.value} confidence=${reading.confidence}`,
       );
     } catch (err) {
-      this.logger.warn('Primary fetch failed — retrying once', err);
+      this.logger.warn(`Primary fetch failed — retrying once in ${this.retryDelayMs / 1000}s`, err);
+      await this.sleep(this.retryDelayMs);
 
       // Attempt 2 — single retry on failure
       try {
-        reading = await this.oracleService.fetchRainfall(-0.0917, 34.7679, year, month);
+        reading = await this.oracleService.fetchRainfallReading(-0.0917, 34.7679, year, month);
         this.logger.log(`Retry succeeded: key=${reading.key} value=${reading.value}`);
       } catch (retryErr) {
         this.logger.error('Both fetch attempts failed — skipping submission', retryErr);
@@ -53,6 +55,13 @@ export class OracleWorker {
     }
 
     if (reading) {
+      try {
+        await this.oracleService.persistReading(reading);
+      } catch (err) {
+        this.logger.error('Oracle reading persistence failed — skipping on-chain submission', err);
+        return;
+      }
+
       const contractId = this.config.get<string>('ORACLE_VERIFIER_CONTRACT') ?? '';
       if (!contractId) {
         this.logger.warn('ORACLE_VERIFIER_CONTRACT not set — skipping on-chain submission');
@@ -75,5 +84,9 @@ export class OracleWorker {
     }
 
     this.logger.log('Oracle poll cycle complete');
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }

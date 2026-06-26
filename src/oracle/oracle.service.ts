@@ -33,7 +33,7 @@ export class OracleService {
   ) {}
 
   /** Persist an OracleReading to the database. */
-  private async persistReading(reading: OracleReading): Promise<void> {
+  async persistReading(reading: OracleReading): Promise<void> {
     await this.prisma.oracleReading.create({
       data: {
         dataType:   reading.dataType,
@@ -65,8 +65,8 @@ export class OracleService {
     };
   }
 
-  /** Fetch rainfall in mm for a lat/lng coordinate. Returns 7-decimal fixed point. */
-  async fetchRainfall(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
+  /** Fetch rainfall in mm for a lat/lng coordinate without persisting it. */
+  async fetchRainfallReading(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const endDate   = new Date(year, month, 0);
     const endStr    = `${year}-${String(month).padStart(2, '0')}-${endDate.getDate()}`;
@@ -95,12 +95,18 @@ export class OracleService {
       source:     'open-meteo',
     };
 
+    return oracleReading;
+  }
+
+  /** Fetch rainfall in mm for a lat/lng coordinate. Returns 7-decimal fixed point. */
+  async fetchRainfall(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
+    const oracleReading = await this.fetchRainfallReading(lat, lng, year, month);
     await this.persistReading(oracleReading);
     return oracleReading;
   }
 
-  /** Fetch monthly average max temperature for a lat/lng coordinate. Returns 7-decimal fixed point (°C * 10^7). */
-  async fetchTemperature(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
+  /** Fetch monthly average max temperature for a lat/lng coordinate without persisting it. */
+  async fetchTemperatureReading(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
     const endDate   = new Date(year, month, 0);
     const endStr    = `${year}-${String(month).padStart(2, '0')}-${endDate.getDate()}`;
@@ -128,6 +134,12 @@ export class OracleService {
       source:     'open-meteo',
     };
 
+    return oracleReading;
+  }
+
+  /** Fetch monthly average max temperature for a lat/lng coordinate. Returns 7-decimal fixed point (°C * 10^7). */
+  async fetchTemperature(lat: number, lng: number, year: number, month: number): Promise<OracleReading> {
+    const oracleReading = await this.fetchTemperatureReading(lat, lng, year, month);
     await this.persistReading(oracleReading);
     return oracleReading;
   }
