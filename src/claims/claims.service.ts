@@ -1,5 +1,9 @@
-import { Injectable, Logger, ConflictException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
+import { OracleService } from '../oracle/oracle.service';
+import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'PolicyNotActive';
@@ -27,6 +31,9 @@ export class ClaimsService {
 
   constructor(
     private readonly stellar: StellarService,
+    private readonly oracleService: OracleService,
+    private readonly policyService: PolicyService,
+    private readonly config: ConfigService,
     private readonly prisma: PrismaService,
   ) {}
 
@@ -48,9 +55,7 @@ export class ClaimsService {
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
-    // Persist claim record with PROCESSING status
-    // The Soroban tx submission would happen here:
-    // await this.stellar.invokeContract(CLAIMS_PROCESSOR_CONTRACT, 'auto_process', [nativeToScVal(policyId, { type: 'string' })]);
+    // Persist initial claim record with PROCESSING status
     const claim = await this.prisma.claim.create({
       data: {
         policyId,
@@ -62,7 +67,65 @@ export class ClaimsService {
     });
 
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
-    return 'Rejected';
+
+    // Fetch latest oracle reading for this policy's oracle key
+    const reading = await this.oracleService.getLatestReading(policy.oracleKey);
+    if (!reading) {
+      this.logger.warn(`No oracle reading for key=${policy.oracleKey} — rejecting claim ${claim.id}`);
+      await this.prisma.claim.update({
+        where: { id: claim.id },
+        data:  { status: 'REJECTED', processedAt: new Date() },
+      });
+      return 'Rejected';
+    }
+
+    // Evaluate trigger condition against product definition
+    const products   = await this.policyService.getActiveProducts();
+    const product    = products.find((p) => p.id === policy.productId);
+    const threshold  = BigInt(Math.round(parseFloat(product?.threshold ?? '50') * 1e7));
+    const comparison = product?.comparison ?? 'LessThan';
+
+    const triggerMet = comparison === 'LessThan'
+      ? reading.value < threshold
+      : reading.value > threshold;
+
+    this.logger.log(
+      `Trigger eval: key=${reading.key} value=${reading.value} threshold=${threshold} triggerMet=${triggerMet}`,
+    );
+
+    if (!triggerMet) {
+      await this.prisma.claim.update({
+        where: { id: claim.id },
+        data:  { status: 'REJECTED', triggerMet: false, processedAt: new Date() },
+      });
+      return 'Rejected';
+    }
+
+    // Trigger met — initiate Soroban payout via Claims Processor contract
+    let txHash: string | undefined;
+    try {
+      const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
+      txHash = await this.stellar.invokeContract(
+        contractId,
+        'process_claim',
+        [nativeToScVal(policyId, { type: 'string' })],
+      );
+      this.logger.log(`Soroban payout initiated: txHash=${txHash} claimId=${claim.id}`);
+    } catch (err) {
+      this.logger.error(`Soroban payout failed for claim ${claim.id}`, err);
+    }
+
+    await this.prisma.claim.update({
+      where: { id: claim.id },
+      data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash: txHash ?? null },
+    });
+
+    await this.prisma.policy.update({
+      where: { id: policyId },
+      data:  { status: 'CLAIMED' },
+    });
+
+    return 'Paid';
   }
 
   /** Manually submit a claim for a policy (initiated by policyholder). */
