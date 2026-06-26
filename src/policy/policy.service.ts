@@ -1,7 +1,9 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { TransactionBuilder, Transaction } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
+import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 
 export interface ProductSummary {
   id:           string;
@@ -85,7 +87,7 @@ export class PolicyService {
    * Persist a newly purchased policy to the database.
    * Called after the on-chain transaction is confirmed.
    */
-  async createPolicy(dto: BuyPolicyDto, txHash: string) {
+  async createPolicy(dto: BuyPolicyDto | ConfirmPolicyDto, txHash: string) {
     const now = new Date();
     const endTime = new Date(now.getTime() + dto.duration * 24 * 60 * 60 * 1000);
 
@@ -120,6 +122,21 @@ export class PolicyService {
 
     this.logger.log(`Policy created: id=${policy.id} holder=${dto.walletAddress}`);
     return policy;
+  }
+
+  /**
+   * Submit a signed XDR transaction to the network and persist the policy.
+   * Returns the on-chain policyId and txHash on success.
+   */
+  async confirmAndCreatePolicy(dto: ConfirmPolicyDto): Promise<{ policyId: string; txHash: string }> {
+    const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
+    const sendResult = await this.stellar.rpcServer.sendTransaction(tx);
+    if (sendResult.status === 'ERROR') {
+      throw new Error(`On-chain submission failed: ${JSON.stringify(sendResult.errorResult)}`);
+    }
+    const policy = await this.createPolicy(dto, sendResult.hash);
+    this.logger.log(`Policy confirmed on-chain: id=${policy.id} txHash=${sendResult.hash}`);
+    return { policyId: policy.id, txHash: sendResult.hash };
   }
 
   /**

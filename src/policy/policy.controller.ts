@@ -19,6 +19,7 @@ import {
 } from '@nestjs/swagger';
 import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
+import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 
 @ApiTags('policy')
 @Controller()
@@ -62,11 +63,11 @@ export class PolicyController {
     return { success: true, data: policyData };
   }
 
-  /** POST /api/v1/policies/buy — calculate premium and initiate policy purchase */
+  /** POST /api/v1/policies/buy — calculate premium and return quote */
   @Post('policies/buy')
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get premium quote and initiate policy purchase' })
+  @ApiOperation({ summary: 'Get premium quote for requested coverage' })
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
   async buyPolicy(@Body() dto: BuyPolicyDto) {
@@ -99,8 +100,19 @@ export class PolicyController {
           duration:    dto.duration,
           wallet:      dto.walletAddress,
         },
-        message: 'Premium calculated. Submit this quote to /policies/confirm to complete purchase.',
       },
     };
+  }
+
+  /** POST /api/v1/policies/confirm — submit signed XDR to complete policy purchase */
+  @Post('policies/confirm')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Submit signed XDR to complete policy purchase on-chain' })
+  @ApiResponse({ status: 200, description: 'Policy created on-chain and persisted; returns policyId and txHash' })
+  @ApiResponse({ status: 400, description: 'Invalid request body or on-chain submission failed' })
+  async confirmPolicy(@Body() dto: ConfirmPolicyDto) {
+    const result = await this.policy.confirmAndCreatePolicy(dto);
+    return { success: true, data: result };
   }
 }

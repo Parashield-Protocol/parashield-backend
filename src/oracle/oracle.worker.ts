@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
+import { nativeToScVal } from '@stellar/stellar-sdk';
 import { OracleService, OracleReading } from './oracle.service';
 import { StellarService } from '../stellar/stellar.service';
 
@@ -52,23 +53,25 @@ export class OracleWorker {
     }
 
     if (reading) {
-      /*
-       * Submit oracle reading to the oracle-verifier contract on Stellar.
-       * Uncomment once StellarService.invokeContract is wired to the deployed contract:
-       *
-       * const contractId = this.config.get<string>('ORACLE_VERIFIER_CONTRACT') ?? '';
-       * const txHash = await this.stellar.invokeContract(
-       *   contractId,
-       *   'submit_data',
-       *   [
-       *     nativeToScVal(reading.key, { type: 'string' }),
-       *     nativeToScVal(reading.value, { type: 'i128' }),
-       *     nativeToScVal(reading.confidence, { type: 'u32' }),
-       *   ],
-       * );
-       * this.logger.log(`Oracle data submitted on-chain: txHash=${txHash}`);
-       */
-      this.logger.log(`[stub] Would call stellar.invokeContract('oracle-verifier', 'submit_data', reading.key=${reading.key})`);
+      const contractId = this.config.get<string>('ORACLE_VERIFIER_CONTRACT') ?? '';
+      if (!contractId) {
+        this.logger.warn('ORACLE_VERIFIER_CONTRACT not set — skipping on-chain submission');
+      } else {
+        try {
+          const txHash = await this.stellar.invokeContract(
+            contractId,
+            'submit_data',
+            [
+              nativeToScVal(reading.key,        { type: 'string' }),
+              nativeToScVal(reading.value,       { type: 'i128' }),
+              nativeToScVal(reading.confidence,  { type: 'u32' }),
+            ],
+          );
+          this.logger.log(`Oracle data submitted on-chain: txHash=${txHash}`);
+        } catch (err) {
+          this.logger.error('On-chain oracle submission failed', err);
+        }
+      }
     }
 
     this.logger.log('Oracle poll cycle complete');
