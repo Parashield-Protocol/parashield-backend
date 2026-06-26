@@ -29,9 +29,15 @@ async function bootstrap() {
   // Global validation pipe
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
+  const corsOrigin = process.env.CORS_ORIGIN;
+  if (!corsOrigin) {
+    console.error('Fatal Error: CORS_ORIGIN environment variable is required');
+    process.exit(1);
+  }
+
   // CORS
   app.enableCors({
-    origin: process.env.CORS_ORIGIN ?? '*',
+    origin: corsOrigin,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-wallet-address', 'x-wallet-signature', 'x-wallet-message'],
   });
