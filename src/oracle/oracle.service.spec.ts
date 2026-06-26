@@ -60,7 +60,7 @@ describe('OracleService.fetchRainfall', () => {
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     expect(reading.value).toBe(BigInt(Math.round(45.8 * 1e7)));
-    expect(reading.value).toBe(458000000n);
+    expect(reading.value).toBe(BigInt(458000000));
   });
 
   it('should set source to "open-meteo"', async () => {
@@ -115,6 +115,6 @@ describe('OracleService.fetchRainfall', () => {
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     // Should still sum 10.5 + 15.0 + 20.3 = 45.8
-    expect(reading.value).toBe(458000000n);
+    expect(reading.value).toBe(BigInt(458000000));
   });
 });

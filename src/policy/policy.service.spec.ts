@@ -17,6 +17,10 @@ describe('PolicyService.calculatePremium', () => {
       findMany:   jest.fn(),
       findUnique: jest.fn(),
     },
+    product: {
+      findMany:   jest.fn(),
+      findUnique: jest.fn(),
+    },
   };
 
   beforeEach(async () => {
@@ -95,6 +99,105 @@ describe('PolicyService.calculatePremium', () => {
       const result = service.validateCoverage(5000, product);
       expect(result.valid).toBe(false);
       expect(result.reason).toContain('exceeds the maximum');
+    });
+  });
+
+  describe('getActiveProducts', () => {
+    it('should fetch active products from the database', async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([
+        {
+          id:          '1',
+          name:        'Crop Product',
+          category:    'crop',
+          triggerType: 'Threshold',
+          threshold:   '50.0',
+          comparison:  'LessThan',
+          coverageMin: '10.0',
+          coverageMax: '1000.0',
+          premiumRate: 500,
+          maxDuration: 365,
+          status:      'Active',
+        },
+      ]);
+
+      const products = await service.getActiveProducts();
+      expect(products).toHaveLength(1);
+      expect(products[0].name).toBe('Crop Product');
+      expect(mockPrismaService.product.findMany).toHaveBeenCalledWith({
+        where: { status: 'Active' },
+      });
+    });
+  });
+
+  describe('createPolicy', () => {
+    const validCropProduct = {
+      id:          '1',
+      name:        'Crop Product',
+      category:    'crop',
+      triggerType: 'Threshold',
+      threshold:   '50.0',
+      comparison:  'LessThan',
+      coverageMin: '10.0',
+      coverageMax: '1000.0',
+      premiumRate: 500,
+      maxDuration: 365,
+      status:      'Active',
+    };
+
+    it('should successfully create policy with a valid crop oracleKey', async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+      mockPrismaService.policy.create.mockResolvedValue({ id: 'policy-1' });
+
+      const dto = {
+        productId: '1',
+        coverageXlm: 500,
+        walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+
+      const policy = await service.createPolicy(dto, 'tx-hash-123');
+      expect(policy.id).toBe('policy-1');
+      expect(mockPrismaService.policy.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            productId: '1',
+            oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+          }),
+        }),
+      );
+    });
+
+    it('should throw BadRequestException if product does not exist', async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([]);
+
+      const dto = {
+        productId: 'nonexistent',
+        coverageXlm: 500,
+        walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+
+      await expect(service.createPolicy(dto, 'tx-hash')).rejects.toThrow(
+        /Product with ID nonexistent not found or inactive/,
+      );
+    });
+
+    it('should throw BadRequestException for invalid crop oracleKey format', async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+
+      const dto = {
+        productId: '1',
+        coverageXlm: 500,
+        walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+        duration: 90,
+        oracleKey: 'invalid-crop-key',
+      };
+
+      await expect(service.createPolicy(dto, 'tx-hash')).rejects.toThrow(
+        /oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products/,
+      );
     });
   });
 });

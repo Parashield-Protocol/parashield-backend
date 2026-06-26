@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
@@ -90,9 +90,19 @@ export class PolicyService {
     const endTime = new Date(now.getTime() + dto.duration * 24 * 60 * 60 * 1000);
 
     const product = (await this.getActiveProducts()).find((p) => p.id === dto.productId);
-    const premiumPaid = product
-      ? this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration)
-      : 0;
+    if (!product) {
+      throw new BadRequestException(`Product with ID ${dto.productId} not found or inactive`);
+    }
+
+    // Strict validation of oracleKey format based on product category
+    if (product.category === 'crop' && !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(dto.oracleKey)) {
+      throw new BadRequestException('oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products');
+    }
+    if (product.category === 'flight' && !/^flight:[A-Z0-9]+:20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(dto.oracleKey)) {
+      throw new BadRequestException('oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products');
+    }
+
+    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
 
     const policy = await this.prisma.policy.create({
       data: {
@@ -100,7 +110,7 @@ export class PolicyService {
         policyholder: dto.walletAddress,
         coverageXlm:  dto.coverageXlm,
         premiumPaid,
-        oracleKey:    `rainfall:${dto.productId}`,
+        oracleKey:    dto.oracleKey,
         startTime:    now,
         endTime,
         status:       'ACTIVE',
@@ -125,24 +135,23 @@ export class PolicyService {
   }
 
   async getActiveProducts(): Promise<ProductSummary[]> {
-    // TODO: call policy-engine.get_active_products() via stellar.simulateInvoke
-    // Returns mock data in v1 until contract integration is wired
     this.logger.log('get_active_products called');
-    return [
-      {
-        id:          '1',
-        name:        'Crop Insurance – Kisumu Rainfall',
-        category:    'crop',
-        triggerType: 'Threshold',
-        threshold:   '50.0000000',
-        comparison:  'LessThan',
-        coverageMin: '10.0000000',
-        coverageMax: '1000.0000000',
-        premiumRate: 500,
-        maxDuration: 365,
-        status:      'Active',
-      },
-    ];
+    const dbProducts = await this.prisma.product.findMany({
+      where: { status: 'Active' },
+    });
+    return dbProducts.map((product) => ({
+      id:          product.id,
+      name:        product.name,
+      category:    product.category,
+      triggerType: product.triggerType,
+      threshold:   product.threshold,
+      comparison:  product.comparison,
+      coverageMin: product.coverageMin,
+      coverageMax: product.coverageMax,
+      premiumRate: product.premiumRate,
+      maxDuration: product.maxDuration,
+      status:      product.status,
+    }));
   }
 
   async getPolicy(policyId: string): Promise<PolicySummary | null> {

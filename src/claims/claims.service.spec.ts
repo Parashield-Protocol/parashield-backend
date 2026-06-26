@@ -77,7 +77,7 @@ describe('ClaimsService', () => {
       expect(mockPrismaService.claim.create).toHaveBeenCalledWith(
         expect.objectContaining({
           data: expect.objectContaining({
-            policyId,
+            policyId: POLICY_ID,
             claimant: CLAIMANT,
             status:   'PENDING',
           }),
@@ -123,7 +123,7 @@ describe('ClaimsService', () => {
     it('should create a PROCESSING claim record for an ACTIVE policy', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue({
         id:           'p1',
-        policyholder: CLAIMANT,
+        policyholder: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
         coverageXlm:  100,
         status:       'ACTIVE',
       });

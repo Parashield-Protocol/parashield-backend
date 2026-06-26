@@ -23,9 +23,10 @@ export class JwtService {
   constructor(private readonly config: ConfigService) {
     const secret = config.get<string>('JWT_SECRET');
     if (!secret) {
-      this.logger.warn('JWT_SECRET not set — using insecure default. Set JWT_SECRET in production!');
+      this.logger.error('JWT_SECRET environment variable is required');
+      throw new Error('JWT_SECRET environment variable is required');
     }
-    this.secret = secret ?? 'parashield-dev-secret-change-in-production';
+    this.secret = secret;
   }
 
   /**
