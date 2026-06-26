@@ -8,6 +8,7 @@ import {
   Operation,
   Contract,
   rpc as StellarRpc,
+  Horizon,
   xdr,
 } from '@stellar/stellar-sdk';
 
@@ -135,10 +136,9 @@ export class StellarService {
    * Used for keeper health checks to ensure the keeper has sufficient funds.
    */
   async getAccountBalance(publicKey: string): Promise<string> {
-    const account = await this.rpc.getAccount(publicKey);
-    // account.balances is available on the AccountResponse object
-    const nativeBalance = (account as any).balances?.find(
-      (b: { asset_type: string; balance: string }) => b.asset_type === 'native',
+    const account = await this.rpc.getAccount(publicKey) as Horizon.AccountResponse;
+    const nativeBalance = account.balances.find(
+      (b): b is Horizon.HorizonApi.BalanceLineNative => b.asset_type === 'native',
     );
     if (!nativeBalance) {
       this.logger.warn(`No native XLM balance found for account: ${publicKey}`);
