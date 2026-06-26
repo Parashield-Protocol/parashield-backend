@@ -46,6 +46,23 @@ export class OracleService {
     this.logger.log(`OracleReading persisted: key=${reading.key} value=${reading.value}`);
   }
 
+  /** Get all stored oracle readings ordered by submittedAt desc, with an optional row cap. */
+  async getAllReadings(limit = 100): Promise<OracleReading[]> {
+    const records = await this.prisma.oracleReading.findMany({
+      orderBy: { submittedAt: 'desc' },
+      take: Math.min(limit, 500),
+    });
+
+    return records.map((record) => ({
+      dataType:   record.dataType,
+      key:        record.key,
+      value:      record.value,
+      confidence: record.confidence,
+      timestamp:  Math.floor(record.submittedAt.getTime() / 1000),
+      source:     record.source,
+    }));
+  }
+
   /** Get the latest reading for a given oracle key from the database. */
   async getLatestReading(key: string): Promise<OracleReading | null> {
     const record = await this.prisma.oracleReading.findFirst({
