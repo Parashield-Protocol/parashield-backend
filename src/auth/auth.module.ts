@@ -2,22 +2,31 @@ import { Module, MiddlewareConsumer, NestModule, RequestMethod } from '@nestjs/c
 import { AuthMiddleware }  from './auth.middleware';
 import { AuthController }  from './auth.controller';
 import { JwtService }      from './jwt.service';
+import { JwtAuthGuard }    from './jwt-auth.guard';
+import { OperatorAuthGuard } from './operator-auth.guard';
 
 /**
  * AuthModule — provides Stellar wallet signature verification middleware and JWT issuance.
  *
- * The middleware is applied globally and attaches the verified wallet address
- * to req.wallet when auth headers are present.
+ * Auth supports two request paths:
+ *  - Wallet-header signatures for legacy clients on protected API routes.
+ *  - JWT bearer tokens for the normal login flow via JwtAuthGuard.
  */
 @Module({
   controllers: [AuthController],
-  providers:   [AuthMiddleware, JwtService],
-  exports:     [AuthMiddleware, JwtService],
+  providers:   [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],
+  exports:     [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],
 })
 export class AuthModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {
     consumer
       .apply(AuthMiddleware)
-      .forRoutes({ path: '*', method: RequestMethod.ALL });
+      .forRoutes(
+        { path: 'policies/me', method: RequestMethod.GET },
+        { path: 'policies/buy', method: RequestMethod.POST },
+        { path: 'policies/confirm', method: RequestMethod.POST },
+        { path: 'claims/submit', method: RequestMethod.POST },
+        { path: 'claims/history/:wallet', method: RequestMethod.GET },
+      );
   }
 }

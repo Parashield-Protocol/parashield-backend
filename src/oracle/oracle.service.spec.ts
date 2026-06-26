@@ -102,6 +102,13 @@ describe('OracleService.fetchRainfall', () => {
     );
   });
 
+  it('should fetch rainfall without persisting when requested by the worker', async () => {
+    const reading = await service.fetchRainfallReading(-0.0917, 34.7679, 2026, 6);
+
+    expect(reading.key).toContain('rainfall');
+    expect(mockPrismaService.oracleReading.create).not.toHaveBeenCalled();
+  });
+
   it('should filter out null values in precipitation array', async () => {
     // Return array with null values mixed in
     mockedAxios.get = jest.fn().mockResolvedValue({

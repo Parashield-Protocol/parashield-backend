@@ -1,13 +1,16 @@
-import { Controller, Get, Post, Query, Param, Body } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
   ApiParam,
   ApiQuery,
+  ApiBearerAuth,
+  ApiSecurity,
 } from '@nestjs/swagger';
 import { OracleService } from './oracle.service';
 import { OracleFeedRequestDto } from './dto/oracle-reading.dto';
+import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 
 @ApiTags('oracle')
 @Controller('oracle')
@@ -29,8 +32,12 @@ export class OracleController {
 
   /** POST /api/v1/oracle/fetch/rainfall — trigger rainfall fetch */
   @Post('fetch/rainfall')
-  @ApiOperation({ summary: 'Fetch rainfall data from Open-Meteo and persist to database' })
+  @UseGuards(OperatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiSecurity('operator-api-key')
+  @ApiOperation({ summary: 'Operator-only: fetch rainfall data from Open-Meteo and persist to database' })
   @ApiResponse({ status: 201, description: 'Returns the fetched oracle reading' })
+  @ApiResponse({ status: 401, description: 'Operator API key or admin bearer token required' })
   async fetchRainfall(@Body() dto: OracleFeedRequestDto) {
     const reading = await this.oracle.fetchRainfall(dto.lat, dto.lng, dto.year, dto.month);
     return { success: true, data: { ...reading, value: reading.value.toString() } };
@@ -38,8 +45,12 @@ export class OracleController {
 
   /** POST /api/v1/oracle/fetch/temperature — trigger temperature fetch */
   @Post('fetch/temperature')
-  @ApiOperation({ summary: 'Fetch temperature data from Open-Meteo and persist to database' })
+  @UseGuards(OperatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiSecurity('operator-api-key')
+  @ApiOperation({ summary: 'Operator-only: fetch temperature data from Open-Meteo and persist to database' })
   @ApiResponse({ status: 201, description: 'Returns the fetched oracle reading' })
+  @ApiResponse({ status: 401, description: 'Operator API key or admin bearer token required' })
   async fetchTemperature(@Body() dto: OracleFeedRequestDto) {
     const reading = await this.oracle.fetchTemperature(dto.lat, dto.lng, dto.year, dto.month);
     return { success: true, data: { ...reading, value: reading.value.toString() } };
