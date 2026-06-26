@@ -54,7 +54,7 @@ export class PolicyController {
   async getMyPolicies(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
     wallet = wallet || req.wallet;
     if (!wallet) {
-      return { success: false, error: 'wallet query param required' };
+      throw new BadRequestException('wallet query param required');
     }
     if (wallet !== req.user?.walletAddress) {
       throw new UnauthorizedException('Cannot fetch policies for another wallet');
@@ -94,12 +94,12 @@ export class PolicyController {
     const product = products.find((p) => p.id === dto.productId);
 
     if (!product) {
-      return { success: false, error: `Product ${dto.productId} not found` };
+      throw new NotFoundException(`Product ${dto.productId} not found`);
     }
 
     const validation = this.policy.validateCoverage(dto.coverageXlm, product);
     if (!validation.valid) {
-      return { success: false, error: validation.reason };
+      throw new BadRequestException(validation.reason);
     }
 
     const premiumXlm = this.policy.calculatePremium(

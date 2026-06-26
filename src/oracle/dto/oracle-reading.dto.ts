@@ -7,6 +7,8 @@ export class OracleFeedRequestDto {
     example: -0.0917,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   lat: number;
 
   @ApiProperty({
@@ -14,6 +16,8 @@ export class OracleFeedRequestDto {
     example: 34.7679,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   lng: number;
 
   @ApiProperty({
@@ -21,6 +25,8 @@ export class OracleFeedRequestDto {
     example: 2026,
   })
   @IsInt()
+  @Min(2000)
+  @Max(2100)
   year: number;
 
   @ApiProperty({

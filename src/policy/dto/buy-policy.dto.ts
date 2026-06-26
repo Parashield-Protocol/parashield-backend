@@ -17,7 +17,7 @@ export class BuyPolicyDto {
   productId: string;
 
   @ApiProperty({
-    description: 'Coverage amount in XLM',
+    description: 'Coverage amount in XLM. Note: Product-specific coverage limits are additionally enforced at the service level.',
     minimum: 10,
     maximum: 100000,
     example: 500,

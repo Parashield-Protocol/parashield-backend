@@ -21,7 +21,7 @@ export class ConfirmPolicyDto {
   @IsNotEmpty()
   productId: string;
 
-  @ApiProperty({ description: 'Coverage amount in XLM', example: 500 })
+  @ApiProperty({ description: 'Coverage amount in XLM. Note: Product-specific coverage limits are additionally enforced at the service level.', example: 500 })
   @IsNumber()
   @IsPositive()
   @Min(10)

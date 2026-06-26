@@ -86,7 +86,9 @@ export class ClaimsController {
   @ApiResponse({ status: 404, description: 'Claim not found' })
   async getClaim(@Param('id') id: string) {
     const claim = await this.claims.getClaim(id);
-    if (!claim) return { success: false, error: 'Claim not found' };
+    if (!claim) {
+      throw new NotFoundException('Claim not found');
+    }
     return { success: true, data: claim };
   }
 
