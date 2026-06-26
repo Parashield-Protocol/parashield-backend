@@ -8,6 +8,7 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  BadRequestException,
   Req,
   UseGuards,
 } from '@nestjs/common';
@@ -49,7 +50,7 @@ export class PolicyController {
   async getMyPolicies(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
     wallet = wallet || req.wallet;
     if (!wallet) {
-      return { success: false, error: 'wallet query param required' };
+      throw new BadRequestException('wallet query param required');
     }
     const policies = await this.policy.getUserPolicies(wallet);
     return { success: true, data: policies };
@@ -82,12 +83,12 @@ export class PolicyController {
     const product = products.find((p) => p.id === dto.productId);
 
     if (!product) {
-      return { success: false, error: `Product ${dto.productId} not found` };
+      throw new NotFoundException(`Product ${dto.productId} not found`);
     }
 
     const validation = this.policy.validateCoverage(dto.coverageXlm, product);
     if (!validation.valid) {
-      return { success: false, error: validation.reason };
+      throw new BadRequestException(validation.reason);
     }
 
     const premiumXlm = this.policy.calculatePremium(

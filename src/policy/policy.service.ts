@@ -96,6 +96,11 @@ export class PolicyService {
       throw new BadRequestException(`Product with ID ${dto.productId} not found or inactive`);
     }
 
+    const validation = this.validateCoverage(dto.coverageXlm, product);
+    if (!validation.valid) {
+      throw new BadRequestException(validation.reason);
+    }
+
     // Strict validation of oracleKey format based on product category
     if (product.category === 'crop' && !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(dto.oracleKey)) {
       throw new BadRequestException('oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products');
