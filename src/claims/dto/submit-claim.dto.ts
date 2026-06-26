@@ -8,9 +8,9 @@ export class SubmitClaimDto {
   })
   @IsString()
   @Matches(/^G[A-Z2-7]{55}$/, {
-    message: 'walletAddress must be a valid Stellar public key starting with G',
+    message: 'claimant must be a valid Stellar public key starting with G',
   })
-  walletAddress: string;
+  claimant: string;
 
   @ApiProperty({
     description: 'UUID of the policy to claim against',

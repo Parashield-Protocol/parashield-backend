@@ -17,6 +17,31 @@ import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 export class OracleController {
   constructor(private readonly oracle: OracleService) {}
 
+  /** GET /api/v1/oracle/reading?key=... — get the latest reading for an oracle key (query param) */
+  @Get('reading')
+  @ApiOperation({ summary: 'Get the latest oracle reading for a given key (query param)' })
+  @ApiQuery({ name: 'key', required: true, description: 'Oracle data key (e.g. rainfall:-0.0917,34.7679:2026-06)' })
+  @ApiResponse({ status: 200, description: 'Latest oracle reading or null if not found' })
+  async getReadingByKey(@Query('key') key: string) {
+    const decoded = decodeURIComponent(key ?? '');
+    const reading = await this.oracle.getLatestReading(decoded);
+    if (!reading) {
+      return { success: false, error: `No reading found for key: ${decoded}` };
+    }
+    return { success: true, data: { ...reading, value: reading.value.toString() } };
+  }
+
+  /** GET /api/v1/oracle/readings?limit=... — list all stored oracle readings */
+  @Get('readings')
+  @ApiOperation({ summary: 'List all stored oracle readings' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Max rows to return (default 100, max 500)' })
+  @ApiResponse({ status: 200, description: 'Array of oracle readings ordered by submittedAt desc' })
+  async getAllReadings(@Query('limit') limit?: string) {
+    const cap = limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100;
+    const readings = await this.oracle.getAllReadings(cap);
+    return { success: true, data: readings.map((r) => ({ ...r, value: r.value.toString() })) };
+  }
+
   /** GET /api/v1/oracle/latest/:key — get the latest reading for an oracle key */
   @Get('latest/:key')
   @ApiOperation({ summary: 'Get the latest oracle reading for a given key' })
