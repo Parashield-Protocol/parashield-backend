@@ -82,11 +82,15 @@ export class OracleService {
     );
     const totalMm  = readings.reduce((a, b) => a + b, 0);
 
+    const expectedDays = endDate.getDate();
+    const coverage     = readings.length / expectedDays;
+    const confidence   = Math.round(coverage * 95);
+
     const oracleReading: OracleReading = {
       dataType:   'weather',
       key:        `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, '0')}`,
       value:      BigInt(Math.round(totalMm * 1e7)),
-      confidence: 90,
+      confidence,
       timestamp:  Math.floor(Date.now() / 1000),
       source:     'open-meteo',
     };
@@ -111,11 +115,15 @@ export class OracleService {
       ? temps.reduce((a, b) => a + b, 0) / temps.length
       : 0;
 
+    const expectedDays = endDate.getDate();
+    const coverage     = temps.length / expectedDays;
+    const confidence   = Math.round(coverage * 95);
+
     const oracleReading: OracleReading = {
       dataType:   'weather',
       key:        `temperature:${lat},${lng}:${year}-${String(month).padStart(2, '0')}`,
       value:      BigInt(Math.round(avgTemp * 1e7)),
-      confidence: 90,
+      confidence,
       timestamp:  Math.floor(Date.now() / 1000),
       source:     'open-meteo',
     };
