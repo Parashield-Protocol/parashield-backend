@@ -4,6 +4,8 @@ import * as jwt from 'jsonwebtoken';
 
 export interface JwtPayload {
   walletAddress: string;
+  role?: string;
+  admin?: boolean;
   iat?: number;
   exp?: number;
 }
@@ -47,7 +49,11 @@ export class JwtService {
   verify(token: string): JwtPayload {
     try {
       const decoded = jwt.verify(token, this.secret) as JwtPayload;
-      return { walletAddress: decoded.walletAddress };
+      return {
+        walletAddress: decoded.walletAddress,
+        role: decoded.role,
+        admin: decoded.admin,
+      };
     } catch (err) {
       if (err instanceof jwt.TokenExpiredError) {
         throw new UnauthorizedException('Token has expired');

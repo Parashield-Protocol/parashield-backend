@@ -11,6 +11,8 @@ import {
   UseGuards,
   Req,
   UnauthorizedException,
+  Req,
+  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -25,6 +27,7 @@ import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { Request } from 'express';
+import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('policy')
 @Controller()
@@ -48,6 +51,8 @@ export class PolicyController {
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
   @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
   async getMyPolicies(@Req() req: Request & { user?: any }, @Query('wallet') wallet: string) {
+  async getMyPolicies(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
+    wallet = wallet || req.wallet;
     if (!wallet) {
       return { success: false, error: 'wallet query param required' };
     }
@@ -74,6 +79,7 @@ export class PolicyController {
 
   /** POST /api/v1/policies/buy — calculate premium and return quote */
   @Post('policies/buy')
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -119,6 +125,7 @@ export class PolicyController {
 
   /** POST /api/v1/policies/confirm — submit signed XDR to complete policy purchase */
   @Post('policies/confirm')
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Submit signed XDR to complete policy purchase on-chain' })

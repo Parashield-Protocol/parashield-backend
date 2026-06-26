@@ -25,6 +25,17 @@ Supporting infrastructure:
 
 ---
 
+## Authentication
+
+ParaShield supports two authentication schemes:
+
+- **JWT bearer auth**: the primary frontend flow. Clients request `/api/v1/auth/challenge`, sign the nonce, call `/api/v1/auth/login`, then send `Authorization: Bearer <token>`. `JwtAuthGuard` verifies the token and sets `req.wallet` from the token payload.
+- **Wallet-header auth**: a legacy request-signature flow for protected API routes. Clients send `x-wallet-address`, `x-wallet-message`, and `x-wallet-signature`; `AuthMiddleware` verifies the Stellar signature and sets `req.wallet`.
+
+Operator-only oracle fetch endpoints require either `x-api-key: <ORACLE_OPERATOR_API_KEY>` or an admin JWT. Public endpoints such as `/api/v1/products`, `/api/v1/oracle/latest/:key`, `/api/v1/health`, and `/docs` do not run wallet-header middleware.
+
+---
+
 ## API Endpoints
 
 All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
@@ -52,8 +63,8 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | Method | Route | Description |
 |--------|-------|-------------|
 | `GET` | `/api/v1/oracle/latest/:key` | Get the latest reading for an oracle key |
-| `POST` | `/api/v1/oracle/fetch/rainfall` | Fetch rainfall data from Open-Meteo |
-| `POST` | `/api/v1/oracle/fetch/temperature` | Fetch temperature data from Open-Meteo |
+| `POST` | `/api/v1/oracle/fetch/rainfall` | Operator-only: fetch rainfall data from Open-Meteo |
+| `POST` | `/api/v1/oracle/fetch/temperature` | Operator-only: fetch temperature data from Open-Meteo |
 | `GET` | `/api/v1/oracle/rainfall` | Legacy: fetch rainfall via query params |
 | `GET` | `/api/v1/oracle/flight` | Fetch flight delay from AviationStack |
 
