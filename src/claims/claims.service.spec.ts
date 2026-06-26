@@ -145,6 +145,42 @@ describe('ClaimsService', () => {
         }),
       );
     });
+
+    it('should throw NotFoundException when policy does not exist', async () => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(null);
+
+      await expect(service.submitClaim(CLAIMANT, POLICY_ID)).rejects.toThrow(NotFoundException);
+    });
+
+    it('should throw ConflictException when policy is not ACTIVE', async () => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue({ ...ACTIVE_POLICY, status: 'EXPIRED' });
+
+      await expect(service.submitClaim(CLAIMANT, POLICY_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('should use policy coverageXlm as the claim coverageAmount', async () => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.create.mockResolvedValue({
+        id:             'new-claim-id',
+        policyId:       POLICY_ID,
+        claimant:       CLAIMANT,
+        coverageAmount: ACTIVE_POLICY.coverageXlm,
+        status:         'PENDING',
+      });
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      expect(mockPrismaService.claim.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            coverageAmount: ACTIVE_POLICY.coverageXlm,
+          }),
+        }),
+      );
+    });
   });
 
   describe('autoProcess', () => {
