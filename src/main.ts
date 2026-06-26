@@ -4,7 +4,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
-
+import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 
 async function bootstrap() {
@@ -16,6 +16,9 @@ async function bootstrap() {
     console.error('Fatal Error: JWT_SECRET environment variable is required');
     process.exit(1);
   }
+
+  // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
+  app.use(helmet());
 
   // Global exception filter
   app.useGlobalFilters(new GlobalExceptionFilter());

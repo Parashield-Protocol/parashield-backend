@@ -49,6 +49,7 @@ model Claim {
   policy         Policy     @relation(fields: [policyId], references: [id])
   claimant       String
   coverageAmount Decimal    @db.Decimal(20, 7)
+  payoutAmount   Decimal?   @db.Decimal(20, 7)
   triggerMet     Boolean    @default(false)
   status         ClaimStatus @default(PENDING)
   txHash         String?
