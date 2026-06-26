@@ -2,6 +2,7 @@ import { Module, MiddlewareConsumer, NestModule, RequestMethod } from '@nestjs/c
 import { AuthMiddleware }  from './auth.middleware';
 import { AuthController }  from './auth.controller';
 import { JwtService }      from './jwt.service';
+import { JwtAuthGuard }    from './jwt-auth.guard';
 
 /**
  * AuthModule — provides Stellar wallet signature verification middleware and JWT issuance.
@@ -11,8 +12,8 @@ import { JwtService }      from './jwt.service';
  */
 @Module({
   controllers: [AuthController],
-  providers:   [AuthMiddleware, JwtService],
-  exports:     [AuthMiddleware, JwtService],
+  providers:   [AuthMiddleware, JwtService, JwtAuthGuard],
+  exports:     [AuthMiddleware, JwtService, JwtAuthGuard],
 })
 export class AuthModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

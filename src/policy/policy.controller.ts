@@ -8,6 +8,9 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  UseGuards,
+  Req,
+  UnauthorizedException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -20,6 +23,8 @@ import {
 import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { Request } from 'express';
 
 @ApiTags('policy')
 @Controller()
@@ -37,13 +42,17 @@ export class PolicyController {
 
   /** GET /api/v1/policies/me?wallet=<address> — get policies for a wallet */
   @Get('policies/me')
+  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get all policies for a wallet address' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
   @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
-  async getMyPolicies(@Query('wallet') wallet: string) {
+  async getMyPolicies(@Req() req: Request & { user?: any }, @Query('wallet') wallet: string) {
     if (!wallet) {
       return { success: false, error: 'wallet query param required' };
+    }
+    if (wallet !== req.user?.walletAddress) {
+      throw new UnauthorizedException('Cannot fetch policies for another wallet');
     }
     const policies = await this.policy.getUserPolicies(wallet);
     return { success: true, data: policies };
@@ -66,11 +75,15 @@ export class PolicyController {
   /** POST /api/v1/policies/buy — calculate premium and return quote */
   @Post('policies/buy')
   @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get premium quote for requested coverage' })
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
-  async buyPolicy(@Body() dto: BuyPolicyDto) {
+  async buyPolicy(@Req() req: Request & { user?: any }, @Body() dto: BuyPolicyDto) {
+    if (dto.walletAddress !== req.user?.walletAddress) {
+      throw new UnauthorizedException('Wallet address does not match authenticated user');
+    }
     const products = await this.policy.getActiveProducts();
     const product = products.find((p) => p.id === dto.productId);
 
