@@ -48,6 +48,14 @@ export class ClaimsWorker {
           `auto_process: policyId=${policy.id} holder=${policy.policyholder} endTime=${policy.endTime.toISOString()}`,
         );
         const result = await this.claims.autoProcess(policy.id);
+
+        if (result !== 'Paid') {
+          await this.prisma.policy.update({
+            where: { id: policy.id },
+            data:  { status: 'EXPIRED' },
+          });
+        }
+
         return { policyId: policy.id, result };
       }),
     );
