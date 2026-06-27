@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { TransactionBuilder, Transaction } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Transaction, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
@@ -134,29 +134,57 @@ export class PolicyService {
 
   /**
    * Submit a signed XDR transaction to the network and persist the policy.
+   *
+   * Flow:
+   *   1. Deserialize the frontend-signed XDR
+   *   2. Simulate → assembleTransaction → sign (keeper) → sendTransaction
+   *   3. Poll getTransaction until SUCCESS or FAILED
+   *   4. Create policy record only on SUCCESS
+   *
    * Returns the on-chain policyId and txHash on success.
    */
   async confirmAndCreatePolicy(dto: ConfirmPolicyDto): Promise<{ policyId: string; txHash: string }> {
     const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
-    const sendResult = await this.stellar.rpcServer.sendTransaction(tx);
+
+    const sendResult = await this.stellar.simulateAssembleAndSend(tx);
     if (sendResult.status === 'ERROR') {
       throw new Error(`On-chain submission failed: ${JSON.stringify(sendResult.errorResult)}`);
     }
+
+    this.logger.log(`Transaction submitted: txHash=${sendResult.hash} status=${sendResult.status}`);
+
+    if (sendResult.status === 'TRY_AGAIN_LATER' || sendResult.status === 'PENDING') {
+      const txResult = await this.stellar.waitForTransaction(sendResult.hash);
+      if (!txResult || txResult.status !== 'SUCCESS') {
+        throw new BadRequestException(`Transaction ${sendResult.hash} did not confirm on-chain`);
+      }
+      this.logger.log(`Transaction confirmed on-chain: txHash=${sendResult.hash}`);
+    }
+
     const policy = await this.createPolicy(dto, sendResult.hash);
-    this.logger.log(`Policy confirmed on-chain: id=${policy.id} txHash=${sendResult.hash}`);
+    this.logger.log(`Policy created: id=${policy.id} txHash=${sendResult.hash}`);
     return { policyId: policy.id, txHash: sendResult.hash };
   }
 
   /**
-   * Find all policies for a policyholder from the local database.
+   * Find policies for a policyholder from the local database with pagination.
    */
-  async findByPolicyholder(address: string) {
-    const policies = await this.prisma.policy.findMany({
-      where: { policyholder: address },
-      orderBy: { createdAt: 'desc' },
-    });
-    this.logger.log(`findByPolicyholder: ${address} → ${policies.length} policies`);
-    return policies;
+  async findByPolicyholder(address: string, page: number = 1, limit: number = 20) {
+    const take = Math.min(limit, 100);
+    const skip = (page - 1) * take;
+
+    const [policies, total] = await Promise.all([
+      this.prisma.policy.findMany({
+        where: { policyholder: address },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.policy.count({ where: { policyholder: address } }),
+    ]);
+
+    this.logger.log(`findByPolicyholder: ${address} → ${policies.length}/${total} policies (page ${page})`);
+    return { policies, total };
   }
 
   async getActiveProducts(): Promise<ProductSummary[]> {
@@ -200,10 +228,15 @@ export class PolicyService {
     return null;
   }
 
-  async getUserPolicies(walletAddress: string): Promise<PolicySummary[]> {
-    this.logger.log(`get_user_policies: ${walletAddress}`);
-    const dbPolicies = await this.findByPolicyholder(walletAddress);
-    return dbPolicies.map((p) => ({
+  async getUserPolicies(
+    walletAddress: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: PolicySummary[]; total: number; page: number; limit: number }> {
+    this.logger.log(`get_user_policies: ${walletAddress} page=${page} limit=${limit}`);
+    const clampedLimit = Math.min(limit, 100);
+    const { policies: dbPolicies, total } = await this.findByPolicyholder(walletAddress, page, clampedLimit);
+    const data = dbPolicies.map((p) => ({
       id:           p.id,
       productId:    p.productId,
       policyholder: p.policyholder,
@@ -214,5 +247,6 @@ export class PolicyService {
       endTime:      Math.floor(p.endTime.getTime() / 1000),
       status:       p.status,
     }));
+    return { data, total, page, limit: clampedLimit };
   }
 }
