@@ -16,6 +16,7 @@ describe('PolicyService.calculatePremium', () => {
       create:     jest.fn(),
       findMany:   jest.fn(),
       findUnique: jest.fn(),
+      count:      jest.fn(),
     },
     product: {
       findMany:   jest.fn(),
