@@ -48,6 +48,18 @@ export class JwtService {
   }
 
   /**
+   * Sign a JWT for the given wallet address with explicit role and admin flag.
+   * Useful for issuing tokens to privileged users (e.g. operators, admins).
+   * Token expires in 7 days.
+   */
+  signWithRole(walletAddress: string, role: string, admin = false): string {
+    const payload: JwtPayload = { walletAddress, role, admin };
+    const token = jwt.sign(payload, this.secret, { expiresIn: this.expiresIn });
+    this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
+    return token;
+  }
+
+  /**
    * Verify and decode a JWT.
    * Throws UnauthorizedException if the token is invalid or expired.
    */

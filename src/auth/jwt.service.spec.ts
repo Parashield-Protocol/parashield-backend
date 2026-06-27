@@ -47,5 +47,23 @@ describe('JwtService', () => {
         service.verify('invalid.token.value');
       }).toThrow(UnauthorizedException);
     });
+
+    it('signWithRole sets role and admin in the token payload', () => {
+      const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+
+      // Default admin=false
+      const token = service.signWithRole(walletAddress, 'operator');
+      const decoded = service.verify(token);
+      expect(decoded.walletAddress).toBe(walletAddress);
+      expect(decoded.role).toBe('operator');
+      expect(decoded.admin).toBe(false);
+
+      // Explicit admin=true
+      const adminToken = service.signWithRole(walletAddress, 'admin', true);
+      const adminDecoded = service.verify(adminToken);
+      expect(adminDecoded.walletAddress).toBe(walletAddress);
+      expect(adminDecoded.role).toBe('admin');
+      expect(adminDecoded.admin).toBe(true);
+    });
   });
 });
