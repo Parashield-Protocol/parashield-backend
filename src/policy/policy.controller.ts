@@ -8,6 +8,7 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  ForbiddenException,
   BadRequestException,
   UseGuards,
   Req,
@@ -56,12 +57,13 @@ export class PolicyController {
     @Query('limit') limit: string = '20',
     @Req() req: AuthenticatedRequest,
   ) {
-    const targetWallet = wallet || req.wallet;
-    if (!targetWallet) {
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
       throw new BadRequestException('wallet query param required');
     }
-    if (req.wallet && req.wallet !== targetWallet) {
-      throw new UnauthorizedException('Cannot fetch policies for another wallet');
+    const targetWallet = wallet || authedWallet;
+    if (targetWallet !== authedWallet) {
+      throw new ForbiddenException('Cannot fetch policies for another wallet');
     }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
@@ -69,16 +71,23 @@ export class PolicyController {
     return { success: true, ...result };
   }
 
-  /** GET /api/v1/policies/:id — get a single policy by ID */
+  /** GET /api/v1/policies/:id — get a single policy by ID (owner only) */
   @Get('policies/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Get a single policy by ID' })
   @ApiParam({ name: 'id', description: 'Policy UUID' })
   @ApiResponse({ status: 200, description: 'Returns the policy details' })
+  @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
   @ApiResponse({ status: 404, description: 'Policy not found' })
-  async getPolicy(@Param('id') id: string) {
+  async getPolicy(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const policyData = await this.policy.getPolicy(id);
     if (!policyData) {
       throw new NotFoundException(`Policy ${id} not found`);
+    }
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (policyData.policyholder !== authedWallet) {
+      throw new ForbiddenException('Policy belongs to a different wallet');
     }
     return { success: true, data: policyData };
   }
@@ -92,8 +101,9 @@ export class PolicyController {
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
   async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
-    if (dto.walletAddress !== req.wallet) {
-      throw new UnauthorizedException('Wallet address does not match authenticated user');
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (dto.walletAddress !== authedWallet) {
+      throw new ForbiddenException('Wallet address does not match authenticated user');
     }
     const products = await this.policy.getActiveProducts();
     const product = products.find((p) => p.id === dto.productId);
@@ -135,7 +145,11 @@ export class PolicyController {
   @ApiOperation({ summary: 'Submit signed XDR to complete policy purchase on-chain' })
   @ApiResponse({ status: 200, description: 'Policy created on-chain and persisted; returns policyId and txHash' })
   @ApiResponse({ status: 400, description: 'Invalid request body or on-chain submission failed' })
-  async confirmPolicy(@Body() dto: ConfirmPolicyDto) {
+  async confirmPolicy(@Body() dto: ConfirmPolicyDto, @Req() req: AuthenticatedRequest) {
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (dto.walletAddress !== authedWallet) {
+      throw new ForbiddenException('Wallet address does not match authenticated user');
+    }
     const result = await this.policy.confirmAndCreatePolicy(dto);
     return { success: true, data: result };
   }

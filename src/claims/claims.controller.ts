@@ -24,10 +24,17 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
   @ApiResponse({ status: 201, description: 'Claim submitted successfully' })
+  @ApiResponse({ status: 403, description: 'Claimant does not match authenticated wallet' })
   @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
   async submitClaim(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
-    const walletAddress = req.wallet || dto.claimant;
-    const claimId = await this.claims.submitClaim(walletAddress, dto.policyId);
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
+    }
+    if (dto.claimant && dto.claimant !== authedWallet) {
+      throw new ForbiddenException('Claimant does not match authenticated wallet');
+    }
+    const claimId = await this.claims.submitClaim(authedWallet, dto.policyId);
     return { success: true, data: { claimId } };
   }
 
@@ -47,11 +54,12 @@ export class ClaimsController {
     @Query('limit') limit: string,
     @Req() req: AuthenticatedRequest,
   ) {
-    const targetWallet = wallet || req.wallet;
-    if (!targetWallet) {
-      throw new UnauthorizedException('Wallet address is required');
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
     }
-    if (req.wallet && req.wallet !== targetWallet) {
+    const targetWallet = wallet || authedWallet;
+    if (targetWallet !== authedWallet) {
       throw new ForbiddenException('Wallet address does not match authenticated user');
     }
     const result = await this.claims.getClaimsByWallet(
@@ -89,7 +97,8 @@ export class ClaimsController {
     if (!claim) {
       throw new NotFoundException('Claim not found');
     }
-    if (claim.claimant !== req.wallet) {
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (claim.claimant !== authedWallet) {
       throw new ForbiddenException('Claim belongs to a different wallet');
     }
     return { success: true, data: claim };
@@ -110,12 +119,13 @@ export class ClaimsController {
     @Query('limit') limit: string,
     @Req() req: AuthenticatedRequest,
   ) {
-    const targetWallet = wallet || req.wallet;
-    if (!targetWallet) {
-      throw new UnauthorizedException('Wallet address is required');
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
     }
-    if (req.wallet && req.wallet !== targetWallet) {
-      throw new UnauthorizedException('Cannot read claims for another wallet');
+    const targetWallet = wallet || authedWallet;
+    if (targetWallet !== authedWallet) {
+      throw new ForbiddenException('Cannot read claims for another wallet');
     }
     const result = await this.claims.getClaimsByWallet(
       targetWallet,
