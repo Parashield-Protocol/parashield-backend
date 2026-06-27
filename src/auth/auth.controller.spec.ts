@@ -10,6 +10,7 @@ describe('AuthController', () => {
 
   const mockJwtService = {
     sign: jest.fn().mockReturnValue('mock-jwt-token'),
+    expiresIn: '7d',
   };
 
   const mockPrismaService = {
@@ -88,6 +89,7 @@ describe('AuthController', () => {
       expect(result.success).toBe(true);
       expect(result.data.token).toBe('mock-jwt-token');
       expect(result.data.walletAddress).toBe(walletAddress);
+      expect(result.data.expiresIn).toBe(mockJwtService.expiresIn);
       expect(mockPrismaService.authChallenge.delete).toHaveBeenCalledWith({
         where: { walletAddress },
       });
@@ -162,6 +164,8 @@ describe('AuthController', () => {
           message: nonce,
         }),
       ).rejects.toThrow(UnauthorizedException);
+
+      expect(mockPrismaService.authChallenge.delete).not.toHaveBeenCalled();
     });
   });
 });

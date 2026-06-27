@@ -21,6 +21,7 @@ export interface JwtPayload {
 export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
+  private readonly tokenExpiry = '7d';
 
   constructor(private readonly config: ConfigService) {
     const secret = config.get<string>('JWT_SECRET');
@@ -31,13 +32,17 @@ export class JwtService {
     this.secret = secret;
   }
 
+  get expiresIn(): string {
+    return this.tokenExpiry;
+  }
+
   /**
    * Sign a JWT for the given wallet address.
    * Token expires in 7 days.
    */
   sign(walletAddress: string): string {
     const payload: JwtPayload = { walletAddress };
-    const token = jwt.sign(payload, this.secret, { expiresIn: '7d' });
+    const token = jwt.sign(payload, this.secret, { expiresIn: this.expiresIn });
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
     return token;
   }
