@@ -7,6 +7,11 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 
+// Global serialization patch for BigInt fields (PRISMA compatibility with JSON.stringify)
+(BigInt.prototype as any).toJSON = function () {
+  return this.toString();
+};
+
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
