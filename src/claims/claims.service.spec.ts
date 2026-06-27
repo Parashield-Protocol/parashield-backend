@@ -188,6 +188,102 @@ describe('ClaimsService', () => {
     });
   });
 
+  describe('submitClaim — Soroban on-chain submission', () => {
+    const CREATED_CLAIM = {
+      id:       'new-claim-id',
+      policyId: POLICY_ID,
+      claimant: CLAIMANT,
+      status:   'PENDING',
+    };
+
+    beforeEach(() => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.create.mockResolvedValue(CREATED_CLAIM);
+      mockPrismaService.claim.update.mockResolvedValue({});
+    });
+
+    it('should invoke submit_claim on the Soroban contract after creating the DB record', async () => {
+      mockStellarService.invokeContract.mockResolvedValue('submit-tx-hash');
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      expect(mockStellarService.invokeContract).toHaveBeenCalledWith(
+        expect.any(String),
+        'submit_claim',
+        expect.any(Array),
+      );
+    });
+
+    it('should update claim status to PROCESSING with txHash on successful on-chain submission', async () => {
+      mockStellarService.invokeContract.mockResolvedValue('submit-tx-hash');
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'new-claim-id' },
+          data:  expect.objectContaining({ status: 'PROCESSING', txHash: 'submit-tx-hash' }),
+        }),
+      );
+    });
+
+    it('should update claim status to REJECTED when on-chain submission throws', async () => {
+      mockStellarService.invokeContract.mockRejectedValue(new Error('RPC unavailable'));
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'new-claim-id' },
+          data:  expect.objectContaining({ status: 'REJECTED' }),
+        }),
+      );
+    });
+
+    it('should NOT leave claim in PENDING status when on-chain submission fails', async () => {
+      mockStellarService.invokeContract.mockRejectedValue(new Error('Soroban RPC down'));
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      const updateCalls = mockPrismaService.claim.update.mock.calls;
+      const pendingUpdate = updateCalls.find((call: any[]) => call[0]?.data?.status === 'PENDING');
+      expect(pendingUpdate).toBeUndefined();
+    });
+
+    it('should return the claim ID in both success and failure cases', async () => {
+      mockStellarService.invokeContract.mockResolvedValue('tx-hash');
+      const successId = await service.submitClaim(CLAIMANT, POLICY_ID);
+      expect(successId).toBe('new-claim-id');
+
+      jest.clearAllMocks();
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.create.mockResolvedValue(CREATED_CLAIM);
+      mockPrismaService.claim.update.mockResolvedValue({});
+      mockStellarService.invokeContract.mockRejectedValue(new Error('fail'));
+
+      const failId = await service.submitClaim(CLAIMANT, POLICY_ID);
+      expect(failId).toBe('new-claim-id');
+    });
+
+    it('should include PENDING in the duplicate claim guard', async () => {
+      mockStellarService.invokeContract.mockResolvedValue('tx-hash');
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      expect(mockPrismaService.claim.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            status: expect.objectContaining({
+              in: expect.arrayContaining(['PAID', 'PROCESSING', 'PENDING']),
+            }),
+          }),
+        }),
+      );
+    });
+  });
+
   describe('autoProcess', () => {
     it('should return PolicyNotActive when policy does not exist in DB', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(null);
