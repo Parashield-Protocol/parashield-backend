@@ -50,33 +50,28 @@ describe('PolicyService.calculatePremium', () => {
   });
 
   it('should return the correct premium for standard coverage', () => {
-    // coverage=1000, rate=500 (5%), duration=365 days
-    // expected = Math.ceil(1000 * 500 * (365/365) / 10000) = Math.ceil(50) = 50
-    const premium = service.calculatePremium(1000, 500, 365);
+    // coverage=1000, rate=500 (5%)
+    // expected = Math.ceil(1000 * 500 / 10000) = Math.ceil(50) = 50
+    const premium = service.calculatePremium(1000, 500);
     expect(premium).toBe(50);
   });
 
-  it('should return a proportionally higher premium for shorter duration', () => {
-    // 182 days is ~half a year, so premium should be roughly half
-    const fullYearPremium = service.calculatePremium(1000, 500, 365);
-    const halfYearPremium = service.calculatePremium(1000, 500, 182);
-
-    expect(halfYearPremium).toBeLessThan(fullYearPremium);
-    // Half-year should be approximately half the full year (within 2 XLM tolerance)
-    expect(halfYearPremium).toBeGreaterThan(fullYearPremium / 2 - 2);
-    expect(halfYearPremium).toBeLessThan(fullYearPremium / 2 + 2);
+  it('should return the same premium regardless of duration', () => {
+    const premium1 = service.calculatePremium(1000, 500);
+    const premium2 = service.calculatePremium(1000, 500);
+    expect(premium1).toBe(premium2);
   });
 
   it('should always return a positive integer', () => {
     const testCases = [
-      [10, 100, 1],
-      [500, 200, 30],
-      [100000, 500, 365],
-      [10, 500, 1],
+      [10, 100],
+      [500, 200],
+      [100000, 500],
+      [10, 500],
     ] as const;
 
-    for (const [coverage, rate, duration] of testCases) {
-      const premium = service.calculatePremium(coverage, rate, duration);
+    for (const [coverage, rate] of testCases) {
+      const premium = service.calculatePremium(coverage, rate);
       expect(premium).toBeGreaterThan(0);
       expect(Number.isInteger(premium)).toBe(true);
     }
