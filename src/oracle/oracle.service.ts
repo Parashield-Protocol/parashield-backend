@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
@@ -34,6 +34,10 @@ export class OracleService {
 
   /** Persist an OracleReading to the database. */
   async persistReading(reading: OracleReading): Promise<void> {
+    if (reading.confidence === 0 || reading.source === 'mock') {
+      this.logger.warn(`Skipping persistence of mock/confidence-0 reading for key: ${reading.key}`);
+      return;
+    }
     await this.prisma.oracleReading.create({
       data: {
         dataType:   reading.dataType,
@@ -165,15 +169,8 @@ export class OracleService {
   async fetchFlightDelayReading(flightNumber: string, date: string): Promise<OracleReading> {
     const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
     if (!apiKey) {
-      this.logger.warn('AVIATIONSTACK_API_KEY not set — returning mock flight data');
-      return {
-        dataType:   'flight',
-        key:        `flight:${flightNumber}:${date}`,
-        value:      0n,
-        confidence: 0,
-        timestamp:  Math.floor(Date.now() / 1000),
-        source:     'mock',
-      };
+      this.logger.warn('AVIATIONSTACK_API_KEY not set — flight delay oracle query failed');
+      throw new ServiceUnavailableException('AviationStack API is not configured.');
     }
     const url = `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${flightNumber}&flight_date=${date}`;
     const res = await axios.get<{ data: Array<{ departure: { delay: number } }> }>(url, { timeout: 10_000 });

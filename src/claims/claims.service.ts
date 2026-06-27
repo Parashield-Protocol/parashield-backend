@@ -1,10 +1,11 @@
-import { Injectable, Logger, ConflictException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, NotFoundException, BadGatewayException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { transition } from '../policy/policy-status.machine';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'PolicyNotActive';
 
@@ -103,9 +104,15 @@ export class ClaimsService {
     }
 
     // Trigger met — initiate Soroban payout via Claims Processor contract
+    const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
+    if (!contractId || !/^C[A-Z2-7]{55}$/.test(contractId)) {
+      throw new BadGatewayException(
+        'CLAIMS_PROCESSOR_CONTRACT not configured or invalid format. Expected a Stellar contract ID (C...).',
+      );
+    }
+
     let txHash: string | undefined;
     try {
-      const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
       txHash = await this.stellar.invokeContract(
         contractId,
         'process_claim',
@@ -123,7 +130,7 @@ export class ClaimsService {
 
     await this.prisma.policy.update({
       where: { id: policyId },
-      data:  { status: 'CLAIMED' },
+      data:  { status: transition(policy.status, 'CLAIMED') as any },
     });
 
     return 'Paid';
@@ -171,14 +178,19 @@ export class ClaimsService {
     return claim.id;
   }
 
-  async getClaimsByWallet(walletAddress: string): Promise<ClaimSummary[]> {
-    this.logger.log(`get_claims_by_wallet: ${walletAddress}`);
-    const claims = await this.prisma.claim.findMany({
-      where: { claimant: walletAddress },
-      orderBy: { submittedAt: 'desc' },
-    });
+  async getClaimsByWallet(walletAddress: string, page = 1, limit = 20): Promise<{ claims: ClaimSummary[]; total: number }> {
+    this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${page} limit=${limit}`);
+    const [claims, total] = await this.prisma.$transaction([
+      this.prisma.claim.findMany({
+        where: { claimant: walletAddress },
+        orderBy: { submittedAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+      this.prisma.claim.count({ where: { claimant: walletAddress } }),
+    ]);
 
-    return claims.map((claim) => ({
+    const summaries = claims.map((claim) => ({
       id:             claim.id,
       policyId:       claim.policyId,
       claimant:       claim.claimant,
@@ -191,6 +203,11 @@ export class ClaimsService {
         ? Math.floor(claim.processedAt.getTime() / 1000)
         : null,
     }));
+
+    return {
+      claims: summaries,
+      total,
+    };
   }
 
   async getClaim(claimId: string): Promise<ClaimSummary | null> {

@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { transition } from '../policy/policy-status.machine';
 
 /**
  * ClaimsWorker — periodically scans for expiring policies and triggers auto-processing.
@@ -26,13 +27,13 @@ export class ClaimsWorker {
     const oneHourOut = new Date(now.getTime() + 60 * 60 * 1000);
 
     // Find ACTIVE policies expiring within the next hour
-    const expiringPolicies = await this.prisma.policy.findMany({
-      where: {
-        status:  'ACTIVE',
-        endTime: { lte: oneHourOut },
-      },
-      select: { id: true, policyholder: true, endTime: true },
-    });
+     const expiringPolicies = await this.prisma.policy.findMany({
+       where: {
+         status:  'ACTIVE',
+         endTime: { lte: oneHourOut },
+       },
+       select: { id: true, policyholder: true, endTime: true, status: true },
+     });
 
     if (expiringPolicies.length === 0) {
       this.logger.log('No expiring policies found');
@@ -49,12 +50,12 @@ export class ClaimsWorker {
         );
         const result = await this.claims.autoProcess(policy.id);
 
-        if (result !== 'Paid') {
-          await this.prisma.policy.update({
-            where: { id: policy.id },
-            data:  { status: 'EXPIRED' },
-          });
-        }
+         if (result !== 'Paid') {
+           await this.prisma.policy.update({
+             where: { id: policy.id },
+             data:  { status: transition(policy.status, 'EXPIRED') as any },
+           });
+         }
 
         return { policyId: policy.id, result };
       }),

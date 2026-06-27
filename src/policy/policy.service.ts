@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { TransactionBuilder, Transaction } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Transaction, Address, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
+import { ConfigService } from '@nestjs/config';
 
 export interface ProductSummary {
   id:           string;
@@ -48,15 +49,19 @@ export class PolicyService {
   constructor(
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
    * Calculate the premium for a policy in XLM (whole number, rounded up).
    * Uses basis points: premiumRate 500 = 5%, 100 = 1%.
-   * Formula: coverage * rate * (duration / 365) / 10000
+   *
+   * This formula matches the PolicyEngine contract's fixed-term premium calculation
+   * where premium is based on coverage and rate regardless of duration.
+   * Formula: Math.ceil(coverage * rate / 10000)
    */
-  calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
-    return Math.ceil(coverageXlm * premiumRate * (durationDays / 365) / 10000);
+  calculatePremium(coverageXlm: number, premiumRate: number): number {
+    return Math.ceil(coverageXlm * premiumRate / 10000);
   }
 
   /**
@@ -109,7 +114,7 @@ export class PolicyService {
       throw new BadRequestException('oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products');
     }
 
-    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
+    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate);
 
     const policy = await this.prisma.policy.create({
       data: {
@@ -131,29 +136,110 @@ export class PolicyService {
 
   /**
    * Submit a signed XDR transaction to the network and persist the policy.
+   *
+   * Flow:
+   *   1. Deserialize the frontend-signed XDR
+   *   2. Simulate → assembleTransaction → sign (keeper) → sendTransaction
+   *   3. Poll getTransaction until SUCCESS or FAILED
+   *   4. Create policy record only on SUCCESS
+   *
    * Returns the on-chain policyId and txHash on success.
    */
   async confirmAndCreatePolicy(dto: ConfirmPolicyDto): Promise<{ policyId: string; txHash: string }> {
     const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
-    const sendResult = await this.stellar.rpcServer.sendTransaction(tx);
+
+    // Validate transaction source account matches the wallet in the request
+    if (tx.source !== dto.walletAddress) {
+      throw new BadRequestException(
+        `Transaction source account (${tx.source}) does not match the wallet address in the request (${dto.walletAddress})`
+      );
+    }
+
+    // Validate there is at least one operation
+    if (!tx.operations || tx.operations.length === 0) {
+      throw new BadRequestException('Transaction must contain at least one operation');
+    }
+
+    const firstOp = tx.operations[0];
+
+    // Validate it is invokeContractFunction (invokeHostFunction in SDK)
+    if (firstOp.type !== 'invokeHostFunction') {
+      throw new BadRequestException(
+        `Expected first operation type to be invokeHostFunction, got ${firstOp.type}`
+      );
+    }
+
+    const hostFunc = (firstOp as any).func;
+    if (!hostFunc || hostFunc.switch().name !== 'hostFunctionTypeInvokeContract') {
+      throw new BadRequestException('Transaction does not invoke a contract function');
+    }
+
+    const invokeContract = hostFunc.invokeContract();
+    
+    let contractIdStr: string;
+    try {
+      contractIdStr = Address.fromScAddress(invokeContract.contractAddress()).toString();
+    } catch (e) {
+      throw new BadRequestException('Invalid contract address in transaction');
+    }
+
+    const expectedContract = this.config.get<string>('POLICY_ENGINE_CONTRACT');
+    if (!expectedContract) {
+      throw new BadRequestException('POLICY_ENGINE_CONTRACT is not configured on the server');
+    }
+
+    if (contractIdStr !== expectedContract) {
+      throw new BadRequestException(
+        `Transaction targets contract ${contractIdStr}, expected POLICY_ENGINE_CONTRACT (${expectedContract})`
+      );
+    }
+
+    const functionName = invokeContract.functionName().toString();
+    if (functionName !== 'buy_policy') {
+      throw new BadRequestException(
+        `Transaction calls function '${functionName}', expected 'buy_policy'`
+      );
+    }
+
+    const sendResult = await this.stellar.simulateAssembleAndSend(tx);
     if (sendResult.status === 'ERROR') {
       throw new Error(`On-chain submission failed: ${JSON.stringify(sendResult.errorResult)}`);
     }
+
+    this.logger.log(`Transaction submitted: txHash=${sendResult.hash} status=${sendResult.status}`);
+
+    if (sendResult.status === 'TRY_AGAIN_LATER' || sendResult.status === 'PENDING') {
+      const txResult = await this.stellar.waitForTransaction(sendResult.hash);
+      if (!txResult || txResult.status !== 'SUCCESS') {
+        throw new BadRequestException(`Transaction ${sendResult.hash} did not confirm on-chain`);
+      }
+      this.logger.log(`Transaction confirmed on-chain: txHash=${sendResult.hash}`);
+    }
+
     const policy = await this.createPolicy(dto, sendResult.hash);
-    this.logger.log(`Policy confirmed on-chain: id=${policy.id} txHash=${sendResult.hash}`);
+    this.logger.log(`Policy created: id=${policy.id} txHash=${sendResult.hash}`);
     return { policyId: policy.id, txHash: sendResult.hash };
   }
 
   /**
-   * Find all policies for a policyholder from the local database.
+   * Find policies for a policyholder from the local database with pagination.
    */
-  async findByPolicyholder(address: string) {
-    const policies = await this.prisma.policy.findMany({
-      where: { policyholder: address },
-      orderBy: { createdAt: 'desc' },
-    });
-    this.logger.log(`findByPolicyholder: ${address} → ${policies.length} policies`);
-    return policies;
+  async findByPolicyholder(address: string, page: number = 1, limit: number = 20) {
+    const take = Math.min(limit, 100);
+    const skip = (page - 1) * take;
+
+    const [policies, total] = await Promise.all([
+      this.prisma.policy.findMany({
+        where: { policyholder: address },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.policy.count({ where: { policyholder: address } }),
+    ]);
+
+    this.logger.log(`findByPolicyholder: ${address} → ${policies.length}/${total} policies (page ${page})`);
+    return { policies, total };
   }
 
   async getActiveProducts(): Promise<ProductSummary[]> {
@@ -197,10 +283,15 @@ export class PolicyService {
     return null;
   }
 
-  async getUserPolicies(walletAddress: string): Promise<PolicySummary[]> {
-    this.logger.log(`get_user_policies: ${walletAddress}`);
-    const dbPolicies = await this.findByPolicyholder(walletAddress);
-    return dbPolicies.map((p) => ({
+  async getUserPolicies(
+    walletAddress: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: PolicySummary[]; total: number; page: number; limit: number }> {
+    this.logger.log(`get_user_policies: ${walletAddress} page=${page} limit=${limit}`);
+    const clampedLimit = Math.min(limit, 100);
+    const { policies: dbPolicies, total } = await this.findByPolicyholder(walletAddress, page, clampedLimit);
+    const data = dbPolicies.map((p) => ({
       id:           p.id,
       productId:    p.productId,
       policyholder: p.policyholder,
@@ -211,5 +302,6 @@ export class PolicyService {
       endTime:      Math.floor(p.endTime.getTime() / 1000),
       status:       p.status,
     }));
+    return { data, total, page, limit: clampedLimit };
   }
 }

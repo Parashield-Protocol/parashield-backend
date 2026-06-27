@@ -8,11 +8,10 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  BadRequestException,
   UseGuards,
   Req,
   UnauthorizedException,
-  Req,
-  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -26,7 +25,6 @@ import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Request } from 'express';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('policy')
@@ -43,24 +41,32 @@ export class PolicyController {
     return { success: true, data: products };
   }
 
-  /** GET /api/v1/policies/me?wallet=<address> — get policies for a wallet */
+  /** GET /api/v1/policies/me?wallet=<address>&page=&limit= — get paginated policies for a wallet */
   @Get('policies/me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get all policies for a wallet address' })
+  @ApiOperation({ summary: 'Get paginated policies for a wallet address' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
-  @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
-  async getMyPolicies(@Req() req: Request & { user?: any }, @Query('wallet') wallet: string) {
-  async getMyPolicies(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
-    wallet = wallet || req.wallet;
-    if (!wallet) {
+  @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
+  @ApiResponse({ status: 200, description: 'Returns paginated policies for the wallet — { data, total, page, limit }' })
+  async getMyPolicies(
+    @Query('wallet') wallet: string,
+    @Query('page') page: string = '1',
+    @Query('limit') limit: string = '20',
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const targetWallet = wallet || req.wallet;
+    if (!targetWallet) {
       throw new BadRequestException('wallet query param required');
     }
-    if (wallet !== req.user?.walletAddress) {
+    if (req.wallet && req.wallet !== targetWallet) {
       throw new UnauthorizedException('Cannot fetch policies for another wallet');
     }
-    const policies = await this.policy.getUserPolicies(wallet);
-    return { success: true, data: policies };
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const result = await this.policy.getUserPolicies(targetWallet, pageNum, limitNum);
+    return { success: true, ...result };
   }
 
   /** GET /api/v1/policies/:id — get a single policy by ID */
@@ -81,13 +87,12 @@ export class PolicyController {
   @Post('policies/buy')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get premium quote for requested coverage' })
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
-  async buyPolicy(@Req() req: Request & { user?: any }, @Body() dto: BuyPolicyDto) {
-    if (dto.walletAddress !== req.user?.walletAddress) {
+  async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
+    if (dto.walletAddress !== req.wallet) {
       throw new UnauthorizedException('Wallet address does not match authenticated user');
     }
     const products = await this.policy.getActiveProducts();
@@ -105,7 +110,6 @@ export class PolicyController {
     const premiumXlm = this.policy.calculatePremium(
       dto.coverageXlm,
       product.premiumRate,
-      dto.duration,
     );
 
     return {

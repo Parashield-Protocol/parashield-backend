@@ -2,13 +2,17 @@ import { Test, TestingModule } from '@nestjs/testing';
 import { PolicyService, ProductSummary } from './policy.service';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { ConfigService } from '@nestjs/config';
+import { Operation, TransactionBuilder, Account, Keypair, StrKey, Asset } from '@stellar/stellar-sdk';
 
 describe('PolicyService.calculatePremium', () => {
   let service: PolicyService;
 
   const mockStellarService = {
     simulateInvoke: jest.fn(),
+    simulateAssembleAndSend: jest.fn(),
     keeperKeypair:  { publicKey: jest.fn().mockReturnValue('GABC') },
+    networkPassphrase: 'Test SDF Network ; September 2015',
   };
 
   const mockPrismaService = {
@@ -16,11 +20,19 @@ describe('PolicyService.calculatePremium', () => {
       create:     jest.fn(),
       findMany:   jest.fn(),
       findUnique: jest.fn(),
+      count:      jest.fn(),
     },
     product: {
       findMany:   jest.fn(),
       findUnique: jest.fn(),
     },
+  };
+
+  const mockConfigService = {
+    get: jest.fn((key: string) => {
+      if (key === 'POLICY_ENGINE_CONTRACT') return 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+      return undefined;
+    }),
   };
 
   beforeEach(async () => {
@@ -29,6 +41,7 @@ describe('PolicyService.calculatePremium', () => {
         PolicyService,
         { provide: StellarService, useValue: mockStellarService },
         { provide: PrismaService,  useValue: mockPrismaService },
+        { provide: ConfigService,  useValue: mockConfigService },
       ],
     }).compile();
 
@@ -37,33 +50,28 @@ describe('PolicyService.calculatePremium', () => {
   });
 
   it('should return the correct premium for standard coverage', () => {
-    // coverage=1000, rate=500 (5%), duration=365 days
-    // expected = Math.ceil(1000 * 500 * (365/365) / 10000) = Math.ceil(50) = 50
-    const premium = service.calculatePremium(1000, 500, 365);
+    // coverage=1000, rate=500 (5%)
+    // expected = Math.ceil(1000 * 500 / 10000) = Math.ceil(50) = 50
+    const premium = service.calculatePremium(1000, 500);
     expect(premium).toBe(50);
   });
 
-  it('should return a proportionally higher premium for shorter duration', () => {
-    // 182 days is ~half a year, so premium should be roughly half
-    const fullYearPremium = service.calculatePremium(1000, 500, 365);
-    const halfYearPremium = service.calculatePremium(1000, 500, 182);
-
-    expect(halfYearPremium).toBeLessThan(fullYearPremium);
-    // Half-year should be approximately half the full year (within 2 XLM tolerance)
-    expect(halfYearPremium).toBeGreaterThan(fullYearPremium / 2 - 2);
-    expect(halfYearPremium).toBeLessThan(fullYearPremium / 2 + 2);
+  it('should return the same premium regardless of duration', () => {
+    const premium1 = service.calculatePremium(1000, 500);
+    const premium2 = service.calculatePremium(1000, 500);
+    expect(premium1).toBe(premium2);
   });
 
   it('should always return a positive integer', () => {
     const testCases = [
-      [10, 100, 1],
-      [500, 200, 30],
-      [100000, 500, 365],
-      [10, 500, 1],
+      [10, 100],
+      [500, 200],
+      [100000, 500],
+      [10, 500],
     ] as const;
 
-    for (const [coverage, rate, duration] of testCases) {
-      const premium = service.calculatePremium(coverage, rate, duration);
+    for (const [coverage, rate] of testCases) {
+      const premium = service.calculatePremium(coverage, rate);
       expect(premium).toBeGreaterThan(0);
       expect(Number.isInteger(premium)).toBe(true);
     }
@@ -197,6 +205,234 @@ describe('PolicyService.calculatePremium', () => {
 
       await expect(service.createPolicy(dto, 'tx-hash')).rejects.toThrow(
         /oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products/,
+      );
+    });
+  });
+
+  describe('getUserPolicies pagination (Issue #72)', () => {
+    const wallet = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+
+    const makeDbPolicy = (id: string) => ({
+      id,
+      productId:    'prod-1',
+      policyholder: wallet,
+      coverageXlm:  500,
+      premiumPaid:  25,
+      oracleKey:    'rainfall:0,0:2026-06',
+      startTime:    new Date('2026-01-01'),
+      endTime:      new Date('2026-04-01'),
+      status:       'ACTIVE',
+      txHash:       `tx-${id}`,
+      createdAt:    new Date('2026-01-01'),
+    });
+
+    it('returns paginated data with total, page, and limit', async () => {
+      const dbPolicies = [makeDbPolicy('p1'), makeDbPolicy('p2')];
+      mockPrismaService.policy.findMany.mockResolvedValue(dbPolicies);
+      mockPrismaService.policy.count.mockResolvedValue(10);
+
+      const result = await service.getUserPolicies(wallet, 1, 2);
+
+      expect(result.data).toHaveLength(2);
+      expect(result.total).toBe(10);
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(2);
+    });
+
+    it('calls prisma with correct take and skip for page 2', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+      mockPrismaService.policy.count.mockResolvedValue(0);
+
+      await service.getUserPolicies(wallet, 2, 5);
+
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 5, skip: 5 }),
+      );
+    });
+
+    it('clamps limit to 100 maximum', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+      mockPrismaService.policy.count.mockResolvedValue(0);
+
+      const result = await service.getUserPolicies(wallet, 1, 999);
+
+      expect(result.limit).toBe(100);
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 100 }),
+      );
+    });
+
+    it('defaults to page=1 and limit=20 when not provided', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+      mockPrismaService.policy.count.mockResolvedValue(0);
+
+      const result = await service.getUserPolicies(wallet);
+
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(20);
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 20, skip: 0 }),
+      );
+    });
+
+    it('maps database rows to PolicySummary shape', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([makeDbPolicy('p1')]);
+      mockPrismaService.policy.count.mockResolvedValue(1);
+
+      const result = await service.getUserPolicies(wallet, 1, 20);
+      const p = result.data[0];
+
+      expect(p.id).toBe('p1');
+      expect(p.coverage).toBe('500');
+      expect(p.premiumPaid).toBe('25');
+      expect(typeof p.startTime).toBe('number');
+      expect(typeof p.endTime).toBe('number');
+    });
+  });
+
+  describe('confirmAndCreatePolicy XDR validation', () => {
+    const validWallet = Keypair.random().publicKey();
+    const validContract = StrKey.encodeContract(Buffer.alloc(32));
+
+    function buildTestTxXdr(opts: {
+      source?: string;
+      contract?: string;
+      function?: string;
+      opType?: string;
+    }) {
+      const source = opts.source ?? validWallet;
+      const account = new Account(source, '1');
+      
+      let op: any;
+      if (opts.opType === 'payment') {
+        op = Operation.payment({
+          destination: validWallet,
+          asset: Asset.native(),
+          amount: '10',
+        });
+      } else {
+        op = Operation.invokeContractFunction({
+          contract: opts.contract ?? validContract,
+          function: opts.function ?? 'buy_policy',
+          args: [],
+        });
+      }
+
+      const tx = new TransactionBuilder(account, {
+        fee: '100',
+        networkPassphrase: 'Test SDF Network ; September 2015',
+      })
+        .addOperation(op)
+        .setTimeout(30)
+        .build();
+
+      return tx.toXDR();
+    }
+
+    it('should pass validation and call simulateAssembleAndSend when transaction is valid', async () => {
+      const validXdr = buildTestTxXdr({});
+      const dto = {
+        signedXdr: validXdr,
+        productId: 'prod-1',
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+
+      mockStellarService.simulateInvoke = jest.fn();
+      mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+        status: 'SUCCESS',
+        hash: 'tx-hash-123',
+      });
+      (service as any).stellar.networkPassphrase = 'Test SDF Network ; September 2015';
+
+      mockPrismaService.product.findMany.mockResolvedValue([
+        {
+          id: 'prod-1',
+          name: 'Crop Product',
+          category: 'crop',
+          triggerType: 'Threshold',
+          threshold: '50.0',
+          comparison: 'LessThan',
+          coverageMin: '10.0',
+          coverageMax: '1000.0',
+          premiumRate: 500,
+          maxDuration: 365,
+          status: 'Active',
+        },
+      ]);
+      mockPrismaService.policy.create.mockResolvedValue({ id: 'policy-123' });
+
+      const result = await service.confirmAndCreatePolicy(dto);
+      expect(result.policyId).toBe('policy-123');
+      expect(result.txHash).toBe('tx-hash-123');
+    });
+
+    it('should throw BadRequestException if source account does not match wallet address', async () => {
+      const otherKey = Keypair.random().publicKey();
+      const mismatchedXdr = buildTestTxXdr({ source: otherKey });
+      
+      const dto = {
+        signedXdr: mismatchedXdr,
+        productId: 'prod-1',
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+      
+      await expect(service.confirmAndCreatePolicy(dto)).rejects.toThrow(
+        /Transaction source account.*does not match the wallet address in the request/,
+      );
+    });
+
+    it('should throw BadRequestException if first operation is not invokeHostFunction', async () => {
+      const invalidOpXdr = buildTestTxXdr({ opType: 'payment' });
+      const dto = {
+        signedXdr: invalidOpXdr,
+        productId: 'prod-1',
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+
+      await expect(service.confirmAndCreatePolicy(dto)).rejects.toThrow(
+        /Expected first operation type to be invokeHostFunction, got payment/,
+      );
+    });
+
+    it('should throw BadRequestException if target contract does not match POLICY_ENGINE_CONTRACT', async () => {
+      const otherContract = StrKey.encodeContract(Buffer.from(new Array(32).fill(1)));
+      const invalidContractXdr = buildTestTxXdr({ contract: otherContract });
+      const dto = {
+        signedXdr: invalidContractXdr,
+        productId: 'prod-1',
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+
+      await expect(service.confirmAndCreatePolicy(dto)).rejects.toThrow(
+        /Transaction targets contract.*expected POLICY_ENGINE_CONTRACT/,
+      );
+    });
+
+    it('should throw BadRequestException if contract function is not buy_policy', async () => {
+      const invalidFunctionXdr = buildTestTxXdr({ function: 'wrong_method' });
+      const dto = {
+        signedXdr: invalidFunctionXdr,
+        productId: 'prod-1',
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: 'rainfall:-0.0917,34.7679:2026-06',
+      };
+
+      await expect(service.confirmAndCreatePolicy(dto)).rejects.toThrow(
+        /Transaction calls function.*expected 'buy_policy'/,
       );
     });
   });

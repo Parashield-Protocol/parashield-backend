@@ -4,7 +4,6 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { Request } from 'express';
 import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
 
@@ -24,6 +23,7 @@ export class JwtAuthGuard implements CanActivate {
       const payload = this.jwtService.verify(token);
       request.wallet = payload.walletAddress;
       request.user = payload;
+      request.wallet = payload.walletAddress;
     } catch {
       throw new UnauthorizedException('Token verification failed');
     }
@@ -31,7 +31,7 @@ export class JwtAuthGuard implements CanActivate {
     return true;
   }
 
-  private extractTokenFromHeader(request: Request): string | undefined {
+  private extractTokenFromHeader(request: AuthenticatedRequest): string | undefined {
     const [type, token] = request.headers.authorization?.split(' ') ?? [];
     return type === 'Bearer' ? token : undefined;
   }
