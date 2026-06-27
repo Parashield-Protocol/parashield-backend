@@ -1,9 +1,10 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { TransactionBuilder, Transaction, rpc as StellarRpc } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Transaction, Address, rpc as StellarRpc } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
+import { ConfigService } from '@nestjs/config';
 
 export interface ProductSummary {
   id:           string;
@@ -48,15 +49,19 @@ export class PolicyService {
   constructor(
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
    * Calculate the premium for a policy in XLM (whole number, rounded up).
    * Uses basis points: premiumRate 500 = 5%, 100 = 1%.
-   * Formula: coverage * rate * (duration / 365) / 10000
+   *
+   * This formula matches the PolicyEngine contract's fixed-term premium calculation
+   * where premium is based on coverage and rate regardless of duration.
+   * Formula: Math.ceil(coverage * rate / 10000)
    */
-  calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
-    return Math.ceil(coverageXlm * premiumRate * (durationDays / 365) / 10000);
+  calculatePremium(coverageXlm: number, premiumRate: number): number {
+    return Math.ceil(coverageXlm * premiumRate / 10000);
   }
 
   /**
@@ -109,7 +114,7 @@ export class PolicyService {
       throw new BadRequestException('oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products');
     }
 
-    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
+    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate);
 
     const policy = await this.prisma.policy.create({
       data: {
@@ -142,6 +147,59 @@ export class PolicyService {
    */
   async confirmAndCreatePolicy(dto: ConfirmPolicyDto): Promise<{ policyId: string; txHash: string }> {
     const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
+
+    // Validate transaction source account matches the wallet in the request
+    if (tx.source !== dto.walletAddress) {
+      throw new BadRequestException(
+        `Transaction source account (${tx.source}) does not match the wallet address in the request (${dto.walletAddress})`
+      );
+    }
+
+    // Validate there is at least one operation
+    if (!tx.operations || tx.operations.length === 0) {
+      throw new BadRequestException('Transaction must contain at least one operation');
+    }
+
+    const firstOp = tx.operations[0];
+
+    // Validate it is invokeContractFunction (invokeHostFunction in SDK)
+    if (firstOp.type !== 'invokeHostFunction') {
+      throw new BadRequestException(
+        `Expected first operation type to be invokeHostFunction, got ${firstOp.type}`
+      );
+    }
+
+    const hostFunc = (firstOp as any).func;
+    if (!hostFunc || hostFunc.switch().name !== 'hostFunctionTypeInvokeContract') {
+      throw new BadRequestException('Transaction does not invoke a contract function');
+    }
+
+    const invokeContract = hostFunc.invokeContract();
+    
+    let contractIdStr: string;
+    try {
+      contractIdStr = Address.fromScAddress(invokeContract.contractAddress()).toString();
+    } catch (e) {
+      throw new BadRequestException('Invalid contract address in transaction');
+    }
+
+    const expectedContract = this.config.get<string>('POLICY_ENGINE_CONTRACT');
+    if (!expectedContract) {
+      throw new BadRequestException('POLICY_ENGINE_CONTRACT is not configured on the server');
+    }
+
+    if (contractIdStr !== expectedContract) {
+      throw new BadRequestException(
+        `Transaction targets contract ${contractIdStr}, expected POLICY_ENGINE_CONTRACT (${expectedContract})`
+      );
+    }
+
+    const functionName = invokeContract.functionName().toString();
+    if (functionName !== 'buy_policy') {
+      throw new BadRequestException(
+        `Transaction calls function '${functionName}', expected 'buy_policy'`
+      );
+    }
 
     const sendResult = await this.stellar.simulateAssembleAndSend(tx);
     if (sendResult.status === 'ERROR') {
