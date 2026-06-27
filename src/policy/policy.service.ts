@@ -164,15 +164,24 @@ export class PolicyService {
   }
 
   /**
-   * Find all policies for a policyholder from the local database.
+   * Find policies for a policyholder from the local database with pagination.
    */
-  async findByPolicyholder(address: string) {
-    const policies = await this.prisma.policy.findMany({
-      where: { policyholder: address },
-      orderBy: { createdAt: 'desc' },
-    });
-    this.logger.log(`findByPolicyholder: ${address} → ${policies.length} policies`);
-    return policies;
+  async findByPolicyholder(address: string, page: number = 1, limit: number = 20) {
+    const take = Math.min(limit, 100);
+    const skip = (page - 1) * take;
+
+    const [policies, total] = await Promise.all([
+      this.prisma.policy.findMany({
+        where: { policyholder: address },
+        orderBy: { createdAt: 'desc' },
+        take,
+        skip,
+      }),
+      this.prisma.policy.count({ where: { policyholder: address } }),
+    ]);
+
+    this.logger.log(`findByPolicyholder: ${address} → ${policies.length}/${total} policies (page ${page})`);
+    return { policies, total };
   }
 
   async getActiveProducts(): Promise<ProductSummary[]> {
@@ -216,10 +225,15 @@ export class PolicyService {
     return null;
   }
 
-  async getUserPolicies(walletAddress: string): Promise<PolicySummary[]> {
-    this.logger.log(`get_user_policies: ${walletAddress}`);
-    const dbPolicies = await this.findByPolicyholder(walletAddress);
-    return dbPolicies.map((p) => ({
+  async getUserPolicies(
+    walletAddress: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: PolicySummary[]; total: number; page: number; limit: number }> {
+    this.logger.log(`get_user_policies: ${walletAddress} page=${page} limit=${limit}`);
+    const clampedLimit = Math.min(limit, 100);
+    const { policies: dbPolicies, total } = await this.findByPolicyholder(walletAddress, page, clampedLimit);
+    const data = dbPolicies.map((p) => ({
       id:           p.id,
       productId:    p.productId,
       policyholder: p.policyholder,
@@ -230,5 +244,6 @@ export class PolicyService {
       endTime:      Math.floor(p.endTime.getTime() / 1000),
       status:       p.status,
     }));
+    return { data, total, page, limit: clampedLimit };
   }
 }
