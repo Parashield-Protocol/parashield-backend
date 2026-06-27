@@ -4,6 +4,7 @@ import { AuthController }  from './auth.controller';
 import { JwtService }      from './jwt.service';
 import { JwtAuthGuard }    from './jwt-auth.guard';
 import { OperatorAuthGuard } from './operator-auth.guard';
+import { PrismaModule }    from '../prisma/prisma.module';
 
 /**
  * AuthModule — provides Stellar wallet signature verification middleware and JWT issuance.
@@ -13,6 +14,7 @@ import { OperatorAuthGuard } from './operator-auth.guard';
  *  - JWT bearer tokens for the normal login flow via JwtAuthGuard.
  */
 @Module({
+  imports:     [PrismaModule],
   controllers: [AuthController],
   providers:   [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],
   exports:     [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],

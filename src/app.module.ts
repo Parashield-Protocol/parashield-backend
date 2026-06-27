@@ -23,10 +23,29 @@ function validateConfig(config: Record<string, unknown>) {
     errors.push('JWT_SECRET is required');
   }
 
+  if (!config['DATABASE_URL']) {
+    errors.push('DATABASE_URL is required');
+  }
+
+  if (!config['STELLAR_RPC_URL']) {
+    errors.push('STELLAR_RPC_URL is required');
+  }
+
+  if (!config['KEEPER_SECRET_KEY']) {
+    errors.push('KEEPER_SECRET_KEY is required');
+  }
+
   const claimsContract = config['CLAIMS_PROCESSOR_CONTRACT'] as string | undefined;
   if (claimsContract && !/^C[A-Z2-7]{55}$/.test(claimsContract)) {
     errors.push(
       'CLAIMS_PROCESSOR_CONTRACT must be a valid Stellar contract ID (C...)',
+    );
+  }
+
+  const policyContract = config['POLICY_ENGINE_CONTRACT'] as string | undefined;
+  if (policyContract && !/^C[A-Z2-7]{55}$/.test(policyContract)) {
+    errors.push(
+      'POLICY_ENGINE_CONTRACT must be a valid Stellar contract ID (C...)',
     );
   }
 
