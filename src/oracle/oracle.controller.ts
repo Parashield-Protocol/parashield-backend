@@ -11,6 +11,7 @@ import {
 import { OracleService } from './oracle.service';
 import { OracleFeedRequestDto } from './dto/oracle-reading.dto';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
+import { AviationStackApiKeyGuard } from './guards/aviation-stack-api-key.guard';
 
 @ApiTags('oracle')
 @Controller('oracle')
@@ -105,6 +106,7 @@ export class OracleController {
 
   /** GET /api/v1/oracle/flight — fetch flight delay status */
   @Get('flight')
+  @UseGuards(AviationStackApiKeyGuard)
   @ApiOperation({ summary: 'Fetch flight delay data from AviationStack' })
   @ApiQuery({ name: 'flight', required: true, description: 'IATA flight number (e.g. KQ100)' })
   @ApiQuery({ name: 'date', required: true, description: 'Flight date (YYYY-MM-DD)' })

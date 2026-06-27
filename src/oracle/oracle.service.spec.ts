@@ -124,4 +124,45 @@ describe('OracleService.fetchRainfall', () => {
     // Should still sum 10.5 + 15.0 + 20.3 = 45.8
     expect(reading.value).toBe(BigInt(458000000));
   });
+
+  describe('fetchFlightDelay and persistReading', () => {
+    it('should throw ServiceUnavailableException if API key is not configured', async () => {
+      mockConfigService.get.mockReturnValue(undefined);
+      await expect(service.fetchFlightDelay('KQ100', '2026-06-27')).rejects.toThrow(
+        /AviationStack API is not configured/,
+      );
+    });
+
+    it('should query AviationStack and persist if API key is configured', async () => {
+      mockConfigService.get.mockImplementation((key) => {
+        if (key === 'AVIATIONSTACK_API_KEY') return 'test-key';
+        return undefined;
+      });
+      mockedAxios.get.mockResolvedValue({
+        data: {
+          data: [{ departure: { delay: 15 } }],
+        },
+      });
+      mockPrismaService.oracleReading.create.mockResolvedValue({ id: 'f1' });
+
+      const reading = await service.fetchFlightDelay('KQ100', '2026-06-27');
+      expect(reading.value).toBe(150000000n);
+      expect(reading.confidence).toBe(95);
+      expect(reading.source).toBe('aviationstack');
+      expect(mockPrismaService.oracleReading.create).toHaveBeenCalled();
+    });
+
+    it('should skip DB persistence if reading confidence is 0 or source is mock', async () => {
+      const mockReading = {
+        dataType: 'flight',
+        key: 'flight:KQ100:2026-06-27',
+        value: 0n,
+        confidence: 0,
+        timestamp: 123456,
+        source: 'mock',
+      };
+      await service.persistReading(mockReading);
+      expect(mockPrismaService.oracleReading.create).not.toHaveBeenCalled();
+    });
+  });
 });
