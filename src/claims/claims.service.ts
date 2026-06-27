@@ -209,13 +209,16 @@ export class ClaimsService {
   }
 
   async getClaimsByWallet(walletAddress: string, page = 1, limit = 20): Promise<{ claims: ClaimSummary[]; total: number }> {
-    this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${page} limit=${limit}`);
+    // Clamp to valid bounds; page is 1-based (#114)
+    const safePage = Math.max(1, page);
+    const safeLimit = Math.min(Math.max(1, limit), 100);
+    this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${safePage} limit=${safeLimit}`);
     const [claims, total] = await this.prisma.$transaction([
       this.prisma.claim.findMany({
         where: { claimant: walletAddress },
         orderBy: { submittedAt: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
+        skip: (safePage - 1) * safeLimit,
+        take: safeLimit,
       }),
       this.prisma.claim.count({ where: { claimant: walletAddress } }),
     ]);
