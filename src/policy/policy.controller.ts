@@ -8,11 +8,10 @@ import {
   HttpCode,
   HttpStatus,
   NotFoundException,
+  BadRequestException,
   UseGuards,
   Req,
   UnauthorizedException,
-  Req,
-  UseGuards,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -26,7 +25,6 @@ import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Request } from 'express';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('policy')
@@ -50,7 +48,6 @@ export class PolicyController {
   @ApiOperation({ summary: 'Get all policies for a wallet address' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
   @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
-  async getMyPolicies(@Req() req: Request & { user?: any }, @Query('wallet') wallet: string) {
   async getMyPolicies(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
     wallet = wallet || req.wallet;
     if (!wallet) {
@@ -81,12 +78,11 @@ export class PolicyController {
   @Post('policies/buy')
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get premium quote for requested coverage' })
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
-  async buyPolicy(@Req() req: Request & { user?: any }, @Body() dto: BuyPolicyDto) {
+  async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
     if (dto.walletAddress !== req.user?.walletAddress) {
       throw new UnauthorizedException('Wallet address does not match authenticated user');
     }

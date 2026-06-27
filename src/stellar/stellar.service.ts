@@ -4,6 +4,7 @@ import {
   Networks,
   Keypair,
   TransactionBuilder,
+  Transaction,
   BASE_FEE,
   Operation,
   Contract,
@@ -122,6 +123,77 @@ export class StellarService {
     }
 
     throw new Error(`All ${MAX_ATTEMPTS} sendTransaction attempts failed. Last error: ${lastError?.message}`);
+  }
+
+  /**
+   * Simulate a raw transaction, assemble it with the simulation result,
+   * sign it with the keeper key, and send it to the network.
+   *
+   * This is the correct flow for Soroban contract invocations:
+   *   simulate → assembleTransaction → sign → sendTransaction
+   *
+   * Assembling appends resource fees and authorization footprints from
+   * the simulation result — without this step the RPC will reject the
+   * transaction with TRANSACTION_FAILED or INSUFFICIENT_FEE.
+   */
+  async simulateAssembleAndSend(tx: Transaction): Promise<StellarRpc.Api.SendTransactionResponse> {
+    const simResult = await this.rpc.simulateTransaction(tx);
+    if (StellarRpc.Api.isSimulationError(simResult)) {
+      throw new Error(`Simulation failed: ${simResult.error}`);
+    }
+
+    const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
+    assembledTx.sign(this.keeperKeypair);
+
+    const sendResult = await this.rpc.sendTransaction(assembledTx);
+    if (sendResult.status === 'ERROR') {
+      throw new Error(
+        `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
+      );
+    }
+
+    this.logger.log(`Transaction sent: txHash=${sendResult.hash} status=${sendResult.status}`);
+    return sendResult;
+  }
+
+  /**
+   * Poll getTransaction until the status is SUCCESS or FAILED.
+   * Throws on FAILED or if the timeout is reached.
+   *
+   * @param txHash  Transaction hash to poll
+   * @param timeoutMs  Maximum time to wait in milliseconds (default 60s)
+   * @returns The final transaction response with status SUCCESS
+   */
+  async waitForTransaction(
+    txHash: string,
+    timeoutMs: number = 60000,
+  ): Promise<StellarRpc.Api.GetTransactionResponse> {
+    const start = Date.now();
+    const POLL_INTERVAL_MS = 2000;
+
+    while (Date.now() - start < timeoutMs) {
+      const txResult = await this.rpc.getTransaction(txHash);
+
+      if (txResult.status === 'SUCCESS') {
+        this.logger.log(`Transaction confirmed: ${txHash}`);
+        return txResult;
+      }
+
+      if (txResult.status === 'FAILED') {
+        throw new Error(
+          `Transaction ${txHash} failed on-chain: ${txResult.resultXdr ?? 'unknown error'}`,
+        );
+      }
+
+      this.logger.log(
+        `Transaction ${txHash} status=${txResult.status} — waiting ${POLL_INTERVAL_MS}ms...`,
+      );
+      await this.sleep(POLL_INTERVAL_MS);
+    }
+
+    throw new Error(
+      `Transaction ${txHash} did not reach SUCCESS within ${timeoutMs}ms`,
+    );
   }
 
   /** Sleep for the given number of milliseconds. */

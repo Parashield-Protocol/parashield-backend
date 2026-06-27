@@ -14,8 +14,6 @@ import { OperatorAuthGuard } from './operator-auth.guard';
  */
 @Module({
   controllers: [AuthController],
-  providers:   [AuthMiddleware, JwtService, JwtAuthGuard],
-  exports:     [AuthMiddleware, JwtService, JwtAuthGuard],
   providers:   [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],
   exports:     [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],
 })
