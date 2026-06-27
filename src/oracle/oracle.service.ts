@@ -161,8 +161,8 @@ export class OracleService {
     return oracleReading;
   }
 
-  /** Fetch flight delay status. Returns delay in minutes as 7-decimal fixed point. */
-  async fetchFlightDelay(flightNumber: string, date: string): Promise<OracleReading> {
+  /** Fetch flight delay status without persisting it. */
+  async fetchFlightDelayReading(flightNumber: string, date: string): Promise<OracleReading> {
     const apiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
     if (!apiKey) {
       this.logger.warn('AVIATIONSTACK_API_KEY not set — returning mock flight data');
@@ -188,6 +188,12 @@ export class OracleService {
       source:     'aviationstack',
     };
 
+    return oracleReading;
+  }
+
+  /** Fetch flight delay status. Returns delay in minutes as 7-decimal fixed point. */
+  async fetchFlightDelay(flightNumber: string, date: string): Promise<OracleReading> {
+    const oracleReading = await this.fetchFlightDelayReading(flightNumber, date);
     await this.persistReading(oracleReading);
     return oracleReading;
   }
