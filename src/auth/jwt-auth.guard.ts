@@ -4,8 +4,8 @@ import {
   Injectable,
   UnauthorizedException,
 } from '@nestjs/common';
-import { AuthenticatedRequest } from './authenticated-request';
 import { JwtService } from './jwt.service';
+import { AuthenticatedRequest } from './authenticated-request';
 
 @Injectable()
 export class JwtAuthGuard implements CanActivate {
@@ -13,30 +13,25 @@ export class JwtAuthGuard implements CanActivate {
 
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
+    const token = this.extractTokenFromHeader(request);
 
-    if (request.wallet) {
-      return true;
+    if (!token) {
+      throw new UnauthorizedException('Missing or invalid Authorization header');
     }
 
-    const token = this.getBearerToken(request);
-    const payload = this.jwtService.verify(token);
+    try {
+      const payload = this.jwtService.verify(token);
+      request.user = payload;
+      request.wallet = payload.walletAddress;
+    } catch {
+      throw new UnauthorizedException('Token verification failed');
+    }
 
-    request.wallet = payload.walletAddress;
-    request.user = payload;
     return true;
   }
 
-  private getBearerToken(request: AuthenticatedRequest): string {
-    const header = request.headers.authorization;
-    if (!header) {
-      throw new UnauthorizedException('Missing Authorization bearer token');
-    }
-
-    const [scheme, token] = header.split(' ');
-    if (scheme !== 'Bearer' || !token) {
-      throw new UnauthorizedException('Invalid Authorization bearer token');
-    }
-
-    return token;
+  private extractTokenFromHeader(request: AuthenticatedRequest): string | undefined {
+    const [type, token] = request.headers.authorization?.split(' ') ?? [];
+    return type === 'Bearer' ? token : undefined;
   }
 }

@@ -47,8 +47,6 @@ export class PolicyController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get paginated policies for a wallet address' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
-  @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
-  async getMyPolicies(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiResponse({ status: 200, description: 'Returns paginated policies for the wallet — { data, total, page, limit }' })
@@ -58,16 +56,16 @@ export class PolicyController {
     @Query('limit') limit: string = '20',
     @Req() req: AuthenticatedRequest,
   ) {
-    wallet = wallet || req.wallet;
-    if (!wallet) {
+    const targetWallet = wallet || req.wallet;
+    if (!targetWallet) {
       throw new BadRequestException('wallet query param required');
     }
-    if (wallet !== req.user?.walletAddress) {
+    if (req.wallet && req.wallet !== targetWallet) {
       throw new UnauthorizedException('Cannot fetch policies for another wallet');
     }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
-    const result = await this.policy.getUserPolicies(wallet, pageNum, limitNum);
+    const result = await this.policy.getUserPolicies(targetWallet, pageNum, limitNum);
     return { success: true, ...result };
   }
 
@@ -94,7 +92,7 @@ export class PolicyController {
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
   async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
-    if (dto.walletAddress !== req.user?.walletAddress) {
+    if (dto.walletAddress !== req.wallet) {
       throw new UnauthorizedException('Wallet address does not match authenticated user');
     }
     const products = await this.policy.getActiveProducts();
@@ -112,7 +110,6 @@ export class PolicyController {
     const premiumXlm = this.policy.calculatePremium(
       dto.coverageXlm,
       product.premiumRate,
-      dto.duration,
     );
 
     return {
