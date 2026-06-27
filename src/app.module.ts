@@ -12,9 +12,34 @@ import { PrismaModule }  from './prisma/prisma.module';
 import { AuthModule }    from './auth/auth.module';
 import { HealthModule }  from './health/health.module';
 
+/**
+ * Validate loaded environment configuration at startup.
+ * Throws on missing or invalid required values.
+ */
+function validateConfig(config: Record<string, unknown>) {
+  const errors: string[] = [];
+
+  if (!config['JWT_SECRET']) {
+    errors.push('JWT_SECRET is required');
+  }
+
+  const claimsContract = config['CLAIMS_PROCESSOR_CONTRACT'] as string | undefined;
+  if (claimsContract && !/^C[A-Z2-7]{55}$/.test(claimsContract)) {
+    errors.push(
+      'CLAIMS_PROCESSOR_CONTRACT must be a valid Stellar contract ID (C...)',
+    );
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Configuration validation failed:\n${errors.join('\n')}`);
+  }
+
+  return config;
+}
+
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({ isGlobal: true, validate: validateConfig }),
     ScheduleModule.forRoot(),
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],

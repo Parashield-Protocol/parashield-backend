@@ -1,5 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards, UnauthorizedException } from '@nestjs/common';
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, NotFoundException, Param, Post, Query, Req, UseGuards, UnauthorizedException } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -11,7 +10,6 @@ import {
 import { ClaimsService } from './claims.service';
 import { SubmitClaimDto } from './dto/submit-claim.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Request } from 'express';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('claims')
@@ -19,8 +17,6 @@ import { AuthenticatedRequest } from '../auth/authenticated-request';
 export class ClaimsController {
   constructor(private readonly claims: ClaimsService) {}
 
-  /** POST /api/v1/claims/submit — submit a manual claim */
-  @Post('submit')
   /** POST /api/v1/claims — submit a manual claim */
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -28,11 +24,6 @@ export class ClaimsController {
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
   @ApiResponse({ status: 201, description: 'Claim submitted successfully' })
   @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
-  async submitClaim(@Req() req: Request & { user?: any }, @Body() dto: SubmitClaimDto) {
-    if (dto.walletAddress !== req.user?.walletAddress) {
-      throw new UnauthorizedException('Wallet address does not match authenticated user');
-    }
-    const claimId = await this.claims.submitClaim(dto.walletAddress, dto.policyId);
   async submitClaim(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
     const walletAddress = req.wallet || dto.claimant;
     const claimId = await this.claims.submitClaim(walletAddress, dto.policyId);
@@ -99,10 +90,6 @@ export class ClaimsController {
   @ApiOperation({ summary: 'Get all claims for a wallet address' })
   @ApiParam({ name: 'wallet', description: 'Stellar wallet address' })
   @ApiResponse({ status: 200, description: 'Returns claim history for the wallet' })
-  async getClaimHistory(@Req() req: Request & { user?: any }, @Param('wallet') wallet: string) {
-    if (wallet !== req.user?.walletAddress) {
-      throw new UnauthorizedException('Cannot read claims for another wallet');
-    }
   async getClaimHistory(@Param('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
     wallet = wallet || req.wallet;
     const history = await this.claims.getClaimsByWallet(wallet);

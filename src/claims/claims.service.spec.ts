@@ -23,7 +23,12 @@ describe('ClaimsService', () => {
   };
 
   const mockConfigService = {
-    get: jest.fn().mockReturnValue(''),
+    get: jest.fn((key: string) => {
+      if (key === 'CLAIMS_PROCESSOR_CONTRACT') {
+        return 'CC4CG7QPQ5B6CFUANVWFXPF76QCB5DUJCLU4QWPHZE2FP4XCLJAVC5K7';
+      }
+      return '';
+    }),
   };
 
   const mockPrismaService = {

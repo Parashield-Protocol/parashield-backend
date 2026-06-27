@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException, NotFoundException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, NotFoundException, BadGatewayException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -103,9 +103,15 @@ export class ClaimsService {
     }
 
     // Trigger met — initiate Soroban payout via Claims Processor contract
+    const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
+    if (!contractId || !/^C[A-Z2-7]{55}$/.test(contractId)) {
+      throw new BadGatewayException(
+        'CLAIMS_PROCESSOR_CONTRACT not configured or invalid format. Expected a Stellar contract ID (C...).',
+      );
+    }
+
     let txHash: string | undefined;
     try {
-      const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
       txHash = await this.stellar.invokeContract(
         contractId,
         'process_claim',
