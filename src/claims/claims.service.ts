@@ -140,11 +140,11 @@ export class ClaimsService {
   async submitClaim(claimant: string, policyId: string): Promise<string> {
     this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant}`);
 
-    // Duplicate claim guard: prevent double payouts
+    // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
     const existingClaim = await this.prisma.claim.findFirst({
       where: {
         policyId,
-        status: { in: ['PAID', 'PROCESSING'] },
+        status: { in: ['PAID', 'PROCESSING', 'PENDING'] },
       },
     });
 
@@ -163,7 +163,13 @@ export class ClaimsService {
       throw new ConflictException(`Policy ${policyId} is not active`);
     }
 
-    // TODO: build and submit Soroban tx calling claims-processor.submit_claim(...)
+    const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
+    if (!contractId || !/^C[A-Z2-7]{55}$/.test(contractId)) {
+      throw new BadGatewayException(
+        'CLAIMS_PROCESSOR_CONTRACT not configured or invalid format. Expected a Stellar contract ID (C...).',
+      );
+    }
+
     const claim = await this.prisma.claim.create({
       data: {
         policyId,
@@ -174,7 +180,31 @@ export class ClaimsService {
       },
     });
 
-    this.logger.log(`Manual claim submitted: id=${claim.id}`);
+    this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
+
+    try {
+      const txHash = await this.stellar.invokeContract(
+        contractId,
+        'submit_claim',
+        [
+          nativeToScVal(claim.id, { type: 'string' }),
+          nativeToScVal(policyId, { type: 'string' }),
+          nativeToScVal(claimant, { type: 'string' }),
+        ],
+      );
+      this.logger.log(`Manual claim submitted on-chain: id=${claim.id} txHash=${txHash}`);
+      await this.prisma.claim.update({
+        where: { id: claim.id },
+        data:  { status: 'PROCESSING', txHash },
+      });
+    } catch (err) {
+      this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
+      await this.prisma.claim.update({
+        where: { id: claim.id },
+        data:  { status: 'REJECTED', processedAt: new Date() },
+      });
+    }
+
     return claim.id;
   }
 
