@@ -92,19 +92,37 @@ export class OracleService {
     const endDate   = new Date(year, month, 0);
     const endStr    = `${year}-${String(month).padStart(2, '0')}-${endDate.getDate()}`;
 
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
-    const res = await axios.get<{ daily: { precipitation_sum: (number | null)[] } }>(url, { timeout: 10_000 });
+    // Determine if the requested month is in the past relative to today.
+    const today = new Date();
+    const isPastMonth =
+      year < today.getFullYear() ||
+      (year === today.getFullYear() && month < today.getMonth() + 1);
 
-    // Explicitly filter null/undefined values — Open-Meteo returns null for days
-    // with no data (e.g. future dates, gaps in historical archive).
-    // Without the type predicate, TypeScript widens the array type and reduce() may receive null.
-    const readings = res.data.daily.precipitation_sum.filter(
-      (v): v is number => v !== null && v !== undefined,
-    );
-    const totalMm  = readings.reduce((a, b) => a + b, 0);
+    // Choose appropriate Open-Meteo endpoint.
+    const endpoint = isPastMonth ? 'archive' : 'forecast';
+    const url = `https://api.open-meteo.com/v1/${endpoint}?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+
+    const res = await axios.get<{ daily: { precipitation_sum: (number | null)[]; time: string[] } }>(url, { timeout: 10_000 });
+
+    // Pair dates with precipitation values and keep only observed days (date <= today).
+    const todayStr = today.toISOString().split('T')[0]; // YYYY-MM-DD
+    const precipitation = res.data.daily.precipitation_sum;
+    const times = res.data.daily.time ?? [];
+    const observedReadings = precipitation.reduce((arr: number[], value, idx) => {
+      if (value === null || value === undefined) return arr;
+      const date = times[idx];
+      if (date) {
+        if (date <= todayStr) arr.push(value);
+      } else {
+        // If no date info, assume observed (used in tests)
+        arr.push(value);
+      }
+      return arr;
+    }, []);
+    const totalMm = observedReadings.reduce((a, b) => a + b, 0);
 
     const expectedDays = endDate.getDate();
-    const coverage     = readings.length / expectedDays;
+    const coverage     = observedReadings.length / expectedDays;
     const confidence   = Math.round(coverage * 95);
 
     const oracleReading: OracleReading = {
