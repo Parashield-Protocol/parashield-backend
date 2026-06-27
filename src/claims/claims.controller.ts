@@ -1,5 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req, UseGuards, UnauthorizedException } from '@nestjs/common';
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UnauthorizedException, NotFoundException } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -11,7 +10,6 @@ import {
 import { ClaimsService } from './claims.service';
 import { SubmitClaimDto } from './dto/submit-claim.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
-import { Request } from 'express';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('claims')
@@ -19,8 +17,6 @@ import { AuthenticatedRequest } from '../auth/authenticated-request';
 export class ClaimsController {
   constructor(private readonly claims: ClaimsService) {}
 
-  /** POST /api/v1/claims/submit — submit a manual claim */
-  @Post('submit')
   /** POST /api/v1/claims — submit a manual claim */
   @Post()
   @UseGuards(JwtAuthGuard)
@@ -28,25 +24,7 @@ export class ClaimsController {
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
   @ApiResponse({ status: 201, description: 'Claim submitted successfully' })
   @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
-  async submitClaim(@Req() req: Request & { user?: any }, @Body() dto: SubmitClaimDto) {
-    if (dto.walletAddress !== req.user?.walletAddress) {
-      throw new UnauthorizedException('Wallet address does not match authenticated user');
-    }
-    const claimId = await this.claims.submitClaim(dto.walletAddress, dto.policyId);
   async submitClaim(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
-    const walletAddress = req.wallet || dto.claimant;
-    const claimId = await this.claims.submitClaim(walletAddress, dto.policyId);
-    return { success: true, data: { claimId } };
-  }
-
-  /** POST /api/v1/claims/submit — submit a manual claim (legacy path) */
-  @Post('submit')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Submit a manual claim for a policy (legacy path)' })
-  @ApiResponse({ status: 201, description: 'Claim submitted successfully' })
-  @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
-  async submitClaimLegacy(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
     const walletAddress = req.wallet || dto.claimant;
     const claimId = await this.claims.submitClaim(walletAddress, dto.policyId);
     return { success: true, data: { claimId } };
@@ -58,14 +36,29 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get claim history for a wallet address (query param)' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
   @ApiResponse({ status: 200, description: 'Returns claim history for the wallet' })
   @ApiResponse({ status: 403, description: 'Wallet does not match authenticated user' })
-  async getClaimsByWalletQuery(@Query('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
-    if (req.wallet && req.wallet !== wallet) {
+  async getClaimsByWalletQuery(
+    @Query('wallet') wallet: string,
+    @Query('page') page: string,
+    @Query('limit') limit: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const targetWallet = wallet || req.wallet;
+    if (!targetWallet) {
+      throw new UnauthorizedException('Wallet address is required');
+    }
+    if (req.wallet && req.wallet !== targetWallet) {
       throw new ForbiddenException('Wallet address does not match authenticated user');
     }
-    const history = await this.claims.getClaimsByWallet(wallet || req.wallet);
-    return { success: true, data: history };
+    const result = await this.claims.getClaimsByWallet(
+      targetWallet,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+    return { success: true, data: result };
   }
 
   /** POST /api/v1/claims/:policyId/auto — keeper triggers auto-processing */
@@ -98,14 +91,27 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get all claims for a wallet address' })
   @ApiParam({ name: 'wallet', description: 'Stellar wallet address' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number' })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
   @ApiResponse({ status: 200, description: 'Returns claim history for the wallet' })
-  async getClaimHistory(@Req() req: Request & { user?: any }, @Param('wallet') wallet: string) {
-    if (wallet !== req.user?.walletAddress) {
+  async getClaimHistory(
+    @Param('wallet') wallet: string,
+    @Query('page') page: string,
+    @Query('limit') limit: string,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const targetWallet = wallet || req.wallet;
+    if (!targetWallet) {
+      throw new UnauthorizedException('Wallet address is required');
+    }
+    if (req.wallet && req.wallet !== targetWallet) {
       throw new UnauthorizedException('Cannot read claims for another wallet');
     }
-  async getClaimHistory(@Param('wallet') wallet: string, @Req() req: AuthenticatedRequest) {
-    wallet = wallet || req.wallet;
-    const history = await this.claims.getClaimsByWallet(wallet);
-    return { success: true, data: history };
+    const result = await this.claims.getClaimsByWallet(
+      targetWallet,
+      page ? parseInt(page, 10) : 1,
+      limit ? parseInt(limit, 10) : 20,
+    );
+    return { success: true, data: result };
   }
 }

@@ -53,10 +53,13 @@ export class PolicyService {
   /**
    * Calculate the premium for a policy in XLM (whole number, rounded up).
    * Uses basis points: premiumRate 500 = 5%, 100 = 1%.
-   * Formula: coverage * rate * (duration / 365) / 10000
+   *
+   * This formula matches the PolicyEngine contract's fixed-term premium calculation
+   * where premium is based on coverage and rate regardless of duration.
+   * Formula: Math.ceil(coverage * rate / 10000)
    */
-  calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
-    return Math.ceil(coverageXlm * premiumRate * (durationDays / 365) / 10000);
+  calculatePremium(coverageXlm: number, premiumRate: number): number {
+    return Math.ceil(coverageXlm * premiumRate / 10000);
   }
 
   /**
@@ -109,7 +112,7 @@ export class PolicyService {
       throw new BadRequestException('oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products');
     }
 
-    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
+    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate);
 
     const policy = await this.prisma.policy.create({
       data: {
