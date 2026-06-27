@@ -120,6 +120,7 @@ export class PolicyController {
     const premiumXlm = this.policy.calculatePremium(
       dto.coverageXlm,
       product.premiumRate,
+      dto.duration,
     );
 
     return {
@@ -147,10 +148,13 @@ export class PolicyController {
   @ApiResponse({ status: 400, description: 'Invalid request body or on-chain submission failed' })
   async confirmPolicy(@Body() dto: ConfirmPolicyDto, @Req() req: AuthenticatedRequest) {
     const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
+    }
     if (dto.walletAddress !== authedWallet) {
       throw new ForbiddenException('Wallet address does not match authenticated user');
     }
-    const result = await this.policy.confirmAndCreatePolicy(dto);
+    const result = await this.policy.confirmAndCreatePolicy(dto, authedWallet);
     return { success: true, data: result };
   }
 }

@@ -56,12 +56,12 @@ export class PolicyService {
    * Calculate the premium for a policy in XLM (whole number, rounded up).
    * Uses basis points: premiumRate 500 = 5%, 100 = 1%.
    *
-   * This formula matches the PolicyEngine contract's fixed-term premium calculation
-   * where premium is based on coverage and rate regardless of duration.
-   * Formula: Math.ceil(coverage * rate / 10000)
+   * Duration is pro-rated against a 30-day base period to match the
+   * PolicyEngine contract's on-chain formula:
+   *   premium = ceil(coverage * rate * duration / (10000 * 30))
    */
-  calculatePremium(coverageXlm: number, premiumRate: number): number {
-    return Math.ceil(coverageXlm * premiumRate / 10000);
+  calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
+    return Math.ceil(coverageXlm * premiumRate * durationDays / (10000 * 30));
   }
 
   /**
@@ -93,8 +93,11 @@ export class PolicyService {
    * Called after the on-chain transaction is confirmed.
    */
   async createPolicy(dto: BuyPolicyDto | ConfirmPolicyDto, txHash: string) {
-    const now = new Date();
-    const endTime = new Date(now.getTime() + dto.duration * 24 * 60 * 60 * 1000);
+    // Use Unix seconds to avoid millisecond rounding vs Soroban contract timestamps (#113)
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const endTimeSeconds = nowSeconds + dto.duration * 24 * 3600;
+    const now = new Date(nowSeconds * 1000);
+    const endTime = new Date(endTimeSeconds * 1000);
 
     const product = (await this.getActiveProducts()).find((p) => p.id === dto.productId);
     if (!product) {
@@ -114,7 +117,7 @@ export class PolicyService {
       throw new BadRequestException('oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products');
     }
 
-    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate);
+    const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
 
     const policy = await this.prisma.policy.create({
       data: {
@@ -145,10 +148,15 @@ export class PolicyService {
    *
    * Returns the on-chain policyId and txHash on success.
    */
-  async confirmAndCreatePolicy(dto: ConfirmPolicyDto): Promise<{ policyId: string; txHash: string }> {
+  async confirmAndCreatePolicy(dto: ConfirmPolicyDto, authenticatedWallet: string): Promise<{ policyId: string; txHash: string }> {
     const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
 
-    // Validate transaction source account matches the wallet in the request
+    // Validate XDR source matches both the JWT-verified wallet and the DTO field (#112)
+    if (tx.source !== authenticatedWallet) {
+      throw new BadRequestException(
+        `Transaction source account (${tx.source}) does not match the authenticated wallet (${authenticatedWallet})`
+      );
+    }
     if (tx.source !== dto.walletAddress) {
       throw new BadRequestException(
         `Transaction source account (${tx.source}) does not match the wallet address in the request (${dto.walletAddress})`
