@@ -1,4 +1,4 @@
-import { Controller, Get, Logger } from '@nestjs/common';
+import { Controller, Get, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -31,7 +31,7 @@ export class HealthController {
 
     const healthy = dbStatus === 'ok';
 
-    return {
+    const body = {
       status:    healthy ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       service:   'parashield-api',
@@ -42,5 +42,11 @@ export class HealthController {
         },
       },
     };
+
+    if (!healthy) {
+      throw new HttpException(body, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    return body;
   }
 }
