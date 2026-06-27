@@ -47,7 +47,6 @@ export class PolicyController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get paginated policies for a wallet address' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
-  @ApiResponse({ status: 200, description: 'Returns list of policies for the wallet' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiResponse({ status: 200, description: 'Returns paginated policies for the wallet — { data, total, page, limit }' })

@@ -10,6 +10,7 @@ import {
 import { ClaimsService } from './claims.service';
 import { SubmitClaimDto } from './dto/submit-claim.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('claims')
@@ -63,24 +64,33 @@ export class ClaimsController {
 
   /** POST /api/v1/claims/:policyId/auto — keeper triggers auto-processing */
   @Post(':policyId/auto')
-  @ApiOperation({ summary: 'Trigger automatic claim evaluation for a policy' })
+  @UseGuards(OperatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Trigger automatic claim evaluation for a policy (operator only)' })
   @ApiParam({ name: 'policyId', description: 'Policy UUID to evaluate' })
   @ApiResponse({ status: 201, description: 'Claim evaluation triggered' })
+  @ApiResponse({ status: 401, description: 'Operator API key or admin bearer token required' })
   async autoProcess(@Param('policyId') policyId: string) {
     const result = await this.claims.autoProcess(policyId);
     return { success: true, data: { result } };
   }
 
-  /** GET /api/v1/claims/:id — get claim status by ID */
+  /** GET /api/v1/claims/:id — get claim status by ID (owner only) */
   @Get(':id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({ summary: 'Get claim details by ID' })
   @ApiParam({ name: 'id', description: 'Claim UUID' })
   @ApiResponse({ status: 200, description: 'Returns claim details' })
+  @ApiResponse({ status: 403, description: 'Claim belongs to a different wallet' })
   @ApiResponse({ status: 404, description: 'Claim not found' })
-  async getClaim(@Param('id') id: string) {
+  async getClaim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const claim = await this.claims.getClaim(id);
     if (!claim) {
       throw new NotFoundException('Claim not found');
+    }
+    if (claim.claimant !== req.wallet) {
+      throw new ForbiddenException('Claim belongs to a different wallet');
     }
     return { success: true, data: claim };
   }
