@@ -200,4 +200,85 @@ describe('PolicyService.calculatePremium', () => {
       );
     });
   });
+
+  describe('getUserPolicies pagination (Issue #72)', () => {
+    const wallet = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+
+    const makeDbPolicy = (id: string) => ({
+      id,
+      productId:    'prod-1',
+      policyholder: wallet,
+      coverageXlm:  500,
+      premiumPaid:  25,
+      oracleKey:    'rainfall:0,0:2026-06',
+      startTime:    new Date('2026-01-01'),
+      endTime:      new Date('2026-04-01'),
+      status:       'ACTIVE',
+      txHash:       `tx-${id}`,
+      createdAt:    new Date('2026-01-01'),
+    });
+
+    it('returns paginated data with total, page, and limit', async () => {
+      const dbPolicies = [makeDbPolicy('p1'), makeDbPolicy('p2')];
+      mockPrismaService.policy.findMany.mockResolvedValue(dbPolicies);
+      mockPrismaService.policy.count.mockResolvedValue(10);
+
+      const result = await service.getUserPolicies(wallet, 1, 2);
+
+      expect(result.data).toHaveLength(2);
+      expect(result.total).toBe(10);
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(2);
+    });
+
+    it('calls prisma with correct take and skip for page 2', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+      mockPrismaService.policy.count.mockResolvedValue(0);
+
+      await service.getUserPolicies(wallet, 2, 5);
+
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 5, skip: 5 }),
+      );
+    });
+
+    it('clamps limit to 100 maximum', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+      mockPrismaService.policy.count.mockResolvedValue(0);
+
+      const result = await service.getUserPolicies(wallet, 1, 999);
+
+      expect(result.limit).toBe(100);
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 100 }),
+      );
+    });
+
+    it('defaults to page=1 and limit=20 when not provided', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+      mockPrismaService.policy.count.mockResolvedValue(0);
+
+      const result = await service.getUserPolicies(wallet);
+
+      expect(result.page).toBe(1);
+      expect(result.limit).toBe(20);
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 20, skip: 0 }),
+      );
+    });
+
+    it('maps database rows to PolicySummary shape', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([makeDbPolicy('p1')]);
+      mockPrismaService.policy.count.mockResolvedValue(1);
+
+      const result = await service.getUserPolicies(wallet, 1, 20);
+      const p = result.data[0];
+
+      expect(p.id).toBe('p1');
+      expect(p.coverage).toBe('500');
+      expect(p.premiumPaid).toBe('25');
+      expect(typeof p.startTime).toBe('number');
+      expect(typeof p.endTime).toBe('number');
+    });
+  });
 });
