@@ -38,6 +38,10 @@ describe('JwtService', () => {
       expect(decoded.walletAddress).toBe(walletAddress);
     });
 
+    it('should expose the configured token expiry', () => {
+      expect(service.expiresIn).toBe('7d');
+    });
+
     it('should throw UnauthorizedException for an invalid token', () => {
       expect(() => {
         service.verify('invalid.token.value');

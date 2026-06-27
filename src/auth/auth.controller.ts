@@ -106,11 +106,6 @@ export class AuthController {
       throw new UnauthorizedException('Invalid challenge message');
     }
 
-    // Invalidate the nonce immediately after use (one-time use)
-    await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch((err) => {
-      this.logger.warn(`Failed to delete challenge for ${walletAddress}: ${err.message}`);
-    });
-
     try {
       const keypair      = Keypair.fromPublicKey(walletAddress);
       const messageBytes = Buffer.from(message, 'utf8');
@@ -127,6 +122,11 @@ export class AuthController {
       throw new UnauthorizedException('Signature verification failed');
     }
 
+    // Invalidate the nonce only after successful verification (one-time use).
+    await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch((err) => {
+      this.logger.warn(`Failed to delete challenge for ${walletAddress}: ${err.message}`);
+    });
+
     const token = this.jwtService.sign(walletAddress);
     this.logger.log(`Login successful: wallet=${walletAddress}`);
 
@@ -135,7 +135,7 @@ export class AuthController {
       data: {
         token,
         walletAddress,
-        expiresIn: '7d',
+        expiresIn: this.jwtService.expiresIn,
       },
     };
   }
