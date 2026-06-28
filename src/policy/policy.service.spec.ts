@@ -324,6 +324,57 @@ describe("PolicyService.calculatePremium", () => {
 
       await expect(service.createPolicy(dto, "tx-hash")).rejects.toThrow("Connection lost");
     });
+
+    it("throws ConflictException with txHash message when P2002 target is txHash (issue #137)", async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+
+      const p2002Error = new Prisma.PrismaClientKnownRequestError(
+        "Unique constraint failed on the fields: (`txHash`)",
+        { code: "P2002", clientVersion: "5.0.0", meta: { target: ["txHash"] }, batchRequestIdx: undefined },
+      );
+      mockPrismaService.policy.create.mockRejectedValue(p2002Error);
+
+      const dto = {
+        productId: "1",
+        coverageXlm: 500,
+        walletAddress: "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ",
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(service.createPolicy(dto, "duplicate-tx-abc")).rejects.toThrow(
+        /duplicate-tx-abc.*already been used to create a policy/,
+      );
+    });
+  });
+
+  describe("calculatePremium — BigInt arithmetic (issue #139)", () => {
+    it("returns the same result as float for exact multiples", () => {
+      // coverage=1000, rate=500, duration=30 → 1000*500*30 / 300000 = 50 exactly
+      expect(service.calculatePremium(1000, 500, 30)).toBe(50);
+    });
+
+    it("rounds up when result is not a whole number", () => {
+      // coverage=10, rate=100, duration=30 → 10*100*30 / 300000 = 0.1 → ceil = 1
+      expect(service.calculatePremium(10, 100, 30)).toBe(1);
+    });
+
+    it("does not accumulate floating-point error on large coverage", () => {
+      // Verify the BigInt path gives the exact integer result.
+      // coverage=999999999, rate=9999, duration=365
+      // numerator = 999999999 * 9999 * 365 = 3649635 * 999999999 = 3649631350364365
+      // floored = 3649631350364365 / 300000 = 12165437834 remainder 164365 → ceil = 12165437835
+      const result = service.calculatePremium(999999999, 9999, 365);
+      expect(result).toBe(Number(
+        (() => {
+          const n = BigInt(999999999) * BigInt(9999) * BigInt(365);
+          const d = BigInt(300000);
+          const f = n / d;
+          return n % d > 0n ? f + 1n : f;
+        })()
+      ));
+      expect(Number.isInteger(result)).toBe(true);
+    });
   });
 
   describe("getUserPolicies pagination (Issue #72)", () => {

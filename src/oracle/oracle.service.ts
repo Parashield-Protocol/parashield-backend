@@ -10,7 +10,7 @@ import { PrismaService } from "../prisma/prisma.service";
 export interface OracleReading {
   dataType: string;
   key: string;
-  value: bigint; // 7-decimal fixed point
+  value: string; // 7-decimal fixed point, serialized as string to survive JSON.stringify
   confidence: number;
   timestamp: number;
   source: string;
@@ -48,7 +48,7 @@ export class OracleService {
       data: {
         dataType: reading.dataType,
         key: reading.key,
-        value: reading.value,
+        value: BigInt(reading.value),
         confidence: reading.confidence,
         source: reading.source,
       },
@@ -68,7 +68,7 @@ export class OracleService {
     return records.map((record) => ({
       dataType: record.dataType,
       key: record.key,
-      value: record.value,
+      value: record.value.toString(),
       confidence: record.confidence,
       timestamp: Math.floor(record.submittedAt.getTime() / 1000),
       source: record.source,
@@ -87,7 +87,7 @@ export class OracleService {
     return {
       dataType: record.dataType,
       key: record.key,
-      value: record.value,
+      value: record.value.toString(),
       confidence: record.confidence,
       timestamp: Math.floor(record.submittedAt.getTime() / 1000),
       source: record.source,
@@ -161,7 +161,7 @@ export class OracleService {
     const oracleReading: OracleReading = {
       dataType: "weather",
       key: `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`,
-      value: BigInt(Math.round(totalMm * 1e7)),
+      value: BigInt(Math.round(totalMm * 1e7)).toString(),
       confidence,
       timestamp: Math.floor(Date.now() / 1000),
       source: "open-meteo",
@@ -216,7 +216,7 @@ export class OracleService {
     const oracleReading: OracleReading = {
       dataType: "weather",
       key: `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`,
-      value: BigInt(Math.round(avgTemp * 1e7)),
+      value: BigInt(Math.round(avgTemp * 1e7)).toString(),
       confidence,
       timestamp: Math.floor(Date.now() / 1000),
       source: "open-meteo",
@@ -270,7 +270,7 @@ export class OracleService {
     const oracleReading: OracleReading = {
       dataType: "flight",
       key: `flight:${flightNumber}:${date}`,
-      value: BigInt(Math.round(delay * 1e7)),
+      value: BigInt(Math.round(delay * 1e7)).toString(),
       confidence: 95,
       timestamp: Math.floor(Date.now() / 1000),
       source: "aviationstack",

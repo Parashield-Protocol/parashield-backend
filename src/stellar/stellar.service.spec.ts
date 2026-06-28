@@ -229,6 +229,7 @@ describe("StellarService", () => {
       getAccount: jest.Mock;
       simulateTransaction: jest.Mock;
       sendTransaction: jest.Mock;
+      getTransaction: jest.Mock;
     };
 
     const mockConfigService = {
@@ -252,6 +253,9 @@ describe("StellarService", () => {
         sendTransaction: jest
           .fn()
           .mockResolvedValue({ status: "PENDING", hash: "tx-hash" }),
+        getTransaction: jest
+          .fn()
+          .mockResolvedValue({ status: "NOT_FOUND" }),
       };
 
       const module: TestingModule = await Test.createTestingModule({
@@ -308,6 +312,34 @@ describe("StellarService", () => {
       ).rejects.toThrow("All 3 sendTransaction attempts failed");
 
       expect(mockRpc.getAccount).toHaveBeenCalledTimes(3);
+    });
+
+    it("returns existing hash without re-sending if previous send already landed (dedup check)", async () => {
+      // Scenario: sendTransaction returns ERROR status (captured as lastSentHash), causing a throw,
+      // then on retry the dedup check finds it already landed via getTransaction.
+      mockRpc.sendTransaction
+        .mockResolvedValueOnce({ status: "ERROR", hash: "tx-hash-landed", errorResult: "timeout" })
+        .mockResolvedValueOnce({ status: "PENDING", hash: "tx-hash-retry" });
+
+      // On retry (attempt 2), getTransaction reveals the first tx already landed
+      mockRpc.getTransaction.mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const hash = await service.invokeContract("CONTRACT_ID", "my_method", []);
+
+      // sendTransaction was only called once — dedup short-circuited the retry
+      expect(mockRpc.sendTransaction).toHaveBeenCalledTimes(1);
+      // getTransaction was called once on attempt 2 to confirm prior tx status
+      expect(mockRpc.getTransaction).toHaveBeenCalledTimes(1);
+      // Returns the hash from the already-landed first send
+      expect(hash).toBe("tx-hash-landed");
+    });
+
+    it("does NOT call getTransaction on the first attempt (no prior hash to check)", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "first-hash" });
+
+      await service.invokeContract("CONTRACT_ID", "my_method", []);
+
+      expect(mockRpc.getTransaction).not.toHaveBeenCalled();
     });
   });
 });

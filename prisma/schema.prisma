@@ -24,6 +24,7 @@ model Policy {
   claims        Claim[]
 
   @@unique([policyholder, productId, oracleKey])
+  @@unique([txHash])
   @@index([policyholder])
   @@index([status])
 }

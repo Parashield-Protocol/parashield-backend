@@ -59,8 +59,8 @@ describe("OracleService.fetchRainfall", () => {
     mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
-    expect(reading.value).toBe(BigInt(Math.round(45.8 * 1e7)));
-    expect(reading.value).toBe(BigInt(458000000));
+    expect(reading.value).toBe(String(BigInt(Math.round(45.8 * 1e7))));
+    expect(reading.value).toBe("458000000");
   });
 
   it('should set source to "open-meteo"', async () => {
@@ -127,7 +127,7 @@ describe("OracleService.fetchRainfall", () => {
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     // Should still sum 10.5 + 15.0 + 20.3 = 45.8
-    expect(reading.value).toBe(BigInt(458000000));
+    expect(reading.value).toBe("458000000");
   });
 
   describe("fetchRainfallReading — only observed days (issue #73)", () => {
@@ -250,7 +250,7 @@ describe("OracleService.fetchRainfall", () => {
       );
 
       // No observed days
-      expect(reading.value).toBe(BigInt(0));
+      expect(reading.value).toBe("0");
       expect(reading.confidence).toBe(0);
     });
 
@@ -361,7 +361,7 @@ describe("OracleService.fetchRainfall", () => {
       mockPrismaService.oracleReading.create.mockResolvedValue({ id: "f1" });
 
       const reading = await service.fetchFlightDelay("KQ100", "2026-06-27");
-      expect(reading.value).toBe(150000000n);
+      expect(reading.value).toBe("150000000");
       expect(reading.confidence).toBe(95);
       expect(reading.source).toBe("aviationstack");
       expect(mockPrismaService.oracleReading.create).toHaveBeenCalled();
@@ -371,7 +371,7 @@ describe("OracleService.fetchRainfall", () => {
       const mockReading = {
         dataType: "flight",
         key: "flight:KQ100:2026-06-27",
-        value: 0n,
+        value: "0",
         confidence: 0,
         timestamp: 123456,
         source: "mock",
