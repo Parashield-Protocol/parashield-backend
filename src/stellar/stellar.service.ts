@@ -1,4 +1,4 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, HttpException, HttpStatus } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Networks,
@@ -47,7 +47,10 @@ export class StellarService {
     method: string,
     args: xdr.ScVal[],
   ): Promise<StellarRpc.Api.SimulateTransactionResponse> {
-    const account = await this.rpc.getAccount(this.keeperKeypair.publicKey());
+    const account = await this.withTimeout(
+      this.rpc.getAccount(this.keeperKeypair.publicKey()),
+      "getAccount",
+    );
     const contract = new Contract(contractId);
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
@@ -57,7 +60,10 @@ export class StellarService {
       .setTimeout(30)
       .build();
 
-    return this.rpc.simulateTransaction(tx);
+    return this.withTimeout(
+      this.rpc.simulateTransaction(tx),
+      "simulateTransaction",
+    );
   }
 
   /**
@@ -80,7 +86,10 @@ export class StellarService {
       try {
         // Re-fetch account on every attempt to get a fresh sequence number;
         // reusing a stale assembled transaction causes TRANSACTION_BAD_SEQ on retry.
-        const account = await this.rpc.getAccount(signer.publicKey());
+        const account = await this.withTimeout(
+          this.rpc.getAccount(signer.publicKey()),
+          "getAccount",
+        );
         const tx = new TransactionBuilder(account, {
           fee: BASE_FEE,
           networkPassphrase: this.network,
@@ -89,7 +98,10 @@ export class StellarService {
           .setTimeout(30)
           .build();
 
-        const simResult = await this.rpc.simulateTransaction(tx);
+        const simResult = await this.withTimeout(
+          this.rpc.simulateTransaction(tx),
+          "simulateTransaction",
+        );
         if (StellarRpc.Api.isSimulationError(simResult)) {
           throw new Error(`Simulation failed: ${simResult.error}`);
         }
@@ -100,7 +112,10 @@ export class StellarService {
         ).build();
         assembledTx.sign(signer);
 
-        const sendResult = await this.rpc.sendTransaction(assembledTx);
+        const sendResult = await this.withTimeout(
+          this.rpc.sendTransaction(assembledTx),
+          "sendTransaction",
+        );
         if (sendResult.status === "ERROR") {
           throw new Error(
             `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
@@ -116,7 +131,10 @@ export class StellarService {
           `sendTransaction attempt ${attempt}/${MAX_ATTEMPTS} failed: ${lastError.message}`,
         );
         if (attempt < MAX_ATTEMPTS) {
-          await this.sleep(2000);
+          // Exponential backoff: 2s, 4s, 8s...
+          const backoffMs = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          this.logger.warn(`Retrying in ${backoffMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
+          await this.sleep(backoffMs);
         }
       }
     }
@@ -140,7 +158,10 @@ export class StellarService {
   async simulateAssembleAndSend(
     tx: Transaction,
   ): Promise<StellarRpc.Api.SendTransactionResponse> {
-    const simResult = await this.rpc.simulateTransaction(tx);
+    const simResult = await this.withTimeout(
+      this.rpc.simulateTransaction(tx),
+      "simulateTransaction",
+    );
     if (StellarRpc.Api.isSimulationError(simResult)) {
       throw new Error(`Simulation failed: ${simResult.error}`);
     }
@@ -148,7 +169,10 @@ export class StellarService {
     const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
     assembledTx.sign(this.keeperKeypair);
 
-    const sendResult = await this.rpc.sendTransaction(assembledTx);
+    const sendResult = await this.withTimeout(
+      this.rpc.sendTransaction(assembledTx),
+      "sendTransaction",
+    );
     if (sendResult.status === "ERROR") {
       throw new Error(
         `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
@@ -177,7 +201,10 @@ export class StellarService {
     const POLL_INTERVAL_MS = 2000;
 
     while (Date.now() - start < timeoutMs) {
-      const txResult = await this.rpc.getTransaction(txHash);
+      const txResult = await this.withTimeout(
+        this.rpc.getTransaction(txHash),
+        "getTransaction",
+      );
 
       if (txResult.status === "SUCCESS") {
         this.logger.log(`Transaction confirmed: ${txHash}`);
@@ -207,12 +234,44 @@ export class StellarService {
   }
 
   /**
+   * Wraps a promise with a timeout. Rejects with a 504 Gateway Timeout error
+   * if the operation does not complete within the specified time.
+   */
+  private async withTimeout<T>(
+    promise: Promise<T>,
+    operation: string,
+    timeoutMs: number = 10000,
+  ): Promise<T> {
+    let timer: NodeJS.Timeout;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        this.logger.warn(`RPC operation timed out after ${timeoutMs}ms: ${operation}`);
+        reject(
+          new HttpException(
+            { message: `RPC operation timed out: ${operation}`, operation },
+            HttpStatus.GATEWAY_TIMEOUT,
+          ),
+        );
+      }, timeoutMs);
+    });
+    try {
+      const result = await Promise.race([promise, timeoutPromise]);
+      clearTimeout(timer!);
+      return result;
+    } catch (err) {
+      clearTimeout(timer!);
+      throw err;
+    }
+  }
+
+  /**
    * Get the native XLM balance for an account.
    * Used for keeper health checks to ensure the keeper has sufficient funds.
    */
   async getAccountBalance(publicKey: string): Promise<string> {
-    const account = (await this.rpc.getAccount(
-      publicKey,
+    const account = (await this.withTimeout(
+      this.rpc.getAccount(publicKey),
+      "getAccount",
     )) as Horizon.AccountResponse;
     const nativeBalance = account.balances.find(
       (b): b is Horizon.HorizonApi.BalanceLineNative =>
