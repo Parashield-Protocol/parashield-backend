@@ -36,10 +36,67 @@ describe('Auth guards', () => {
     expect(request.wallet).toBe('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ');
   });
 
+  it('sets req.user.walletAddress after successful JWT verification', () => {
+    const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+    const token = jwtService.sign(walletAddress);
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new JwtAuthGuard(jwtService);
+    guard.canActivate(contextFor(request));
+
+    expect(request.user?.walletAddress).toBe(walletAddress);
+  });
+
+  it('populates req.user with full JWT payload including role and admin', () => {
+    const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+    const token = jwtService.signWithRole(walletAddress, 'admin', true);
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new JwtAuthGuard(jwtService);
+    guard.canActivate(contextFor(request));
+
+    expect(request.user?.walletAddress).toBe(walletAddress);
+    expect(request.user?.role).toBe('admin');
+    expect(request.user?.admin).toBe(true);
+  });
+
   it('rejects requests without JWTs on JWT-protected routes', () => {
     const guard = new JwtAuthGuard(jwtService);
 
     expect(() => guard.canActivate(contextFor({ headers: {} }))).toThrow(UnauthorizedException);
+  });
+
+  it('rejects expired JWTs', () => {
+    const expiredToken = jwt.sign(
+      { walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ' },
+      secret,
+      { expiresIn: '-1s' },
+    );
+    const request = {
+      headers: { authorization: `Bearer ${expiredToken}` },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new JwtAuthGuard(jwtService);
+
+    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
+  });
+
+  it('rejects JWTs signed with the wrong secret', () => {
+    const wrongToken = jwt.sign(
+      { walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ' },
+      'wrong-secret',
+    );
+    const request = {
+      headers: { authorization: `Bearer ${wrongToken}` },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new JwtAuthGuard(jwtService);
+
+    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
   });
 
   it('allows operator API keys for oracle fetch routes', () => {

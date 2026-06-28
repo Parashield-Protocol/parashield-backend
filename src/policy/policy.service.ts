@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, Injectable, Logger } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { TransactionBuilder, Transaction, Address, rpc as StellarRpc, scValToNative } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -89,6 +90,29 @@ export class PolicyService {
   }
 
   /**
+   * Validate that the requested coverage does not exceed the pool's available liquidity.
+   * Skipped when POOL_CAPACITY_XLM is not configured.
+   */
+  async validatePoolCapacity(coverageXlm: number): Promise<void> {
+    const poolCapacity = parseFloat(this.config.get<string>('POOL_CAPACITY_XLM') ?? '0');
+    if (poolCapacity <= 0) return;
+
+    const result = await this.prisma.policy.aggregate({
+      _sum: { coverageXlm: true },
+      where: { status: 'ACTIVE' },
+    });
+
+    const committed = result._sum.coverageXlm ? parseFloat(result._sum.coverageXlm.toString()) : 0;
+    const available = poolCapacity - committed;
+
+    if (coverageXlm > available) {
+      throw new BadRequestException(
+        `Requested coverage ${coverageXlm} XLM exceeds available pool capacity of ${available.toFixed(7)} XLM`,
+      );
+    }
+  }
+
+  /**
    * Persist a newly purchased policy to the database.
    * Called after the on-chain transaction is confirmed.
    */
@@ -109,6 +133,8 @@ export class PolicyService {
       throw new BadRequestException(validation.reason);
     }
 
+    await this.validatePoolCapacity(dto.coverageXlm);
+
     // Strict validation of oracleKey format based on product category
     if (product.category === 'crop' && !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(dto.oracleKey)) {
       throw new BadRequestException('oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products');
@@ -119,22 +145,31 @@ export class PolicyService {
 
     const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
 
-    const policy = await this.prisma.policy.create({
-      data: {
-        productId:    dto.productId,
-        policyholder: dto.walletAddress,
-        coverageXlm:  dto.coverageXlm,
-        premiumPaid,
-        oracleKey:    dto.oracleKey,
-        startTime:    now,
-        endTime,
-        status:       'ACTIVE',
-        txHash,
-      },
-    });
+    try {
+      const policy = await this.prisma.policy.create({
+        data: {
+          productId:    dto.productId,
+          policyholder: dto.walletAddress,
+          coverageXlm:  dto.coverageXlm,
+          premiumPaid,
+          oracleKey:    dto.oracleKey,
+          startTime:    now,
+          endTime,
+          status:       'ACTIVE',
+          txHash,
+        },
+      });
 
-    this.logger.log(`Policy created: id=${policy.id} holder=${dto.walletAddress}`);
-    return policy;
+      this.logger.log(`Policy created: id=${policy.id} holder=${dto.walletAddress}`);
+      return policy;
+    } catch (err) {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        throw new ConflictException(
+          'An active policy already exists for this wallet, product, and oracle key',
+        );
+      }
+      throw err;
+    }
   }
 
   /**
@@ -142,14 +177,22 @@ export class PolicyService {
    *
    * Flow:
    *   1. Deserialize the frontend-signed XDR
-   *   2. Simulate → assembleTransaction → sign (keeper) → sendTransaction
-   *   3. Poll getTransaction until SUCCESS or FAILED
-   *   4. Create policy record only on SUCCESS
+   *   2. Validate timeBounds.maxTime has not expired
+   *   3. Simulate → assembleTransaction → sign (keeper) → sendTransaction
+   *   4. Poll getTransaction until SUCCESS or FAILED
+   *   5. Create policy record only on SUCCESS
    *
    * Returns the on-chain policyId and txHash on success.
    */
   async confirmAndCreatePolicy(dto: ConfirmPolicyDto, authenticatedWallet: string): Promise<{ policyId: string; txHash: string }> {
     const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
+
+    // Reject XDRs with no timeBounds or an expired maxTime (#102)
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const maxTime = tx.timeBounds?.maxTime ? parseInt(tx.timeBounds.maxTime, 10) : 0;
+    if (maxTime <= 0 || maxTime < nowSeconds) {
+      throw new GoneException('Signed XDR has expired; please request a new transaction to sign');
+    }
 
     // Validate XDR source matches both the JWT-verified wallet and the DTO field (#112)
     if (tx.source !== authenticatedWallet) {

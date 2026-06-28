@@ -3,6 +3,8 @@ import { PolicyService, ProductSummary } from "./policy.service";
 import { StellarService } from "../stellar/stellar.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
+import { ConflictException, GoneException } from "@nestjs/common";
+import { Prisma } from "@prisma/client";
 import {
   Operation,
   TransactionBuilder,
@@ -28,6 +30,7 @@ describe("PolicyService.calculatePremium", () => {
       findMany: jest.fn(),
       findUnique: jest.fn(),
       count: jest.fn(),
+      aggregate: jest.fn(),
     },
     product: {
       findMany: jest.fn(),
@@ -55,6 +58,7 @@ describe("PolicyService.calculatePremium", () => {
 
     service = module.get<PolicyService>(PolicyService);
     jest.clearAllMocks();
+    mockPrismaService.policy.aggregate.mockResolvedValue({ _sum: { coverageXlm: null } });
   });
 
   it("should return the correct premium for standard coverage", () => {
@@ -115,6 +119,66 @@ describe("PolicyService.calculatePremium", () => {
       const result = service.validateCoverage(5000, product);
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("exceeds the maximum");
+    });
+  });
+
+  describe("validatePoolCapacity", () => {
+    it("skips check when POOL_CAPACITY_XLM is not configured", async () => {
+      mockConfigService.get.mockReturnValue(undefined);
+      await expect(service.validatePoolCapacity(999999)).resolves.toBeUndefined();
+      expect(mockPrismaService.policy.aggregate).not.toHaveBeenCalled();
+    });
+
+    it("skips check when POOL_CAPACITY_XLM is zero", async () => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === "POOL_CAPACITY_XLM") return "0";
+        return undefined;
+      });
+      await expect(service.validatePoolCapacity(100)).resolves.toBeUndefined();
+      expect(mockPrismaService.policy.aggregate).not.toHaveBeenCalled();
+    });
+
+    it("allows coverage when committed + requested is within pool capacity", async () => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === "POOL_CAPACITY_XLM") return "1000";
+        if (key === "POLICY_ENGINE_CONTRACT") return "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+        return undefined;
+      });
+      mockPrismaService.policy.aggregate.mockResolvedValue({
+        _sum: { coverageXlm: new (require("@prisma/client").Prisma.Decimal)("600") },
+      });
+
+      await expect(service.validatePoolCapacity(300)).resolves.toBeUndefined();
+    });
+
+    it("throws 400 when requested coverage exceeds available pool capacity", async () => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === "POOL_CAPACITY_XLM") return "1000";
+        if (key === "POLICY_ENGINE_CONTRACT") return "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+        return undefined;
+      });
+      mockPrismaService.policy.aggregate.mockResolvedValue({
+        _sum: { coverageXlm: new (require("@prisma/client").Prisma.Decimal)("800") },
+      });
+
+      await expect(service.validatePoolCapacity(300)).rejects.toThrow(
+        /exceeds available pool capacity/,
+      );
+    });
+
+    it("throws 400 when there is no capacity at all (pool is full)", async () => {
+      mockConfigService.get.mockImplementation((key: string) => {
+        if (key === "POOL_CAPACITY_XLM") return "500";
+        if (key === "POLICY_ENGINE_CONTRACT") return "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+        return undefined;
+      });
+      mockPrismaService.policy.aggregate.mockResolvedValue({
+        _sum: { coverageXlm: new (require("@prisma/client").Prisma.Decimal)("500") },
+      });
+
+      await expect(service.validatePoolCapacity(1)).rejects.toThrow(
+        /exceeds available pool capacity/,
+      );
     });
   });
 
@@ -218,6 +282,48 @@ describe("PolicyService.calculatePremium", () => {
         /oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products/,
       );
     });
+
+    it("throws ConflictException (409) on duplicate policy (P2002)", async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+
+      const p2002Error = new Prisma.PrismaClientKnownRequestError(
+        "Unique constraint failed",
+        { code: "P2002", clientVersion: "5.0.0", meta: {}, batchRequestIdx: undefined },
+      );
+      mockPrismaService.policy.create.mockRejectedValue(p2002Error);
+
+      const dto = {
+        productId: "1",
+        coverageXlm: 500,
+        walletAddress:
+          "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ",
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(service.createPolicy(dto, "tx-hash")).rejects.toThrow(ConflictException);
+      await expect(service.createPolicy(dto, "tx-hash")).rejects.toThrow(
+        /already exists for this wallet/,
+      );
+    });
+
+    it("re-throws non-P2002 database errors as-is", async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+
+      const dbError = new Error("Connection lost");
+      mockPrismaService.policy.create.mockRejectedValue(dbError);
+
+      const dto = {
+        productId: "1",
+        coverageXlm: 500,
+        walletAddress:
+          "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ",
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(service.createPolicy(dto, "tx-hash")).rejects.toThrow("Connection lost");
+    });
   });
 
   describe("getUserPolicies pagination (Issue #72)", () => {
@@ -310,6 +416,7 @@ describe("PolicyService.calculatePremium", () => {
       contract?: string;
       function?: string;
       opType?: string;
+      timeBounds?: { minTime: string; maxTime: string } | null;
     }) {
       const source = opts.source ?? validWallet;
       const account = new Account(source, "1");
@@ -329,15 +436,30 @@ describe("PolicyService.calculatePremium", () => {
         });
       }
 
-      const tx = new TransactionBuilder(account, {
+      const builder = new TransactionBuilder(account, {
         fee: "100",
         networkPassphrase: "Test SDF Network ; September 2015",
-      })
-        .addOperation(op)
-        .setTimeout(30)
-        .build();
+      }).addOperation(op);
 
-      return tx.toXDR();
+      // opts.timeBounds === null → no timeBounds at all (omit setTimeout)
+      // opts.timeBounds provided → use it (custom timeBounds)
+      // opts.timeBounds undefined → default future timeBounds
+      if (opts.timeBounds === null) {
+        (builder as any).timebounds = undefined;
+        builder.setTimeout(0);
+      } else if (opts.timeBounds) {
+        builder.setTimebounds(
+          parseInt(opts.timeBounds.minTime, 10),
+          parseInt(opts.timeBounds.maxTime, 10),
+        );
+      } else {
+        // Default: valid timeBounds 5 minutes in the future
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        builder.setTimeout(300);
+        void nowSeconds;
+      }
+
+      return builder.build().toXDR();
     }
 
     it("should pass validation and call simulateAssembleAndSend when transaction is valid", async () => {
@@ -379,6 +501,61 @@ describe("PolicyService.calculatePremium", () => {
       const result = await service.confirmAndCreatePolicy(dto, validWallet);
       expect(result.policyId).toBe("policy-123");
       expect(result.txHash).toBe("tx-hash-123");
+    });
+
+    it("throws GoneException (410) when XDR timeBounds.maxTime has already passed", async () => {
+      const pastTime = Math.floor(Date.now() / 1000) - 600; // 10 minutes ago
+      const expiredXdr = buildTestTxXdr({
+        timeBounds: { minTime: "0", maxTime: String(pastTime) },
+      });
+
+      const dto = {
+        signedXdr: expiredXdr,
+        productId: "prod-1",
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(GoneException);
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(/Signed XDR has expired/);
+    });
+
+    it("throws GoneException (410) when XDR has no timeBounds", async () => {
+      const account = new Account(validWallet, "1");
+      const op = Operation.invokeContractFunction({
+        contract: validContract,
+        function: "buy_policy",
+        args: [],
+      });
+      // Build with setTimeout(0) which sets maxTime to 0 (no bounds)
+      const tx = new TransactionBuilder(account, {
+        fee: "100",
+        networkPassphrase: "Test SDF Network ; September 2015",
+      })
+        .addOperation(op)
+        .setTimeout(0)
+        .build();
+      const noTimeBoundsXdr = tx.toXDR();
+
+      const dto = {
+        signedXdr: noTimeBoundsXdr,
+        productId: "prod-1",
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(GoneException);
     });
 
     it("should throw BadRequestException if source account does not match wallet address", async () => {
