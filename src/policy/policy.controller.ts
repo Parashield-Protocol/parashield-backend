@@ -99,7 +99,7 @@ export class PolicyController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get premium quote for requested coverage' })
   @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
-  @ApiResponse({ status: 400, description: 'Invalid request body' })
+  @ApiResponse({ status: 400, description: 'Invalid request body or coverage exceeds pool capacity' })
   async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (dto.walletAddress !== authedWallet) {
@@ -116,6 +116,8 @@ export class PolicyController {
     if (!validation.valid) {
       throw new BadRequestException(validation.reason);
     }
+
+    await this.policy.validatePoolCapacity(dto.coverageXlm);
 
     const premiumXlm = this.policy.calculatePremium(
       dto.coverageXlm,
@@ -146,6 +148,8 @@ export class PolicyController {
   @ApiOperation({ summary: 'Submit signed XDR to complete policy purchase on-chain' })
   @ApiResponse({ status: 200, description: 'Policy created on-chain and persisted; returns policyId and txHash' })
   @ApiResponse({ status: 400, description: 'Invalid request body or on-chain submission failed' })
+  @ApiResponse({ status: 409, description: 'Policy already exists for this wallet, product, and oracle key' })
+  @ApiResponse({ status: 410, description: 'Signed XDR has expired' })
   async confirmPolicy(@Body() dto: ConfirmPolicyDto, @Req() req: AuthenticatedRequest) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
