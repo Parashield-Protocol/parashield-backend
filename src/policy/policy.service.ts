@@ -1,5 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
-import { TransactionBuilder, Transaction, Address, rpc as StellarRpc } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Transaction, Address, rpc as StellarRpc, scValToNative } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
@@ -209,6 +209,37 @@ export class PolicyService {
       );
     }
 
+    // Validate XDR args match the expected DTO parameters (#122).
+    // buy_policy(product_id: String, coverage: i128, oracle_key: String)
+    const args = invokeContract.args();
+    if (!args || args.length() < 3) {
+      throw new BadRequestException('buy_policy transaction must have at least 3 arguments (product_id, coverage, oracle_key)');
+    }
+    try {
+      const xdrProductId  = String(scValToNative(args.get(0)));
+      const xdrCoverage   = String(scValToNative(args.get(1)));
+      const xdrOracleKey  = String(scValToNative(args.get(2)));
+
+      if (xdrProductId !== dto.productId) {
+        throw new BadRequestException(
+          `XDR productId (${xdrProductId}) does not match request productId (${dto.productId})`
+        );
+      }
+      if (xdrCoverage !== String(dto.coverageXlm)) {
+        throw new BadRequestException(
+          `XDR coverage (${xdrCoverage}) does not match request coverage (${dto.coverageXlm})`
+        );
+      }
+      if (xdrOracleKey !== dto.oracleKey) {
+        throw new BadRequestException(
+          `XDR oracleKey (${xdrOracleKey}) does not match request oracleKey (${dto.oracleKey})`
+        );
+      }
+    } catch (err) {
+      if (err instanceof BadRequestException) throw err;
+      throw new BadRequestException('Failed to decode buy_policy arguments from XDR');
+    }
+
     const sendResult = await this.stellar.simulateAssembleAndSend(tx);
     if (sendResult.status === 'ERROR') {
       throw new Error(`On-chain submission failed: ${JSON.stringify(sendResult.errorResult)}`);
@@ -248,6 +279,26 @@ export class PolicyService {
 
     this.logger.log(`findByPolicyholder: ${address} → ${policies.length}/${total} policies (page ${page})`);
     return { policies, total };
+  }
+
+  async getProductById(id: string): Promise<ProductSummary | null> {
+    const product = await this.prisma.product.findUnique({
+      where: { id, status: 'Active' },
+    });
+    if (!product) return null;
+    return {
+      id:          product.id,
+      name:        product.name,
+      category:    product.category,
+      triggerType: product.triggerType,
+      threshold:   product.threshold,
+      comparison:  product.comparison,
+      coverageMin: product.coverageMin,
+      coverageMax: product.coverageMax,
+      premiumRate: product.premiumRate,
+      maxDuration: product.maxDuration,
+      status:      product.status,
+    };
   }
 
   async getActiveProducts(): Promise<ProductSummary[]> {

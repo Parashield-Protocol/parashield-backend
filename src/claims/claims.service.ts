@@ -81,9 +81,8 @@ export class ClaimsService {
       return 'Rejected';
     }
 
-    // Evaluate trigger condition against product definition
-    const products   = await this.policyService.getActiveProducts();
-    const product    = products.find((p) => p.id === policy.productId);
+    // Evaluate trigger condition against product definition (#120: direct lookup instead of full scan)
+    const product    = await this.policyService.getProductById(policy.productId);
     const threshold  = BigInt(Math.round(parseFloat(product?.threshold ?? '50') * 1e7));
     const comparison = product?.comparison ?? 'LessThan';
 
@@ -199,9 +198,10 @@ export class ClaimsService {
       });
     } catch (err) {
       this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
+      // Use FAILED (not REJECTED) for on-chain errors — REJECTED means trigger condition not met (#119)
       await this.prisma.claim.update({
         where: { id: claim.id },
-        data:  { status: 'REJECTED', processedAt: new Date() },
+        data:  { status: 'FAILED', processedAt: new Date() },
       });
     }
 
