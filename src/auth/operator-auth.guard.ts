@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
@@ -98,7 +98,9 @@ export class OperatorAuthGuard implements CanActivate {
       this.config.get<string>('ADMIN_API_KEY');
 
     if (!configuredKey) {
-      return false;
+      throw new InternalServerErrorException(
+        'Server misconfiguration: ORACLE_OPERATOR_API_KEY is not set',
+      );
     }
 
     const providedKey = this.getHeader(request, 'x-api-key') ?? this.getHeader(request, 'x-admin-api-key');
