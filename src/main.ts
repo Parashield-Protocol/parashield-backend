@@ -40,6 +40,12 @@ async function bootstrap() {
     process.exit(1);
   }
 
+  const operatorApiKey = configService.get<string>('ORACLE_OPERATOR_API_KEY');
+  if (!operatorApiKey) {
+    console.error('Fatal Error: ORACLE_OPERATOR_API_KEY environment variable is required');
+    process.exit(1);
+  }
+
   // CORS
   app.enableCors({
     origin: corsOrigin,
