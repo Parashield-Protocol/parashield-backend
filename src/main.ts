@@ -4,6 +4,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { ThrottleGuard } from './common/guards/throttle.guard';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 
@@ -30,6 +31,9 @@ async function bootstrap() {
 
   // Global interceptors
   app.useGlobalInterceptors(new LoggingInterceptor());
+
+  // Global guards
+  app.useGlobalGuards(new ThrottleGuard());
 
   // Global validation pipe
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
