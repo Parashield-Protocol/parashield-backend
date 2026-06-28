@@ -1,5 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, Logger } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
 import {
   Networks,
   Keypair,
@@ -11,7 +11,7 @@ import {
   rpc as StellarRpc,
   Horizon,
   xdr,
-} from '@stellar/stellar-sdk';
+} from "@stellar/stellar-sdk";
 
 /**
  * StellarService — thin wrapper over the Stellar SDK for Soroban contract calls.
@@ -29,13 +29,15 @@ export class StellarService {
   readonly keeperKeypair: Keypair;
 
   constructor(private readonly config: ConfigService) {
-    const rpcUrl = config.get<string>('STELLAR_RPC_URL') ??
-      'https://soroban-testnet.stellar.org';
-    this.rpc     = new StellarRpc.Server(rpcUrl);
-    this.network = config.get<string>('STELLAR_NETWORK') === 'mainnet'
-      ? Networks.PUBLIC
-      : Networks.TESTNET;
-    const secret = config.get<string>('KEEPER_SECRET_KEY') ?? '';
+    const rpcUrl =
+      config.get<string>("STELLAR_RPC_URL") ??
+      "https://soroban-testnet.stellar.org";
+    this.rpc = new StellarRpc.Server(rpcUrl);
+    this.network =
+      config.get<string>("STELLAR_NETWORK") === "mainnet"
+        ? Networks.PUBLIC
+        : Networks.TESTNET;
+    const secret = config.get<string>("KEEPER_SECRET_KEY") ?? "";
     this.keeperKeypair = secret ? Keypair.fromSecret(secret) : Keypair.random();
   }
 
@@ -46,20 +48,12 @@ export class StellarService {
     args: xdr.ScVal[],
   ): Promise<StellarRpc.Api.SimulateTransactionResponse> {
     const account = await this.rpc.getAccount(this.keeperKeypair.publicKey());
+    const contract = new Contract(contractId);
     const tx = new TransactionBuilder(account, {
       fee: BASE_FEE,
       networkPassphrase: this.network,
     })
-      .addOperation(
-        // @ts-expect-error — Stellar SDK invokeContractFunction helper
-        xdr.Operation.invokeContractFunction({
-          contractAddress: xdr.ScAddress.scAddressTypeContract(
-            xdr.Hash.fromXDR(Buffer.from(contractId, 'hex')),
-          ),
-          functionName: method,
-          args,
-        }),
-      )
+      .addOperation(contract.call(method, ...args))
       .setTimeout(30)
       .build();
 
@@ -77,7 +71,7 @@ export class StellarService {
     args: xdr.ScVal[],
     signerKeypair?: Keypair,
   ): Promise<string> {
-    const signer   = signerKeypair ?? this.keeperKeypair;
+    const signer = signerKeypair ?? this.keeperKeypair;
     const contract = new Contract(contractId);
     const MAX_ATTEMPTS = 3;
     let lastError: Error | null = null;
@@ -100,12 +94,17 @@ export class StellarService {
           throw new Error(`Simulation failed: ${simResult.error}`);
         }
 
-        const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
+        const assembledTx = StellarRpc.assembleTransaction(
+          tx,
+          simResult,
+        ).build();
         assembledTx.sign(signer);
 
         const sendResult = await this.rpc.sendTransaction(assembledTx);
-        if (sendResult.status === 'ERROR') {
-          throw new Error(`Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`);
+        if (sendResult.status === "ERROR") {
+          throw new Error(
+            `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
+          );
         }
         this.logger.log(
           `Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash} (attempt ${attempt})`,
@@ -122,7 +121,9 @@ export class StellarService {
       }
     }
 
-    throw new Error(`All ${MAX_ATTEMPTS} sendTransaction attempts failed. Last error: ${lastError?.message}`);
+    throw new Error(
+      `All ${MAX_ATTEMPTS} sendTransaction attempts failed. Last error: ${lastError?.message}`,
+    );
   }
 
   /**
@@ -136,7 +137,9 @@ export class StellarService {
    * the simulation result — without this step the RPC will reject the
    * transaction with TRANSACTION_FAILED or INSUFFICIENT_FEE.
    */
-  async simulateAssembleAndSend(tx: Transaction): Promise<StellarRpc.Api.SendTransactionResponse> {
+  async simulateAssembleAndSend(
+    tx: Transaction,
+  ): Promise<StellarRpc.Api.SendTransactionResponse> {
     const simResult = await this.rpc.simulateTransaction(tx);
     if (StellarRpc.Api.isSimulationError(simResult)) {
       throw new Error(`Simulation failed: ${simResult.error}`);
@@ -146,13 +149,15 @@ export class StellarService {
     assembledTx.sign(this.keeperKeypair);
 
     const sendResult = await this.rpc.sendTransaction(assembledTx);
-    if (sendResult.status === 'ERROR') {
+    if (sendResult.status === "ERROR") {
       throw new Error(
         `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
       );
     }
 
-    this.logger.log(`Transaction sent: txHash=${sendResult.hash} status=${sendResult.status}`);
+    this.logger.log(
+      `Transaction sent: txHash=${sendResult.hash} status=${sendResult.status}`,
+    );
     return sendResult;
   }
 
@@ -174,14 +179,14 @@ export class StellarService {
     while (Date.now() - start < timeoutMs) {
       const txResult = await this.rpc.getTransaction(txHash);
 
-      if (txResult.status === 'SUCCESS') {
+      if (txResult.status === "SUCCESS") {
         this.logger.log(`Transaction confirmed: ${txHash}`);
         return txResult;
       }
 
-      if (txResult.status === 'FAILED') {
+      if (txResult.status === "FAILED") {
         throw new Error(
-          `Transaction ${txHash} failed on-chain: ${txResult.resultXdr ?? 'unknown error'}`,
+          `Transaction ${txHash} failed on-chain: ${txResult.resultXdr ?? "unknown error"}`,
         );
       }
 
@@ -206,15 +211,20 @@ export class StellarService {
    * Used for keeper health checks to ensure the keeper has sufficient funds.
    */
   async getAccountBalance(publicKey: string): Promise<string> {
-    const account = await this.rpc.getAccount(publicKey) as Horizon.AccountResponse;
+    const account = (await this.rpc.getAccount(
+      publicKey,
+    )) as Horizon.AccountResponse;
     const nativeBalance = account.balances.find(
-      (b): b is Horizon.HorizonApi.BalanceLineNative => b.asset_type === 'native',
+      (b): b is Horizon.HorizonApi.BalanceLineNative =>
+        b.asset_type === "native",
     );
     if (!nativeBalance) {
       this.logger.warn(`No native XLM balance found for account: ${publicKey}`);
-      return '0';
+      return "0";
     }
-    this.logger.log(`Account ${publicKey} balance: ${nativeBalance.balance} XLM`);
+    this.logger.log(
+      `Account ${publicKey} balance: ${nativeBalance.balance} XLM`,
+    );
     return nativeBalance.balance;
   }
 
