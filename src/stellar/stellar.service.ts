@@ -37,8 +37,14 @@ export class StellarService {
       config.get<string>("STELLAR_NETWORK") === "mainnet"
         ? Networks.PUBLIC
         : Networks.TESTNET;
-    const secret = config.get<string>("KEEPER_SECRET_KEY") ?? "";
-    this.keeperKeypair = secret ? Keypair.fromSecret(secret) : Keypair.random();
+    const secret = config.get<string>("KEEPER_SECRET_KEY");
+    if (!secret) {
+      throw new Error(
+        "KEEPER_SECRET_KEY environment variable is required. " +
+        "Generate a testnet keypair with: stellar keys generate keeper --network testnet"
+      );
+    }
+    this.keeperKeypair = Keypair.fromSecret(secret);
   }
 
   /** Simulate a read-only contract invocation and return the result XDR. */
