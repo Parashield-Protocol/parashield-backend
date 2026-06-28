@@ -7,7 +7,7 @@ import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 
-export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'PolicyNotActive';
+export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive';
 
 export interface ClaimSummary {
   id:             string;
@@ -53,6 +53,21 @@ export class ClaimsService {
     if (policy.status !== 'ACTIVE') {
       this.logger.warn(`Policy ${policyId} is not ACTIVE (status: ${policy.status})`);
       return 'PolicyNotActive';
+    }
+
+    // Duplicate guard: prevent double payouts or duplicate in-flight processing
+    const existingClaim = await this.prisma.claim.findFirst({
+      where: {
+        policyId,
+        status: { in: ['PROCESSING', 'PAID', 'REJECTED'] },
+      },
+    });
+
+    if (existingClaim) {
+      this.logger.warn(
+        `Duplicate autoProcess call for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
+      );
+      return 'AlreadyProcessed';
     }
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
