@@ -23,6 +23,7 @@ model Policy {
   updatedAt     DateTime  @updatedAt
   claims        Claim[]
 
+  @@unique([policyholder, productId, oracleKey])
   @@index([policyholder])
   @@index([status])
 }
@@ -98,4 +99,3 @@ model AuthChallenge {
 
   @@index([expiresAt])
 }
-
