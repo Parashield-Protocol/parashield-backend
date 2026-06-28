@@ -1,6 +1,6 @@
-import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
-import * as jwt from 'jsonwebtoken';
+import { Injectable, Logger, UnauthorizedException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import * as jwt from "jsonwebtoken";
 
 export interface JwtPayload {
   walletAddress: string;
@@ -21,13 +21,13 @@ export interface JwtPayload {
 export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
-  private readonly tokenExpiry = '7d';
+  private readonly tokenExpiry = "7d";
 
   constructor(private readonly config: ConfigService) {
-    const secret = config.get<string>('JWT_SECRET');
+    const secret = config.get<string>("JWT_SECRET");
     if (!secret) {
-      this.logger.error('JWT_SECRET environment variable is required');
-      throw new Error('JWT_SECRET environment variable is required');
+      this.logger.error("JWT_SECRET environment variable is required");
+      throw new Error("JWT_SECRET environment variable is required");
     }
     this.secret = secret;
   }
@@ -42,7 +42,9 @@ export class JwtService {
    */
   sign(walletAddress: string): string {
     const payload: JwtPayload = { walletAddress };
-    const token = jwt.sign(payload, this.secret, { expiresIn: this.expiresIn });
+    const token = jwt.sign(payload, this.secret, {
+      expiresIn: "7d",
+    } as any);
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
     return token;
   }
@@ -54,7 +56,9 @@ export class JwtService {
    */
   signWithRole(walletAddress: string, role: string, admin = false): string {
     const payload: JwtPayload = { walletAddress, role, admin };
-    const token = jwt.sign(payload, this.secret, { expiresIn: this.expiresIn });
+    const token = jwt.sign(payload, this.secret, {
+      expiresIn: "7d",
+    } as any);
     this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
     return token;
   }
@@ -73,12 +77,12 @@ export class JwtService {
       };
     } catch (err) {
       if (err instanceof jwt.TokenExpiredError) {
-        throw new UnauthorizedException('Token has expired');
+        throw new UnauthorizedException("Token has expired");
       }
       if (err instanceof jwt.JsonWebTokenError) {
-        throw new UnauthorizedException('Invalid token');
+        throw new UnauthorizedException("Invalid token");
       }
-      throw new UnauthorizedException('Token verification failed');
+      throw new UnauthorizedException("Token verification failed");
     }
   }
 }
