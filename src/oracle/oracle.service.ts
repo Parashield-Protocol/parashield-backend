@@ -256,10 +256,15 @@ export class OracleService {
         "AviationStack API is not configured.",
       );
     }
-    const url = `http://api.aviationstack.com/v1/flights?access_key=${apiKey}&flight_iata=${flightNumber}&flight_date=${date}`;
+    const url = `https://api.aviationstack.com/v1/flights?flight_iata=${flightNumber}&flight_date=${date}`;
     const res = await axios.get<{
       data: Array<{ departure: { delay: number } }>;
-    }>(url, { timeout: 10_000 });
+    }>(url, { 
+      timeout: 10_000,
+      headers: {
+        'Authorization': `Bearer ${apiKey}`
+      }
+    });
     const delay = res.data.data?.[0]?.departure?.delay ?? 0;
 
     const oracleReading: OracleReading = {
