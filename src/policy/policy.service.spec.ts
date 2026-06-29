@@ -1,17 +1,18 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { PolicyService, ProductSummary } from "./policy.service";
+import { PolicyService, ProductSummary, OracleKeyValidationResult } from "./policy.service";
 import { StellarService } from "../stellar/stellar.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
 import { ConflictException, GoneException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import {
-  Operation,
   TransactionBuilder,
-  Account,
   Keypair,
-  StrKey,
+  Operation,
   Asset,
+  Account,
+  nativeToScVal,
+  StrKey,
 } from "@stellar/stellar-sdk";
 
 describe("PolicyService.calculatePremium", () => {
@@ -39,9 +40,11 @@ describe("PolicyService.calculatePremium", () => {
   };
 
   const mockConfigService = {
-    get: jest.fn((key: string) => {
+    get: jest.fn<string | undefined, [string]>((key: string) => {
       if (key === "POLICY_ENGINE_CONTRACT")
         return "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
+      if (key === "USDC_CONTRACT")
+        return "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
       return undefined;
     }),
   };
@@ -59,6 +62,10 @@ describe("PolicyService.calculatePremium", () => {
     service = module.get<PolicyService>(PolicyService);
     jest.clearAllMocks();
     mockPrismaService.policy.aggregate.mockResolvedValue({ _sum: { coverageXlm: null } });
+    // Default: pool balance simulation returns null retval => Infinity (no cap)
+    mockStellarService.simulateInvoke.mockResolvedValue({
+      result: { retval: null },
+    });
   });
 
   it("should return the correct premium for standard coverage", () => {
@@ -104,21 +111,82 @@ describe("PolicyService.calculatePremium", () => {
       status: "Active",
     };
 
-    it("should return valid for coverage within range", () => {
-      const result = service.validateCoverage(500, product);
+    beforeEach(() => {
+      // Pool simulation returns null retval => Infinity (no cap)
+      mockStellarService.simulateInvoke.mockResolvedValue({ result: { retval: null } });
+    });
+
+    it("should return valid for coverage within range", async () => {
+      const result = await service.validateCoverage(500, product);
       expect(result.valid).toBe(true);
     });
 
-    it("should return invalid for coverage below minimum", () => {
-      const result = service.validateCoverage(5, product);
+    it("should return invalid for coverage below minimum", async () => {
+      const result = await service.validateCoverage(5, product);
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("below the minimum");
     });
 
-    it("should return invalid for coverage above maximum", () => {
-      const result = service.validateCoverage(5000, product);
+    it("should return invalid for coverage above maximum", async () => {
+      const result = await service.validateCoverage(5000, product);
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("exceeds the maximum");
+    });
+
+    it("should return invalid when coverage exceeds pool liquidity (#131)", async () => {
+      // Simulate pool returning 100 (e.g., 100 USDC in fixed point)
+      const { scValToNative } = jest.requireActual("@stellar/stellar-sdk") as any;
+      // We can't easily round-trip a real ScVal in unit tests, so we stub
+      // getPoolAvailableBalance directly
+      jest.spyOn(service, "getPoolAvailableBalance").mockResolvedValue(100);
+
+      const result = await service.validateCoverage(101, product);
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain("pool\'s available liquidity");
+    });
+
+    it("should reject an invalid oracleKey for crop products when provided (#132)", async () => {
+      const result = await service.validateCoverage(500, product, "invalid-key");
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain("oracleKey format");
+    });
+
+    it("should accept a valid crop oracleKey when provided", async () => {
+      const result = await service.validateCoverage(500, product, "rainfall:-0.0917,34.7679:2026-06");
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe("validateOracleKey", () => {
+    const cropProduct: ProductSummary = {
+      id: "1", name: "Crop", category: "crop", triggerType: "Threshold",
+      threshold: "50", comparison: "LessThan", coverageMin: "10",
+      coverageMax: "1000", premiumRate: 500, maxDuration: 365, status: "Active",
+    };
+    const flightProduct: ProductSummary = {
+      ...cropProduct, category: "flight",
+    };
+
+    it("should pass a valid crop oracleKey", () => {
+      const result = service.validateOracleKey("rainfall:-0.0917,34.7679:2026-06", cropProduct);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should fail an invalid crop oracleKey (#132)", () => {
+      const result = service.validateOracleKey("invalid-key", cropProduct);
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain("rainfall:lat,lng:YYYY-MM");
+    });
+
+    it("should pass a valid flight oracleKey", () => {
+      const result = service.validateOracleKey("flight:KQ100:2026-06-28", flightProduct);
+      expect(result.valid).toBe(true);
+    });
+
+    it("should fail an invalid flight oracleKey (#132)", () => {
+      const result = service.validateOracleKey("flight:KQ100:2026-06", flightProduct);
+      expect(result.valid).toBe(false);
+      expect(result.reason).toContain("flight:flightNumber:YYYY-MM-DD");
     });
   });
 
@@ -223,6 +291,11 @@ describe("PolicyService.calculatePremium", () => {
       maxDuration: 365,
       status: "Active",
     };
+
+    beforeEach(() => {
+      // Pool has infinite capacity by default in createPolicy tests
+      jest.spyOn(service, "getPoolAvailableBalance").mockResolvedValue(Infinity);
+    });
 
     it("should successfully create policy with a valid crop oracleKey", async () => {
       mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
@@ -432,7 +505,11 @@ describe("PolicyService.calculatePremium", () => {
         op = Operation.invokeContractFunction({
           contract: opts.contract ?? validContract,
           function: opts.function ?? "buy_policy",
-          args: [],
+          args: [
+            nativeToScVal("prod-1", { type: "string" }),
+            nativeToScVal("500", { type: "string" }),
+            nativeToScVal("rainfall:-0.0917,34.7679:2026-06", { type: "string" })
+          ],
         });
       }
 

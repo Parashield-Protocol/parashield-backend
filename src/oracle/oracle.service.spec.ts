@@ -131,6 +131,15 @@ describe("OracleService.fetchRainfall", () => {
   });
 
   describe("fetchRainfallReading — only observed days (issue #73)", () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date("2026-06-28T12:00:00Z"));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
     it("should use /archive endpoint for past months", async () => {
       // Request May 2026 (before June 28, 2026 "today")
       mockedAxios.get = jest.fn().mockResolvedValue({

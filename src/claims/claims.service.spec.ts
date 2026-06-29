@@ -20,6 +20,7 @@ describe('ClaimsService', () => {
 
   const mockPolicyService = {
     getActiveProducts: jest.fn(),
+    getProductById: jest.fn(),
   };
 
   const mockConfigService = {
@@ -236,7 +237,7 @@ describe('ClaimsService', () => {
       expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
         expect.objectContaining({
           where: { id: 'new-claim-id' },
-          data:  expect.objectContaining({ status: 'REJECTED' }),
+          data:  expect.objectContaining({ status: 'FAILED' }),
         }),
       );
     });
@@ -338,7 +339,7 @@ describe('ClaimsService', () => {
         value:      BigInt(800_000_000), // 80 mm — above 50 mm threshold, trigger NOT met
         confidence: 90,
       });
-      mockPolicyService.getActiveProducts.mockResolvedValue([MOCK_PRODUCT]);
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
       mockPrismaService.claim.update.mockResolvedValue({});
 
       const result = await service.autoProcess(POLICY_ID);
@@ -353,7 +354,7 @@ describe('ClaimsService', () => {
         value:      BigInt(200_000_000), // 20 mm — below 50 mm threshold, trigger MET
         confidence: 90,
       });
-      mockPolicyService.getActiveProducts.mockResolvedValue([MOCK_PRODUCT]);
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
       mockStellarService.invokeContract.mockResolvedValue('tx-hash-abc');
       mockPrismaService.claim.update.mockResolvedValue({});
       mockPrismaService.policy.update.mockResolvedValue({});

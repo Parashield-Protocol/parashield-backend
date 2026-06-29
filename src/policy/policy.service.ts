@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, GoneException, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { TransactionBuilder, Transaction, Address, rpc as StellarRpc, scValToNative } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Transaction, Address, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
@@ -38,6 +38,11 @@ export interface PremiumValidationResult {
   reason?: string;
 }
 
+export interface OracleKeyValidationResult {
+  valid: boolean;
+  reason?: string;
+}
+
 /**
  * PolicyService — reads policy and product data from the Policy Engine contract.
  * Persists purchased policies to the local PostgreSQL database via PrismaService
@@ -66,9 +71,83 @@ export class PolicyService {
   }
 
   /**
-   * Validate that a coverage amount falls within the product's allowed range.
+   * Validate the oracleKey format for a given product category.
+   * Called during quote generation (buyPolicy) so errors are surfaced immediately.
    */
-  validateCoverage(coverageXlm: number, product: ProductSummary): PremiumValidationResult {
+  validateOracleKey(oracleKey: string, product: ProductSummary): OracleKeyValidationResult {
+    if (
+      product.category === 'crop' &&
+      !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(oracleKey)
+    ) {
+      return {
+        valid: false,
+        reason: 'oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products',
+      };
+    }
+    if (
+      product.category === 'flight' &&
+      !/^flight:[A-Z0-9]+:20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(oracleKey)
+    ) {
+      return {
+        valid: false,
+        reason: 'oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products',
+      };
+    }
+    return { valid: true };
+  }
+
+  /**
+   * Read the available liquidity from the Risk Pool.
+   * We query the USDC token contract's `balance` entry-point for the
+   * POLICY_ENGINE_CONTRACT account, which holds the pooled collateral.
+   * Returns the balance as a number (in XLM-equivalent units, 7-decimal fixed point).
+   * Returns Infinity when the contract is not configured so tests are unaffected.
+   */
+  async getPoolAvailableBalance(): Promise<number> {
+    const usdcContract = this.config.get<string>('USDC_CONTRACT');
+    const policyEngineContract = this.config.get<string>('POLICY_ENGINE_CONTRACT');
+
+    if (!usdcContract || !policyEngineContract) {
+      this.logger.warn('USDC_CONTRACT or POLICY_ENGINE_CONTRACT not configured — skipping pool balance check');
+      return Infinity;
+    }
+
+    try {
+      const engineAddress = nativeToScVal(policyEngineContract, { type: 'address' });
+      const simResult = await this.stellar.simulateInvoke(usdcContract, 'balance', [engineAddress]);
+
+      if (StellarRpc.Api.isSimulationError(simResult)) {
+        this.logger.warn(`Pool balance simulation error: ${(simResult as any).error}`);
+        return Infinity;
+      }
+
+      const raw = (simResult as StellarRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!raw) {
+        this.logger.warn('Pool balance simulation returned no result');
+        return Infinity;
+      }
+
+      const balance = Number(scValToNative(raw));
+      this.logger.log(`Pool available balance: ${balance} (7-decimal fixed point)`);
+      return balance;
+    } catch (err) {
+      this.logger.warn(`Failed to fetch pool balance: ${(err as Error).message}`);
+      return Infinity;
+    }
+  }
+
+  /**
+   * Validate that a coverage amount falls within the product's allowed range
+   * AND does not exceed the pool's available liquidity.
+   *
+   * Also validates the oracleKey format for the product category so errors
+   * are surfaced at quote time (#132).
+   */
+  async validateCoverage(
+    coverageXlm: number,
+    product: ProductSummary,
+    oracleKey?: string,
+  ): Promise<PremiumValidationResult> {
     const min = parseFloat(product.coverageMin);
     const max = parseFloat(product.coverageMax);
 
@@ -84,6 +163,23 @@ export class PolicyService {
         valid: false,
         reason: `Coverage ${coverageXlm} XLM exceeds the maximum ${max} XLM for this product`,
       };
+    }
+
+    // #131 — Reject if coverage exceeds available pool liquidity
+    const poolBalance = await this.getPoolAvailableBalance();
+    if (coverageXlm > poolBalance) {
+      return {
+        valid: false,
+        reason: `Coverage ${coverageXlm} XLM exceeds the pool's available liquidity (${poolBalance} XLM)`,
+      };
+    }
+
+    // #132 — Validate oracleKey format at quote time if provided
+    if (oracleKey !== undefined) {
+      const keyValidation = this.validateOracleKey(oracleKey, product);
+      if (!keyValidation.valid) {
+        return { valid: false, reason: keyValidation.reason };
+      }
     }
 
     return { valid: true };
@@ -128,19 +224,10 @@ export class PolicyService {
       throw new BadRequestException(`Product with ID ${dto.productId} not found or inactive`);
     }
 
-    const validation = this.validateCoverage(dto.coverageXlm, product);
+    // validateCoverage now also checks pool liquidity (#131) and oracleKey format (#132)
+    const validation = await this.validateCoverage(dto.coverageXlm, product, dto.oracleKey);
     if (!validation.valid) {
       throw new BadRequestException(validation.reason);
-    }
-
-    await this.validatePoolCapacity(dto.coverageXlm);
-
-    // Strict validation of oracleKey format based on product category
-    if (product.category === 'crop' && !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(dto.oracleKey)) {
-      throw new BadRequestException('oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products');
-    }
-    if (product.category === 'flight' && !/^flight:[A-Z0-9]+:20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(dto.oracleKey)) {
-      throw new BadRequestException('oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products');
     }
 
     const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
@@ -255,13 +342,13 @@ export class PolicyService {
     // Validate XDR args match the expected DTO parameters (#122).
     // buy_policy(product_id: String, coverage: i128, oracle_key: String)
     const args = invokeContract.args();
-    if (!args || args.length() < 3) {
+    if (!args || args.length < 3) {
       throw new BadRequestException('buy_policy transaction must have at least 3 arguments (product_id, coverage, oracle_key)');
     }
     try {
-      const xdrProductId  = String(scValToNative(args.get(0)));
-      const xdrCoverage   = String(scValToNative(args.get(1)));
-      const xdrOracleKey  = String(scValToNative(args.get(2)));
+      const xdrProductId  = String(scValToNative(args[0]));
+      const xdrCoverage   = String(scValToNative(args[1]));
+      const xdrOracleKey  = String(scValToNative(args[2]));
 
       if (xdrProductId !== dto.productId) {
         throw new BadRequestException(

@@ -21,22 +21,40 @@ import {
   ApiBearerAuth,
   ApiQuery,
   ApiParam,
+  ApiExtraModels,
+  getSchemaPath,
 } from '@nestjs/swagger';
 import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
+import { ProductResponseDto, PolicyResponseDto } from './dto/policy-response.dto';
+import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('policy')
 @Controller()
+@ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto)
 export class PolicyController {
   constructor(private readonly policy: PolicyService) {}
 
   /** GET /api/v1/products — list all active insurance products */
   @Get('products')
   @ApiOperation({ summary: 'List all active insurance products' })
-  @ApiResponse({ status: 200, description: 'Returns list of active products' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns list of active products',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        {
+          properties: {
+            data: { type: 'array', items: { $ref: getSchemaPath(ProductResponseDto) } },
+          },
+        },
+      ],
+    },
+  })
   async getProducts() {
     const products = await this.policy.getActiveProducts();
     return { success: true, data: products };
@@ -50,7 +68,20 @@ export class PolicyController {
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
-  @ApiResponse({ status: 200, description: 'Returns paginated policies for the wallet — { data, total, page, limit }' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns paginated policies — { success, data, total, page, limit }',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(PaginatedResponseDto) },
+        {
+          properties: {
+            data: { type: 'array', items: { $ref: getSchemaPath(PolicyResponseDto) } },
+          },
+        },
+      ],
+    },
+  })
   async getMyPolicies(
     @Query('wallet') wallet: string,
     @Query('page') page: string = '1',
@@ -77,7 +108,16 @@ export class PolicyController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get a single policy by ID' })
   @ApiParam({ name: 'id', description: 'Policy UUID' })
-  @ApiResponse({ status: 200, description: 'Returns the policy details' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns the policy details',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { $ref: getSchemaPath(PolicyResponseDto) } } },
+      ],
+    },
+  })
   @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
   @ApiResponse({ status: 404, description: 'Policy not found' })
   async getPolicy(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
@@ -98,8 +138,36 @@ export class PolicyController {
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get premium quote for requested coverage' })
-  @ApiResponse({ status: 200, description: 'Returns premium quote for the requested coverage' })
-  @ApiResponse({ status: 400, description: 'Invalid request body or coverage exceeds pool capacity' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns premium quote for the requested coverage',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        {
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                quote: {
+                  type: 'object',
+                  properties: {
+                    productId:   { type: 'string' },
+                    productName: { type: 'string' },
+                    coverageXlm: { type: 'number' },
+                    premiumXlm:  { type: 'number' },
+                    duration:    { type: 'number' },
+                    wallet:      { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ],
+    },
+  })
+  @ApiResponse({ status: 400, description: 'Invalid request body, pool capacity exceeded, or malformed oracleKey' })
   async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (dto.walletAddress !== authedWallet) {
@@ -112,7 +180,8 @@ export class PolicyController {
       throw new NotFoundException(`Product ${dto.productId} not found`);
     }
 
-    const validation = this.policy.validateCoverage(dto.coverageXlm, product);
+    // #131: validate pool capacity; #132: validate oracleKey format at quote time
+    const validation = await this.policy.validateCoverage(dto.coverageXlm, product, dto.oracleKey);
     if (!validation.valid) {
       throw new BadRequestException(validation.reason);
     }
@@ -146,7 +215,26 @@ export class PolicyController {
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Submit signed XDR to complete policy purchase on-chain' })
-  @ApiResponse({ status: 200, description: 'Policy created on-chain and persisted; returns policyId and txHash' })
+  @ApiResponse({
+    status: 200,
+    description: 'Policy created on-chain and persisted; returns policyId and txHash',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        {
+          properties: {
+            data: {
+              type: 'object',
+              properties: {
+                policyId: { type: 'string' },
+                txHash:   { type: 'string' },
+              },
+            },
+          },
+        },
+      ],
+    },
+  })
   @ApiResponse({ status: 400, description: 'Invalid request body or on-chain submission failed' })
   @ApiResponse({ status: 409, description: 'Policy already exists for this wallet, product, and oracle key' })
   @ApiResponse({ status: 410, description: 'Signed XDR has expired' })

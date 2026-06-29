@@ -223,7 +223,7 @@ export class ClaimsService {
     return claim.id;
   }
 
-  async getClaimsByWallet(walletAddress: string, page = 1, limit = 20): Promise<{ claims: ClaimSummary[]; total: number }> {
+  async getClaimsByWallet(walletAddress: string, page = 1, limit = 20): Promise<{ data: ClaimSummary[]; total: number; page: number; limit: number }> {
     // Clamp to valid bounds; page is 1-based (#114)
     const safePage = Math.max(1, page);
     const safeLimit = Math.min(Math.max(1, limit), 100);
@@ -253,8 +253,10 @@ export class ClaimsService {
     }));
 
     return {
-      claims: summaries,
+      data: summaries,
       total,
+      page: safePage,
+      limit: safeLimit,
     };
   }
 

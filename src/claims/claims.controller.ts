@@ -6,15 +6,19 @@ import {
   ApiBearerAuth,
   ApiParam,
   ApiQuery,
+  ApiExtraModels,
+  getSchemaPath,
 } from '@nestjs/swagger';
 import { ClaimsService } from './claims.service';
 import { SubmitClaimDto } from './dto/submit-claim.dto';
+import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 
 @ApiTags('claims')
 @Controller('claims')
+@ApiExtraModels(ResponseDto, PaginatedResponseDto)
 export class ClaimsController {
   constructor(private readonly claims: ClaimsService) {}
 
@@ -23,7 +27,16 @@ export class ClaimsController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
-  @ApiResponse({ status: 201, description: 'Claim submitted successfully' })
+  @ApiResponse({
+    status: 201,
+    description: 'Claim submitted successfully',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { type: 'object', properties: { claimId: { type: 'string' } } } } },
+      ],
+    },
+  })
   @ApiResponse({ status: 403, description: 'Claimant does not match authenticated wallet' })
   @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
   async submitClaim(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
@@ -46,7 +59,11 @@ export class ClaimsController {
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number' })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
-  @ApiResponse({ status: 200, description: 'Returns claim history for the wallet' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns paginated claim history — { success, data, total, page, limit }',
+    schema: { $ref: getSchemaPath(PaginatedResponseDto) },
+  })
   @ApiResponse({ status: 403, description: 'Wallet does not match authenticated user' })
   async getClaimsByWalletQuery(
     @Query('wallet') wallet: string,
@@ -67,7 +84,7 @@ export class ClaimsController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 20,
     );
-    return { success: true, data: result };
+    return { success: true, ...result };
   }
 
   /** POST /api/v1/claims/:policyId/auto — keeper triggers auto-processing */
@@ -76,7 +93,16 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Trigger automatic claim evaluation for a policy (operator only)' })
   @ApiParam({ name: 'policyId', description: 'Policy UUID to evaluate' })
-  @ApiResponse({ status: 201, description: 'Claim evaluation triggered' })
+  @ApiResponse({
+    status: 201,
+    description: 'Claim evaluation triggered',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { type: 'object', properties: { result: { type: 'string' } } } } },
+      ],
+    },
+  })
   @ApiResponse({ status: 401, description: 'Operator API key or admin bearer token required' })
   async autoProcess(@Param('policyId') policyId: string) {
     const result = await this.claims.autoProcess(policyId);
@@ -89,7 +115,11 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get claim details by ID' })
   @ApiParam({ name: 'id', description: 'Claim UUID' })
-  @ApiResponse({ status: 200, description: 'Returns claim details' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns claim details',
+    schema: { $ref: getSchemaPath(ResponseDto) },
+  })
   @ApiResponse({ status: 403, description: 'Claim belongs to a different wallet' })
   @ApiResponse({ status: 404, description: 'Claim not found' })
   async getClaim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
@@ -112,7 +142,11 @@ export class ClaimsController {
   @ApiParam({ name: 'wallet', description: 'Stellar wallet address' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number' })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
-  @ApiResponse({ status: 200, description: 'Returns claim history for the wallet' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns paginated claim history — { success, data, total, page, limit }',
+    schema: { $ref: getSchemaPath(PaginatedResponseDto) },
+  })
   async getClaimHistory(
     @Param('wallet') wallet: string,
     @Query('page') page: string,
@@ -132,6 +166,6 @@ export class ClaimsController {
       page ? parseInt(page, 10) : 1,
       limit ? parseInt(limit, 10) : 20,
     );
-    return { success: true, data: result };
+    return { success: true, ...result };
   }
 }
