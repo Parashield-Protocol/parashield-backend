@@ -119,7 +119,7 @@ describe('Auth guards', () => {
       { expiresIn: '7d' },
     );
     const config = {
-      get: jest.fn().mockReturnValue(undefined),
+      get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'dummy-key' : undefined),
     } as unknown as ConfigService;
     const request = {
       headers: { authorization: `Bearer ${token}` },

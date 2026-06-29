@@ -89,6 +89,7 @@ enum ClaimStatus {
   PROCESSING
   PAID
   REJECTED
+  FAILED
   EXPIRED
 }
 

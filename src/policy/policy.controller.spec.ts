@@ -13,7 +13,7 @@ describe("PolicyController", () => {
     getActiveProducts: jest.fn(),
     getUserPolicies: jest.fn(),
     getPolicy: jest.fn(),
-    validateCoverage: jest.fn(),
+    validateCoverage: jest.fn().mockResolvedValue({ valid: true }),
     calculatePremium: jest.fn(),
     confirmAndCreatePolicy: jest.fn(),
   };
