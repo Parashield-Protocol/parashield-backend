@@ -349,6 +349,102 @@ describe("OracleService.fetchRainfall", () => {
     });
   });
 
+  describe("fetchTemperatureReading — archive endpoint fix (#157)", () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date("2026-06-28T12:00:00Z"));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it("should use /archive endpoint for past months", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [28.0, 30.0, 27.5],
+            time: ["2026-05-01", "2026-05-02", "2026-05-03"],
+          },
+        },
+      });
+
+      await service.fetchTemperatureReading(-0.0917, 34.7679, 2026, 5);
+
+      const callUrl = (mockedAxios.get as jest.Mock).mock.calls[0][0];
+      expect(callUrl).toContain("/archive");
+      expect(callUrl).not.toContain("/forecast");
+    });
+
+    it("should use /forecast endpoint for the current month", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [28.0, 30.0, 27.5],
+            time: ["2026-06-01", "2026-06-02", "2026-06-03"],
+          },
+        },
+      });
+
+      await service.fetchTemperatureReading(-0.0917, 34.7679, 2026, 6);
+
+      const callUrl = (mockedAxios.get as jest.Mock).mock.calls[0][0];
+      expect(callUrl).toContain("/forecast");
+      expect(callUrl).not.toContain("/archive");
+    });
+
+    it("should filter out future days when using /forecast endpoint", async () => {
+      // Today is June 28 — June 29 and June 30 are future, should be excluded
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [25.0, 26.0, 27.0, 35.0, 36.0],
+            time: ["2026-06-26", "2026-06-27", "2026-06-28", "2026-06-29", "2026-06-30"],
+          },
+        },
+      });
+
+      const reading = await service.fetchTemperatureReading(-0.0917, 34.7679, 2026, 6);
+
+      // Only June 26-28 are observed: avg = (25 + 26 + 27) / 3 = 26.0
+      const avgTempFromValue = Number(reading.value) / 1e7;
+      expect(avgTempFromValue).toBeCloseTo(26.0, 1);
+    });
+
+    it("should include all days for past months (all observed via /archive)", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [20.0, 22.0, 24.0, 26.0, 28.0],
+            time: ["2026-05-01", "2026-05-02", "2026-05-03", "2026-05-04", "2026-05-05"],
+          },
+        },
+      });
+
+      const reading = await service.fetchTemperatureReading(-0.0917, 34.7679, 2026, 5);
+
+      // avg = (20 + 22 + 24 + 26 + 28) / 5 = 24.0
+      const avgTempFromValue = Number(reading.value) / 1e7;
+      expect(avgTempFromValue).toBeCloseTo(24.0, 1);
+    });
+
+    it("should return confidence = 0 when all days are future", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [30.0, 31.0, 32.0],
+            time: ["2026-07-01", "2026-07-02", "2026-07-03"],
+          },
+        },
+      });
+
+      const reading = await service.fetchTemperatureReading(-0.0917, 34.7679, 2026, 7);
+
+      expect(reading.value).toBe("0");
+      expect(reading.confidence).toBe(0);
+    });
+  });
+
   describe("fetchFlightDelay and persistReading", () => {
     it("should throw ServiceUnavailableException if API key is not configured", async () => {
       mockConfigService.get.mockReturnValue(undefined);
