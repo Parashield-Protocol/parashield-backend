@@ -101,9 +101,10 @@ export class ClaimsService {
     const threshold  = BigInt(Math.round(parseFloat(product?.threshold ?? '50') * 1e7));
     const comparison = product?.comparison ?? 'LessThan';
 
+    const readingValue = BigInt(reading.value);
     const triggerMet = comparison === 'LessThan'
-      ? reading.value < threshold
-      : reading.value > threshold;
+      ? readingValue < threshold
+      : readingValue > threshold;
 
     this.logger.log(
       `Trigger eval: key=${reading.key} value=${reading.value} threshold=${threshold} triggerMet=${triggerMet}`,
@@ -125,7 +126,7 @@ export class ClaimsService {
       );
     }
 
-    let txHash: string | undefined;
+    let txHash: string;
     try {
       txHash = await this.stellar.invokeContract(
         contractId,
@@ -135,11 +136,16 @@ export class ClaimsService {
       this.logger.log(`Soroban payout initiated: txHash=${txHash} claimId=${claim.id}`);
     } catch (err) {
       this.logger.error(`Soroban payout failed for claim ${claim.id}`, err);
+      await this.prisma.claim.update({
+        where: { id: claim.id },
+        data:  { status: 'FAILED', processedAt: new Date() },
+      });
+      return 'Rejected';
     }
 
     await this.prisma.claim.update({
       where: { id: claim.id },
-      data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash: txHash ?? null, payoutAmount: policy.coverageXlm },
+      data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
     });
 
     await this.prisma.policy.update({
@@ -184,15 +190,21 @@ export class ClaimsService {
       );
     }
 
-    const claim = await this.prisma.claim.create({
-      data: {
-        policyId,
-        claimant,
-        coverageAmount: policy.coverageXlm,
-        triggerMet:     false,
-        status:         'PENDING',
-      },
-    });
+    let claim: Awaited<ReturnType<typeof this.prisma.claim.create>>;
+    try {
+      claim = await this.prisma.claim.create({
+        data: {
+          policyId,
+          claimant,
+          coverageAmount: policy.coverageXlm,
+          triggerMet:     false,
+          status:         'PENDING',
+        },
+      });
+    } catch (e: any) {
+      if (e?.code === 'P2002') throw new ConflictException('Claim already exists for this policy');
+      throw e;
+    }
 
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 

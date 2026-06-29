@@ -107,9 +107,11 @@ export class OracleWorker {
                 contractId,
                 'submit_data',
                 [
-                  nativeToScVal(reading.key,        { type: 'string' }),
-                  nativeToScVal(BigInt(reading.value), { type: 'i128' }),
-                  nativeToScVal(reading.confidence,  { type: 'u32' }),
+                  nativeToScVal(reading.dataType,          { type: 'symbol' }),
+                  nativeToScVal(reading.key,               { type: 'symbol' }),
+                  nativeToScVal(BigInt(reading.value),     { type: 'i128' }),
+                  nativeToScVal(reading.confidence,        { type: 'u32' }),
+                  nativeToScVal(BigInt(reading.timestamp), { type: 'u64' }),
                 ],
               );
               this.logger.log(`Oracle data submitted on-chain for key=${reading.key}: txHash=${txHash}`);
