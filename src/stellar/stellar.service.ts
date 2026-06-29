@@ -87,9 +87,28 @@ export class StellarService {
     const contract = new Contract(contractId);
     const MAX_ATTEMPTS = 3;
     let lastError: Error | null = null;
+    let lastSentHash: string | null = null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
+        // Before retrying, check if the previous send already landed to avoid double-payout.
+        if (attempt > 1 && lastSentHash) {
+          try {
+            const landedTx = await this.withTimeout(
+              this.rpc.getTransaction(lastSentHash),
+              "getTransaction (dedup check)",
+            );
+            if (landedTx.status === "SUCCESS") {
+              this.logger.log(
+                `invokeContract: previous send already landed — returning existing txHash=${lastSentHash} (attempt ${attempt})`,
+              );
+              return lastSentHash;
+            }
+          } catch {
+            // getTransaction failed — proceed to retry the send
+          }
+        }
+
         // Re-fetch account on every attempt to get a fresh sequence number;
         // reusing a stale assembled transaction causes TRANSACTION_BAD_SEQ on retry.
         const account = await this.withTimeout(
@@ -122,6 +141,11 @@ export class StellarService {
           this.rpc.sendTransaction(assembledTx),
           "sendTransaction",
         );
+        // Capture hash before checking status so retry dedup can check if an ERROR-status
+        // tx actually landed (RPC sometimes reports ERROR on submit but the tx still goes through).
+        if (sendResult.hash) {
+          lastSentHash = sendResult.hash;
+        }
         if (sendResult.status === "ERROR") {
           throw new Error(
             `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,

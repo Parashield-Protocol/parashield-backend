@@ -108,7 +108,7 @@ export class OracleWorker {
                 'submit_data',
                 [
                   nativeToScVal(reading.key,        { type: 'string' }),
-                  nativeToScVal(reading.value,       { type: 'i128' }),
+                  nativeToScVal(BigInt(reading.value), { type: 'i128' }),
                   nativeToScVal(reading.confidence,  { type: 'u32' }),
                 ],
               );

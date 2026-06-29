@@ -62,7 +62,11 @@ export class PolicyService {
    *   premium = ceil(coverage * rate * duration / (10000 * 30))
    */
   calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
-    return Math.ceil(coverageXlm * premiumRate * durationDays / (10000 * 30));
+    const numerator = BigInt(coverageXlm) * BigInt(premiumRate) * BigInt(durationDays);
+    const denominator = BigInt(10000 * 30);
+    const floored = numerator / denominator;
+    const remainder = numerator % denominator;
+    return Number(remainder > 0n ? floored + 1n : floored);
   }
 
   /**
@@ -164,6 +168,12 @@ export class PolicyService {
       return policy;
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const fields = (err.meta?.target as string[] | undefined) ?? [];
+        if (fields.includes('txHash')) {
+          throw new ConflictException(
+            `Transaction ${txHash} has already been used to create a policy`,
+          );
+        }
         throw new ConflictException(
           'An active policy already exists for this wallet, product, and oracle key',
         );

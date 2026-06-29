@@ -8,7 +8,7 @@ describe('OracleWorker', () => {
   const reading: OracleReading = {
     dataType: 'weather',
     key: 'rainfall:-0.0917,34.7679:2026-06',
-    value: 100n,
+    value: "100",
     confidence: 95,
     timestamp: 1,
     source: 'open-meteo',
@@ -93,7 +93,7 @@ describe('OracleWorker', () => {
     const rainReading: OracleReading = {
       dataType: 'weather',
       key: 'rainfall:1.2345,5.6789:2026-06',
-      value: 200n,
+      value: "200",
       confidence: 90,
       timestamp: 1,
       source: 'open-meteo',
@@ -102,7 +102,7 @@ describe('OracleWorker', () => {
     const flightReading: OracleReading = {
       dataType: 'flight',
       key: 'flight:KQ200:2026-06-27',
-      value: 15n,
+      value: "15",
       confidence: 95,
       timestamp: 1,
       source: 'aviationstack',
