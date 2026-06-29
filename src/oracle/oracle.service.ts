@@ -198,14 +198,28 @@ export class OracleService {
     const endDate = new Date(year, month, 0);
     const endStr = `${year}-${String(month).padStart(2, "0")}-${endDate.getDate()}`;
 
-    const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+    const today = new Date();
+    const isPastMonth =
+      year < today.getFullYear() ||
+      (year === today.getFullYear() && month < today.getMonth() + 1);
+
+    const endpoint = isPastMonth ? "archive" : "forecast";
+    const url = `https://api.open-meteo.com/v1/${endpoint}?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
     const res = await axios.get<{
-      daily: { temperature_2m_max: (number | null)[] };
+      daily: { temperature_2m_max: (number | null)[]; time: string[] };
     }>(url, { timeout: 10_000 });
 
-    const temps = res.data.daily.temperature_2m_max.filter(
-      (v): v is number => v !== null && v !== undefined,
-    );
+    const todayStr = today.toISOString().split("T")[0];
+    const rawTemps = res.data.daily.temperature_2m_max;
+    const times = res.data.daily.time;
+
+    const temps = rawTemps.filter((v, idx): v is number => {
+      if (v === null || v === undefined) return false;
+      const date = times?.[idx];
+      if (date && date > todayStr) return false;
+      return true;
+    });
+
     const avgTemp =
       temps.length > 0 ? temps.reduce((a, b) => a + b, 0) / temps.length : 0;
 
