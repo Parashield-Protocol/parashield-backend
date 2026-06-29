@@ -255,7 +255,7 @@ describe("StellarService", () => {
           .mockResolvedValue({ status: "PENDING", hash: "tx-hash" }),
         getTransaction: jest
           .fn()
-          .mockResolvedValue({ status: "NOT_FOUND" }),
+          .mockResolvedValue({ status: "SUCCESS" }),
       };
 
       const module: TestingModule = await Test.createTestingModule({
@@ -334,12 +334,36 @@ describe("StellarService", () => {
       expect(hash).toBe("tx-hash-landed");
     });
 
-    it("does NOT call getTransaction on the first attempt (no prior hash to check)", async () => {
+    it("calls waitForTransaction after send to confirm finality before returning hash", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "pending-hash" });
+      mockRpc.getTransaction
+        .mockResolvedValueOnce({ status: "NOT_FOUND" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const hash = await service.invokeContract("CONTRACT_ID", "my_method", []);
+
+      expect(hash).toBe("pending-hash");
+      // getTransaction is called once for NOT_FOUND, once for SUCCESS (finality poll)
+      expect(mockRpc.getTransaction).toHaveBeenCalledWith("pending-hash");
+      expect(mockRpc.getTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws if the on-chain transaction FAILED after submission", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "fail-hash" });
+      mockRpc.getTransaction.mockResolvedValue({ status: "FAILED", resultXdr: "on-chain-error" });
+
+      await expect(
+        service.invokeContract("CONTRACT_ID", "my_method", []),
+      ).rejects.toThrow("fail-hash");
+    });
+
+    it("does not call getTransaction for dedup on first attempt (only for finality confirmation)", async () => {
       mockRpc.sendTransaction.mockResolvedValue({ status: "PENDING", hash: "first-hash" });
 
       await service.invokeContract("CONTRACT_ID", "my_method", []);
 
-      expect(mockRpc.getTransaction).not.toHaveBeenCalled();
+      // getTransaction is called once — by waitForTransaction for finality, not dedup
+      expect(mockRpc.getTransaction).toHaveBeenCalledTimes(1);
     });
   });
 });
