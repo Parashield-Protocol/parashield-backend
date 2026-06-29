@@ -151,6 +151,10 @@ export class StellarService {
             `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
           );
         }
+        // Wait for ledger close before returning so callers can trust the hash represents
+        // a finalized on-chain state (PENDING → SUCCESS). Throws on FAILED, propagating
+        // the failure correctly to callers instead of leaving the DB in a speculative PAID state.
+        await this.waitForTransaction(sendResult.hash, 60_000);
         this.logger.log(
           `Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash} (attempt ${attempt})`,
         );
