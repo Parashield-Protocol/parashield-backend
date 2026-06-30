@@ -44,8 +44,15 @@ export class OracleService {
       );
       return;
     }
-    await this.prisma.oracleReading.create({
-      data: {
+    await this.prisma.oracleReading.upsert({
+      where: { key_source: { key: reading.key, source: reading.source } },
+      update: {
+        dataType: reading.dataType,
+        value: BigInt(reading.value),
+        confidence: reading.confidence,
+        submittedAt: new Date(),
+      },
+      create: {
         dataType: reading.dataType,
         key: reading.key,
         value: BigInt(reading.value),
@@ -114,8 +121,9 @@ export class OracleService {
     // Choose appropriate Open-Meteo endpoint.
     // - For past months, use /archive (historical observed data only)
     // - For current/future months, use /forecast (may include forecasted data)
-    const endpoint = isPastMonth ? "archive" : "forecast";
-    const url = `https://api.open-meteo.com/v1/${endpoint}?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+    const url = isPastMonth
+      ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
+      : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
 
     const res = await axios.get<{
       daily: { precipitation_sum: (number | null)[]; time: string[] };
@@ -203,8 +211,9 @@ export class OracleService {
       year < today.getFullYear() ||
       (year === today.getFullYear() && month < today.getMonth() + 1);
 
-    const endpoint = isPastMonth ? "archive" : "forecast";
-    const url = `https://api.open-meteo.com/v1/${endpoint}?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+    const url = isPastMonth
+      ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
+      : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
     const res = await axios.get<{
       daily: { temperature_2m_max: (number | null)[]; time: string[] };
     }>(url, { timeout: 10_000 });

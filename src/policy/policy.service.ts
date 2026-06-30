@@ -422,7 +422,7 @@ export class PolicyService {
   }
 
   async getProductById(id: string): Promise<ProductSummary | null> {
-    const product = await this.prisma.product.findUnique({
+    const product = await this.prisma.product.findFirst({
       where: { id, status: 'Active' },
     });
     if (!product) return null;
