@@ -72,9 +72,10 @@ model OracleReading {
   confidence  Int
   source      String
   submittedAt DateTime @default(now())
-
+ 
   @@index([key])
   @@index([dataType, submittedAt])
+  @@unique([key, source], name: "key_source")
 }
 
 enum PolicyStatus {

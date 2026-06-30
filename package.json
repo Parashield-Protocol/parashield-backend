@@ -18,10 +18,10 @@
   },
   "dependencies": {
     "@nestjs/common": "^11.0.0",
-    "@nestjs/config": "^3.0.0",
+    "@nestjs/config": "^4.0.0",
     "@nestjs/core": "^11.0.0",
     "@nestjs/platform-express": "^11.0.0",
-    "@nestjs/schedule": "^4.0.0",
+    "@nestjs/schedule": "^5.0.0",
     "@nestjs/swagger": "^11.4.4",
     "@nestjs/throttler": "^6.5.0",
     "@nest-lab/throttler-storage-redis": "^1.2.0",

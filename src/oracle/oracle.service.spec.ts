@@ -20,6 +20,7 @@ describe("OracleService.fetchRainfall", () => {
   const mockPrismaService = {
     oracleReading: {
       create: jest.fn().mockResolvedValue({ id: "mock-id" }),
+      upsert: jest.fn().mockResolvedValue({ id: "mock-id" }),
       findFirst: jest.fn(),
     },
   };
@@ -48,7 +49,7 @@ describe("OracleService.fetchRainfall", () => {
 
   it("should sum rainfall values correctly (10.5 + 20.3 + 15.0 = 45.8)", async () => {
     // Mock persistReading
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     const totalMmFromValue = Number(reading.value) / 1e7;
@@ -56,7 +57,7 @@ describe("OracleService.fetchRainfall", () => {
   });
 
   it("should convert total rainfall to 7-decimal fixed point (45.8mm → 458000000n)", async () => {
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     expect(reading.value).toBe(String(BigInt(Math.round(45.8 * 1e7))));
@@ -64,21 +65,21 @@ describe("OracleService.fetchRainfall", () => {
   });
 
   it('should set source to "open-meteo"', async () => {
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     expect(reading.source).toBe("open-meteo");
   });
 
   it('should set dataType to "weather"', async () => {
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     expect(reading.dataType).toBe("weather");
   });
 
   it("should include lat/lng and date in the key", async () => {
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     expect(reading.key).toContain("rainfall");
@@ -88,13 +89,13 @@ describe("OracleService.fetchRainfall", () => {
   });
 
   it("should persist the reading to the database", async () => {
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
-    expect(mockPrismaService.oracleReading.create).toHaveBeenCalledTimes(1);
-    expect(mockPrismaService.oracleReading.create).toHaveBeenCalledWith(
+    expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalledTimes(1);
+    expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({
+        create: expect.objectContaining({
           dataType: "weather",
           source: "open-meteo",
         }),
@@ -111,7 +112,7 @@ describe("OracleService.fetchRainfall", () => {
     );
 
     expect(reading.key).toContain("rainfall");
-    expect(mockPrismaService.oracleReading.create).not.toHaveBeenCalled();
+    expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
   });
 
   it("should filter out null values in precipitation array", async () => {
@@ -123,7 +124,7 @@ describe("OracleService.fetchRainfall", () => {
         },
       },
     });
-    mockPrismaService.oracleReading.create.mockResolvedValue({ id: "r1" });
+    mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "r1" });
 
     const reading = await service.fetchRainfall(-0.0917, 34.7679, 2026, 6);
     // Should still sum 10.5 + 15.0 + 20.3 = 45.8
@@ -463,13 +464,13 @@ describe("OracleService.fetchRainfall", () => {
           data: [{ departure: { delay: 15 } }],
         },
       });
-      mockPrismaService.oracleReading.create.mockResolvedValue({ id: "f1" });
+      mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "f1" });
 
       const reading = await service.fetchFlightDelay("KQ100", "2026-06-27");
       expect(reading.value).toBe("150000000");
       expect(reading.confidence).toBe(95);
       expect(reading.source).toBe("aviationstack");
-      expect(mockPrismaService.oracleReading.create).toHaveBeenCalled();
+      expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalled();
     });
 
     it("should skip DB persistence if reading confidence is 0 or source is mock", async () => {
@@ -482,7 +483,7 @@ describe("OracleService.fetchRainfall", () => {
         source: "mock",
       };
       await service.persistReading(mockReading);
-      expect(mockPrismaService.oracleReading.create).not.toHaveBeenCalled();
+      expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
     });
   });
 });
