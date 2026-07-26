@@ -228,6 +228,17 @@ export class PolicyService {
       throw new BadRequestException(`Product with ID ${dto.productId} not found or inactive`);
     }
 
+    // #175 — duration is only bounded 1-365 at the DTO level, independent of
+    // any specific product's intended risk window. Premium is calculated
+    // "regardless of duration" (see calculatePremium), so without this check
+    // a policy could extend coverage far past the product's maxDuration with
+    // no corresponding premium adjustment.
+    if (dto.duration > product.maxDuration) {
+      throw new BadRequestException(
+        `Duration ${dto.duration} days exceeds product's maximum duration of ${product.maxDuration} days`,
+      );
+    }
+
     // validateCoverage now also checks pool liquidity (#131) and oracleKey format (#132)
     const validation = await this.validateCoverage(dto.coverageXlm, product, dto.oracleKey);
     if (!validation.valid) {
