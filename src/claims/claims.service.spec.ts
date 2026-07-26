@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ClaimsService } from './claims.service';
 import { StellarService } from '../stellar/stellar.service';
@@ -34,6 +34,9 @@ describe('ClaimsService', () => {
 
   const mockPrismaService = {
     policy: {
+      findUnique: jest.fn(),
+      update:     jest.fn(),
+      updateMany: jest.fn(),
       findUnique:  jest.fn(),
       update:      jest.fn(),
       updateMany:  jest.fn(),
@@ -166,6 +169,29 @@ describe('ClaimsService', () => {
       mockPrismaService.policy.findUnique.mockResolvedValue({ ...ACTIVE_POLICY, status: 'EXPIRED' });
 
       await expect(service.submitClaim(CLAIMANT, POLICY_ID)).rejects.toThrow(ConflictException);
+    });
+
+    it('#177 — throws ForbiddenException when the caller does not own the policy', async () => {
+      const STRANGER = 'GBSTRANGERWALLET000000000000000000000000000000000000000';
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+
+      await expect(service.submitClaim(STRANGER, POLICY_ID)).rejects.toThrow(ForbiddenException);
+      expect(mockPrismaService.claim.create).not.toHaveBeenCalled();
+    });
+
+    it('#177 — proceeds normally when the caller owns the policy', async () => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.create.mockResolvedValue({
+        id:       'owned-claim-id',
+        policyId: POLICY_ID,
+        claimant: CLAIMANT,
+        status:   'PENDING',
+      });
+
+      const claimId = await service.submitClaim(CLAIMANT, POLICY_ID);
+      expect(claimId).toBe('owned-claim-id');
     });
 
     it('should use policy coverageXlm as the claim coverageAmount', async () => {

@@ -1,0 +1,11 @@
+-- #164/#166: PolicyStatus needs a transient PROCESSING value for the atomic
+-- claims-processing gate in ClaimsService.autoProcess/submitClaim. Postgres
+-- requires ALTER TYPE ... ADD VALUE to run outside an explicit transaction
+-- block (and, for older Postgres, in its own statement), matching the
+-- generated form `prisma migrate dev` produces for enum additions.
+--
+-- NOTE: this is the same schema change proposed independently in PR #281
+-- (fix/213-216-test-coverage-and-onchain-fallback). Whichever of these two
+-- PRs merges second should drop this migration file during rebase rather
+-- than applying the enum addition twice.
+ALTER TYPE "PolicyStatus" ADD VALUE 'PROCESSING';

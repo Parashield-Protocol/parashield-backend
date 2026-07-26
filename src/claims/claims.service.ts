@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException, NotFoundException, BadGatewayException } from '@nestjs/common';
+import { Injectable, Logger, ConflictException, NotFoundException, BadGatewayException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -208,6 +208,12 @@ export class ClaimsService {
     const policy = await this.prisma.policy.findUnique({ where: { id: policyId } });
     if (!policy) {
       throw new NotFoundException(`Policy ${policyId} not found`);
+    }
+    // #177 — the JWT-authenticated wallet must own the policy being claimed
+    // against; otherwise any authenticated wallet could file a claim on
+    // someone else's policy.
+    if (policy.policyholder !== claimant) {
+      throw new ForbiddenException(`Wallet ${claimant} does not own policy ${policyId}`);
     }
     if (policy.status !== 'ACTIVE') {
       throw new ConflictException(`Policy ${policyId} is not active`);

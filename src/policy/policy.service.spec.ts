@@ -356,6 +356,41 @@ describe("PolicyService.calculatePremium", () => {
       );
     });
 
+    it("#175 — throws BadRequestException when duration exceeds the product's maxDuration", async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+
+      const dto = {
+        productId: "1",
+        coverageXlm: 500,
+        walletAddress:
+          "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ",
+        duration: validCropProduct.maxDuration + 1,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(service.createPolicy(dto, "tx-hash")).rejects.toThrow(
+        /exceeds product's maximum duration/,
+      );
+      expect(mockPrismaService.policy.create).not.toHaveBeenCalled();
+    });
+
+    it("#175 — allows a duration exactly equal to the product's maxDuration", async () => {
+      mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
+      mockPrismaService.policy.create.mockResolvedValue({ id: "policy-at-max-duration" });
+
+      const dto = {
+        productId: "1",
+        coverageXlm: 500,
+        walletAddress:
+          "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ",
+        duration: validCropProduct.maxDuration,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      const policy = await service.createPolicy(dto, "tx-hash-at-max");
+      expect(policy.id).toBe("policy-at-max-duration");
+    });
+
     it("throws ConflictException (409) on duplicate policy (P2002)", async () => {
       mockPrismaService.product.findMany.mockResolvedValue([validCropProduct]);
 
