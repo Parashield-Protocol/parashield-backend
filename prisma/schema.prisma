@@ -91,6 +91,10 @@ enum PolicyStatus {
   EXPIRED
   CANCELLED
   CLAIMED
+  // #164/#166: transient atomic-gate state between ACTIVE and CLAIMED, set by
+  // ClaimsService.autoProcess so a concurrent call reading the same ACTIVE
+  // snapshot loses the race before any oracle read or contract call happens.
+  PROCESSING
 }
 
 enum ClaimStatus {

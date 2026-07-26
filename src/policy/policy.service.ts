@@ -495,8 +495,64 @@ export class PolicyService {
         status:       dbPolicy.status,
       };
     }
-    // TODO: fall back to policy-engine.get_policy(policy_id) via stellar.simulateInvoke
-    return null;
+    // #216 — DB is the source of truth for reads, but a policy created directly
+    // on-chain (or a DB row lost to an incident) should still be readable via
+    // the policy-engine contract's own get_policy view. Mirrors the
+    // simulateInvoke/isSimulationError/scValToNative pattern already used by
+    // getPoolAvailableBalance above.
+    const policyEngineContract = this.config.get<string>('POLICY_ENGINE_CONTRACT');
+    if (!policyEngineContract) {
+      this.logger.warn('POLICY_ENGINE_CONTRACT not configured — cannot fall back to on-chain read');
+      return null;
+    }
+
+    try {
+      const simResult = await this.stellar.simulateInvoke(
+        policyEngineContract,
+        'get_policy',
+        [nativeToScVal(policyId, { type: 'string' })],
+      );
+
+      if (StellarRpc.Api.isSimulationError(simResult)) {
+        this.logger.warn(`get_policy on-chain fallback simulation error for ${policyId}: ${(simResult as any).error}`);
+        return null;
+      }
+
+      const raw = (simResult as StellarRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+      if (!raw) {
+        this.logger.warn(`get_policy on-chain fallback returned no result for ${policyId}`);
+        return null;
+      }
+
+      // Soroban #[contracttype] structs decode to a plain object keyed by
+      // their Rust field names (snake_case), not the camelCase used in
+      // PolicySummary/Prisma — mapped explicitly below.
+      const onChain = scValToNative(raw) as {
+        product_id: string;
+        policyholder: string;
+        coverage: string | number | bigint;
+        premium_paid: string | number | bigint;
+        oracle_key: string;
+        start_time: string | number | bigint;
+        end_time: string | number | bigint;
+        status: string;
+      };
+
+      return {
+        id:           policyId,
+        productId:    onChain.product_id,
+        policyholder: onChain.policyholder,
+        coverage:     String(onChain.coverage),
+        premiumPaid:  String(onChain.premium_paid),
+        oracleKey:    onChain.oracle_key,
+        startTime:    Number(onChain.start_time),
+        endTime:      Number(onChain.end_time),
+        status:       onChain.status,
+      };
+    } catch (err) {
+      this.logger.warn(`get_policy on-chain fallback failed for ${policyId}: ${(err as Error).message}`);
+      return null;
+    }
   }
 
   async getUserPolicies(
