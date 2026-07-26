@@ -35,6 +35,11 @@ jest.mock("@stellar/stellar-sdk", () => ({
       build: jest.fn().mockReturnValue({ sign: jest.fn() }),
     }),
   },
+  // #185 — getAccountBalance uses a separate Horizon client (balances only
+  // exist on a Horizon account response, not on rpc.Server.getAccount()'s).
+  Horizon: {
+    Server: jest.fn().mockImplementation(() => ({})),
+  },
 }));
 
 describe("StellarService", () => {
@@ -385,9 +390,9 @@ describe("StellarService", () => {
       StellarSDK.rpc.Api.isSimulationError.mockReturnValue(false);
     });
 
-    // #189 — sendTransaction's DUPLICATE/TRY_AGAIN_LATER statuses are not
-    // treated as hard errors (only "ERROR" is) — both fall through to
-    // waitForTransaction like a normal PENDING status.
+    // #189 — DUPLICATE means the network already saw this exact envelope,
+    // so it's correct to fall through to waitForTransaction like a normal
+    // PENDING status (the tx is genuinely in-flight or landed).
     it("#189 — proceeds to waitForTransaction on a DUPLICATE send status", async () => {
       mockRpc.sendTransaction.mockResolvedValue({ status: "DUPLICATE", hash: "dup-hash" });
       mockRpc.getTransaction.mockResolvedValue({ status: "SUCCESS" });
@@ -398,14 +403,36 @@ describe("StellarService", () => {
       expect(mockRpc.getTransaction).toHaveBeenCalledWith("dup-hash");
     });
 
-    it("#189 — proceeds to waitForTransaction on a TRY_AGAIN_LATER send status", async () => {
-      mockRpc.sendTransaction.mockResolvedValue({ status: "TRY_AGAIN_LATER", hash: "retry-later-hash" });
-      mockRpc.getTransaction.mockResolvedValue({ status: "SUCCESS" });
+    // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
+    // submission outright: it was never broadcast, so waitForTransaction
+    // must never be called for it (that hash will never land). The attempt
+    // loop should fail this attempt immediately and retry.
+    it("#183 — fails fast on TRY_AGAIN_LATER and retries rather than waiting for a hash that was never broadcast", async () => {
+      mockRpc.sendTransaction
+        .mockResolvedValueOnce({ status: "TRY_AGAIN_LATER", hash: "retry-later-hash" })
+        .mockResolvedValueOnce({ status: "PENDING", hash: "tx-hash-second-attempt" });
+      // The never-broadcast hash can never be found (dedup check on attempt
+      // 2 must not mistake "rejected outright" for "already landed"); the
+      // second attempt's real hash then confirms normally.
+      mockRpc.getTransaction
+        .mockResolvedValueOnce({ status: "NOT_FOUND" })
+        .mockResolvedValue({ status: "SUCCESS" });
 
       const hash = await service.invokeContract("CONTRACT_ID", "my_method", []);
 
-      expect(hash).toBe("retry-later-hash");
-      expect(mockRpc.getTransaction).toHaveBeenCalledWith("retry-later-hash");
+      expect(hash).toBe("tx-hash-second-attempt");
+      expect(mockRpc.sendTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("#183 — throws after exhausting all attempts if every send is rejected with TRY_AGAIN_LATER", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({ status: "TRY_AGAIN_LATER", hash: "retry-later-hash" });
+      // Dedup checks on attempts 2/3 legitimately query the never-broadcast
+      // hash as a safety net; it must never be found, since it never landed.
+      mockRpc.getTransaction.mockResolvedValue({ status: "NOT_FOUND" });
+
+      await expect(service.invokeContract("CONTRACT_ID", "my_method", [])).rejects.toThrow(
+        /TRY_AGAIN_LATER/,
+      );
     });
   });
 
@@ -479,6 +506,21 @@ describe("StellarService", () => {
         "Transaction submission failed",
       );
     });
+
+    // #183 — this method has no waitForTransaction step of its own, so a
+    // TRY_AGAIN_LATER (never broadcast) result must never be handed back to
+    // the caller shaped like a normal in-flight send.
+    it("#183 — throws when sendTransaction returns a TRY_AGAIN_LATER status", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({
+        status: "TRY_AGAIN_LATER",
+        hash: "retry-later-hash",
+      });
+      const fakeTx = { sign: jest.fn() } as any;
+
+      await expect(service.simulateAssembleAndSend(fakeTx)).rejects.toThrow(
+        /TRY_AGAIN_LATER/,
+      );
+    });
   });
 
   describe("waitForTransaction", () => {
@@ -545,7 +587,7 @@ describe("StellarService", () => {
 
   describe("getAccountBalance", () => {
     let service: StellarService;
-    let mockRpc: { getAccount: jest.Mock };
+    let mockHorizon: { loadAccount: jest.Mock };
 
     const mockConfigService = {
       get: jest.fn((key: string) => {
@@ -559,7 +601,7 @@ describe("StellarService", () => {
     beforeEach(async () => {
       jest.clearAllMocks();
 
-      mockRpc = { getAccount: jest.fn() };
+      mockHorizon = { loadAccount: jest.fn() };
 
       const module: TestingModule = await Test.createTestingModule({
         providers: [
@@ -569,11 +611,16 @@ describe("StellarService", () => {
       }).compile();
 
       service = module.get<StellarService>(StellarService);
-      (service as unknown as { rpc: typeof mockRpc }).rpc = mockRpc;
+      // #185 — balances come from a Horizon account response, not from
+      // `rpc.Server.getAccount()` (which has no `.balances` field at all).
+      // Mocking `rpc.getAccount` here would pass against a shape the real
+      // RPC client never returns, masking exactly the bug this regression
+      // test exists to catch.
+      (service as unknown as { horizon: typeof mockHorizon }).horizon = mockHorizon;
     });
 
-    it("#189 — returns the native XLM balance for the account", async () => {
-      mockRpc.getAccount.mockResolvedValue({
+    it("#189/#185 — returns the native XLM balance for the account", async () => {
+      mockHorizon.loadAccount.mockResolvedValue({
         balances: [
           { asset_type: "native", balance: "123.4567890" },
           { asset_type: "credit_alphanum4", balance: "5.0000000", asset_code: "USDC" },
@@ -583,11 +630,11 @@ describe("StellarService", () => {
       const balance = await service.getAccountBalance("GSOMEACCOUNT");
 
       expect(balance).toBe("123.4567890");
-      expect(mockRpc.getAccount).toHaveBeenCalledWith("GSOMEACCOUNT");
+      expect(mockHorizon.loadAccount).toHaveBeenCalledWith("GSOMEACCOUNT");
     });
 
-    it("#189 — returns '0' when the account has no native XLM balance line", async () => {
-      mockRpc.getAccount.mockResolvedValue({
+    it("#189/#185 — returns '0' when the account has no native XLM balance line", async () => {
+      mockHorizon.loadAccount.mockResolvedValue({
         balances: [{ asset_type: "credit_alphanum4", balance: "5.0000000", asset_code: "USDC" }],
       });
 
@@ -596,8 +643,8 @@ describe("StellarService", () => {
       expect(balance).toBe("0");
     });
 
-    it("#189 — propagates the error when the RPC account lookup fails", async () => {
-      mockRpc.getAccount.mockRejectedValue(new Error("account not found"));
+    it("#189/#185 — propagates the error when the Horizon account lookup fails", async () => {
+      mockHorizon.loadAccount.mockRejectedValue(new Error("account not found"));
 
       await expect(service.getAccountBalance("GSOMEACCOUNT")).rejects.toThrow("account not found");
     });

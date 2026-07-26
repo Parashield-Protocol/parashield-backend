@@ -37,9 +37,6 @@ describe('ClaimsService', () => {
       findUnique: jest.fn(),
       update:     jest.fn(),
       updateMany: jest.fn(),
-      findUnique:  jest.fn(),
-      update:      jest.fn(),
-      updateMany:  jest.fn(),
     },
     claim: {
       findFirst:  jest.fn(),
@@ -457,7 +454,7 @@ describe('ClaimsService', () => {
       );
     });
 
-    it('#165 — should revert policy to ACTIVE and mark claim FAILED when Soroban invoke throws', async () => {
+    it('#165/#186 — should revert policy to ACTIVE and mark claim FAILED when Soroban invoke throws', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
       mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-fail', status: 'PROCESSING' });
@@ -473,6 +470,14 @@ describe('ClaimsService', () => {
       expect(result).toBe('Rejected');
       // Both the FAILED claim update and ACTIVE policy revert happen in one transaction
       expect(mockPrismaService.$transaction).toHaveBeenCalled();
+
+      // #186 — this is the regression guard for the payout-failure bug: a
+      // rejected invokeContract must never result in the claim being marked
+      // PAID. Asserting only "$transaction was called" (as the prior test
+      // did) would not have caught that regression.
+      const claimUpdateCalls = mockPrismaService.claim.update.mock.calls;
+      expect(claimUpdateCalls.some((call: any[]) => call[0]?.data?.status === 'PAID')).toBe(false);
+      expect(claimUpdateCalls.some((call: any[]) => call[0]?.data?.status === 'FAILED')).toBe(true);
     });
   });
 });

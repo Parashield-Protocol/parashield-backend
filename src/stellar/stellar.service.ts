@@ -40,6 +40,7 @@ export class SimulationFailedError extends Error {
 export class StellarService {
   private readonly logger = new Logger(StellarService.name);
   private readonly rpc: StellarRpc.Server;
+  private readonly horizon: Horizon.Server;
   private readonly network: string;
   readonly keeperKeypair: Keypair;
 
@@ -52,6 +53,16 @@ export class StellarService {
       config.get<string>("STELLAR_NETWORK") === "mainnet"
         ? Networks.PUBLIC
         : Networks.TESTNET;
+    // #185 — balances only exist on a Horizon account response, not on the
+    // lightweight object `rpc.Server.getAccount()` returns (that's meant for
+    // building transactions: sequence number only, no `.balances`). A
+    // separate Horizon client is required to fetch real account balances.
+    const horizonUrl =
+      config.get<string>("HORIZON_URL") ??
+      (this.network === Networks.PUBLIC
+        ? "https://horizon.stellar.org"
+        : "https://horizon-testnet.stellar.org");
+    this.horizon = new Horizon.Server(horizonUrl);
     const secret = config.get<string>("KEEPER_SECRET_KEY");
     if (!secret) {
       throw new Error(
@@ -166,6 +177,16 @@ export class StellarService {
             `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
           );
         }
+        // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
+        // submission outright: it was never broadcast, so waitForTransaction
+        // would just poll for a hash that will never land until its own
+        // timeout expires. Fail fast so the retry loop re-sends immediately
+        // instead of burning up to 60s per attempt.
+        if (sendResult.status === "TRY_AGAIN_LATER") {
+          throw new Error(
+            `Transaction submission was rejected by the RPC node (TRY_AGAIN_LATER) — not broadcast, retrying.`,
+          );
+        }
         // Wait for ledger close before returning so callers can trust the hash represents
         // a finalized on-chain state (PENDING → SUCCESS). Throws on FAILED, propagating
         // the failure correctly to callers instead of leaving the DB in a speculative PAID state.
@@ -233,6 +254,16 @@ export class StellarService {
     if (sendResult.status === "ERROR") {
       throw new Error(
         `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
+      );
+    }
+    // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
+    // submission outright (never broadcast). This method returns the raw
+    // send result to the caller with no waitForTransaction step of its own,
+    // so silently treating TRY_AGAIN_LATER like PENDING/DUPLICATE here would
+    // hand callers a hash that will never confirm as if it were in-flight.
+    if (sendResult.status === "TRY_AGAIN_LATER") {
+      throw new Error(
+        `Transaction submission was rejected by the RPC node (TRY_AGAIN_LATER) — not broadcast.`,
       );
     }
 
@@ -326,10 +357,10 @@ export class StellarService {
    * Used for keeper health checks to ensure the keeper has sufficient funds.
    */
   async getAccountBalance(publicKey: string): Promise<string> {
-    const account = (await this.withTimeout(
-      this.rpc.getAccount(publicKey),
-      "getAccount",
-    )) as Horizon.AccountResponse;
+    const account = await this.withTimeout(
+      this.horizon.loadAccount(publicKey),
+      "loadAccount",
+    );
     const nativeBalance = account.balances.find(
       (b): b is Horizon.HorizonApi.BalanceLineNative =>
         b.asset_type === "native",
