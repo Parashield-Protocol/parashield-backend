@@ -27,3 +27,6 @@ jobs:
       # method bodies before they can land on main.
       - name: Type-check & build
         run: npm run build
+
+      - name: Unit tests
+        run: npx jest --ci

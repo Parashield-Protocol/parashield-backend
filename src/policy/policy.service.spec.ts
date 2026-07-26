@@ -760,5 +760,142 @@ describe("PolicyService.calculatePremium", () => {
         service.confirmAndCreatePolicy(dto, validWallet),
       ).rejects.toThrow(/Transaction calls function.*expected 'buy_policy'/);
     });
+
+    describe("DUPLICATE send status and policy idempotency (#174)", () => {
+      const product = {
+        id: "prod-1",
+        name: "Crop Product",
+        category: "crop",
+        triggerType: "Threshold",
+        threshold: "50.0",
+        comparison: "LessThan",
+        coverageMin: "10.0",
+        coverageMax: "1000.0",
+        premiumRate: 500,
+        maxDuration: 365,
+        status: "Active",
+      };
+
+      const dtoFor = (xdr: string) => ({
+        signedXdr: xdr,
+        productId: "prod-1",
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      });
+
+      beforeEach(() => {
+        (service as any).stellar.networkPassphrase =
+          "Test SDF Network ; September 2015";
+        mockStellarService.simulateInvoke = jest.fn();
+        mockPrismaService.product.findMany.mockResolvedValue([product]);
+      });
+
+      it("waits for confirmation instead of inserting blindly when sendTransaction returns DUPLICATE", async () => {
+        mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+          status: "DUPLICATE",
+          hash: "dup-hash",
+        });
+        (mockStellarService as any).waitForTransaction = jest
+          .fn()
+          .mockResolvedValue({ status: "SUCCESS" });
+        mockPrismaService.policy.findUnique.mockResolvedValue(null);
+        mockPrismaService.policy.create.mockResolvedValue({ id: "policy-dup" });
+
+        const result = await service.confirmAndCreatePolicy(
+          dtoFor(buildTestTxXdr({})),
+          validWallet,
+        );
+
+        expect((mockStellarService as any).waitForTransaction).toHaveBeenCalledWith("dup-hash");
+        expect(result).toEqual({ policyId: "policy-dup", txHash: "dup-hash" });
+        expect(mockPrismaService.policy.create).toHaveBeenCalledTimes(1);
+      });
+
+      it("rejects a DUPLICATE transaction that never confirms", async () => {
+        mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+          status: "DUPLICATE",
+          hash: "dup-hash-failed",
+        });
+        (mockStellarService as any).waitForTransaction = jest
+          .fn()
+          .mockResolvedValue({ status: "FAILED" });
+
+        await expect(
+          service.confirmAndCreatePolicy(dtoFor(buildTestTxXdr({})), validWallet),
+        ).rejects.toThrow(/did not confirm on-chain/);
+        expect(mockPrismaService.policy.create).not.toHaveBeenCalled();
+      });
+
+      it("returns the existing policy instead of creating a second row for the same txHash", async () => {
+        mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+          status: "SUCCESS",
+          hash: "tx-hash-existing",
+        });
+        mockPrismaService.policy.findUnique.mockResolvedValue({
+          id: "policy-existing",
+          txHash: "tx-hash-existing",
+        });
+
+        const result = await service.confirmAndCreatePolicy(
+          dtoFor(buildTestTxXdr({})),
+          validWallet,
+        );
+
+        expect(result).toEqual({
+          policyId: "policy-existing",
+          txHash: "tx-hash-existing",
+        });
+        expect(mockPrismaService.policy.create).not.toHaveBeenCalled();
+      });
+
+      it("resolves the race when a concurrent request wins the unique txHash index", async () => {
+        mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+          status: "SUCCESS",
+          hash: "tx-hash-race",
+        });
+        // First lookup (pre-insert) sees nothing, second (post-conflict) sees the winner.
+        mockPrismaService.policy.findUnique
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce({ id: "policy-winner", txHash: "tx-hash-race" });
+        mockPrismaService.policy.create.mockRejectedValue(
+          new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+            code: "P2002",
+            clientVersion: "6.0.0",
+            meta: { target: ["txHash"] },
+          }),
+        );
+
+        const result = await service.confirmAndCreatePolicy(
+          dtoFor(buildTestTxXdr({})),
+          validWallet,
+        );
+
+        expect(result).toEqual({
+          policyId: "policy-winner",
+          txHash: "tx-hash-race",
+        });
+      });
+
+      it("propagates the conflict when the duplicate is not a txHash collision", async () => {
+        mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+          status: "SUCCESS",
+          hash: "tx-hash-other-conflict",
+        });
+        mockPrismaService.policy.findUnique.mockResolvedValue(null);
+        mockPrismaService.policy.create.mockRejectedValue(
+          new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+            code: "P2002",
+            clientVersion: "6.0.0",
+            meta: { target: ["policyholder", "productId", "oracleKey"] },
+          }),
+        );
+
+        await expect(
+          service.confirmAndCreatePolicy(dtoFor(buildTestTxXdr({})), validWallet),
+        ).rejects.toThrow(ConflictException);
+      });
+    });
   });
 });

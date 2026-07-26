@@ -391,7 +391,13 @@ export class PolicyService {
 
     this.logger.log(`Transaction submitted: txHash=${sendResult.hash} status=${sendResult.status}`);
 
-    if (sendResult.status === 'TRY_AGAIN_LATER' || sendResult.status === 'PENDING') {
+    // DUPLICATE means the network already has this transaction; it must be
+    // awaited exactly like PENDING rather than falling through unconfirmed (#174).
+    if (
+      sendResult.status === 'TRY_AGAIN_LATER' ||
+      sendResult.status === 'PENDING' ||
+      (sendResult.status as string) === 'DUPLICATE'
+    ) {
       const txResult = await this.stellar.waitForTransaction(sendResult.hash);
       if (!txResult || txResult.status !== 'SUCCESS') {
         throw new BadRequestException(`Transaction ${sendResult.hash} did not confirm on-chain`);
