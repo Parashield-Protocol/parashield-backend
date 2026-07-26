@@ -135,6 +135,15 @@ export class OracleWorker {
             continue;
           }
 
+          // #170 — skip on-chain submission for confidence-0 or mock readings,
+          // mirroring the guard already present in persistReading.
+          if (reading.confidence === 0 || reading.source === 'mock') {
+            this.logger.warn(
+              `Skipping on-chain submission for key=${reading.key}: confidence=${reading.confidence} source=${reading.source} — data is not reliable`,
+            );
+            continue;
+          }
+
           const contractId = this.config.get<string>('ORACLE_VERIFIER_CONTRACT') ?? '';
           if (!contractId) {
             this.logger.warn('ORACLE_VERIFIER_CONTRACT not set — skipping on-chain submission');

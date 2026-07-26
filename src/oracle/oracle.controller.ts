@@ -291,11 +291,14 @@ export class OracleController {
    * Rate limited: 60 requests/minute per IP (global ThrottleGuard)
    */
   @Get("rainfall")
+  @UseGuards(OperatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiSecurity("operator-api-key")
   @Throttle({ default: { limit: 60, ttl: 60000 } })
   @ApiOperation({
     summary: "Fetch rainfall (legacy query-param endpoint)",
     description:
-      "Public endpoint. Legacy endpoint for fetching rainfall data. Rate limited to 60 requests/minute per IP.",
+      "Operator-only endpoint. Legacy endpoint for fetching rainfall data. Requires x-api-key header with operator API key or Bearer JWT with admin role. Rate limited to 60 requests/minute per IP.",
   })
   @ApiQuery({ name: "lat", required: true, description: "Latitude" })
   @ApiQuery({ name: "lng", required: true, description: "Longitude" })
@@ -304,6 +307,10 @@ export class OracleController {
   @ApiResponse({
     status: 200,
     description: "Rainfall reading",
+  })
+  @ApiResponse({
+    status: 401,
+    description: "Operator API key or admin bearer token required",
   })
   @ApiResponse({
     status: 429,
@@ -336,12 +343,14 @@ export class OracleController {
    * Rate limited: 60 requests/minute per IP (global ThrottleGuard)
    */
   @Get("flight")
-  @UseGuards(AviationStackApiKeyGuard)
+  @UseGuards(OperatorAuthGuard, AviationStackApiKeyGuard)
+  @ApiBearerAuth()
+  @ApiSecurity("operator-api-key")
   @Throttle({ default: { limit: 60, ttl: 60000 } })
   @ApiOperation({
     summary: "Fetch flight delay data from AviationStack",
     description:
-      "Protected endpoint. Requires valid AviationStack API key. Returns flight delay status for the specified flight and date. Rate limited to 60 requests/minute per IP.",
+      "Operator-only endpoint. Requires x-api-key header with operator API key or Bearer JWT with admin role. Returns flight delay status for the specified flight and date. Rate limited to 60 requests/minute per IP.",
   })
   @ApiQuery({
     name: "flight",
@@ -359,7 +368,7 @@ export class OracleController {
   })
   @ApiResponse({
     status: 401,
-    description: "Invalid AviationStack API key",
+    description: "Operator API key or admin bearer token required",
   })
   @ApiResponse({
     status: 429,
