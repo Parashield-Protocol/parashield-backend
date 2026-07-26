@@ -365,5 +365,241 @@ describe("StellarService", () => {
       // getTransaction is called once — by waitForTransaction for finality, not dedup
       expect(mockRpc.getTransaction).toHaveBeenCalledTimes(1);
     });
+
+    // #189 — invokeContract's own #187 fail-fast behavior for deterministic
+    // simulation failures: no retry, no backoff sleep, immediate throw.
+    it("#187 — fails fast on a simulation error without retrying", async () => {
+      const StellarSDK = require("@stellar/stellar-sdk");
+      StellarSDK.rpc.Api.isSimulationError.mockReturnValue(true);
+      mockRpc.simulateTransaction.mockResolvedValue({ error: "contract reverted: InsufficientFunds" });
+
+      await expect(
+        service.invokeContract("CONTRACT_ID", "my_method", []),
+      ).rejects.toThrow("Simulation failed");
+
+      // Only one attempt — getAccount is called once per attempt, so a
+      // single call proves no retry happened.
+      expect(mockRpc.getAccount).toHaveBeenCalledTimes(1);
+      expect(mockRpc.sendTransaction).not.toHaveBeenCalled();
+
+      StellarSDK.rpc.Api.isSimulationError.mockReturnValue(false);
+    });
+
+    // #189 — sendTransaction's DUPLICATE/TRY_AGAIN_LATER statuses are not
+    // treated as hard errors (only "ERROR" is) — both fall through to
+    // waitForTransaction like a normal PENDING status.
+    it("#189 — proceeds to waitForTransaction on a DUPLICATE send status", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({ status: "DUPLICATE", hash: "dup-hash" });
+      mockRpc.getTransaction.mockResolvedValue({ status: "SUCCESS" });
+
+      const hash = await service.invokeContract("CONTRACT_ID", "my_method", []);
+
+      expect(hash).toBe("dup-hash");
+      expect(mockRpc.getTransaction).toHaveBeenCalledWith("dup-hash");
+    });
+
+    it("#189 — proceeds to waitForTransaction on a TRY_AGAIN_LATER send status", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({ status: "TRY_AGAIN_LATER", hash: "retry-later-hash" });
+      mockRpc.getTransaction.mockResolvedValue({ status: "SUCCESS" });
+
+      const hash = await service.invokeContract("CONTRACT_ID", "my_method", []);
+
+      expect(hash).toBe("retry-later-hash");
+      expect(mockRpc.getTransaction).toHaveBeenCalledWith("retry-later-hash");
+    });
+  });
+
+  describe("simulateAssembleAndSend", () => {
+    let service: StellarService;
+    let mockRpc: {
+      simulateTransaction: jest.Mock;
+      sendTransaction: jest.Mock;
+    };
+
+    const mockConfigService = {
+      get: jest.fn((key: string) => {
+        if (key === "STELLAR_RPC_URL") return "https://soroban-testnet.stellar.org";
+        if (key === "STELLAR_NETWORK") return "testnet";
+        if (key === "KEEPER_SECRET_KEY") return "STEST_FAKE_SECRET_KEY";
+        return undefined;
+      }),
+    };
+
+    beforeEach(async () => {
+      jest.clearAllMocks();
+
+      mockRpc = {
+        simulateTransaction: jest.fn().mockResolvedValue({ result: {} }),
+        sendTransaction: jest.fn().mockResolvedValue({ status: "PENDING", hash: "assembled-hash" }),
+      };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          StellarService,
+          { provide: ConfigService, useValue: mockConfigService },
+        ],
+      }).compile();
+
+      service = module.get<StellarService>(StellarService);
+      (service as unknown as { rpc: typeof mockRpc }).rpc = mockRpc;
+    });
+
+    it("simulates, assembles, signs, and sends the transaction", async () => {
+      const fakeTx = { sign: jest.fn() } as any;
+
+      const result = await service.simulateAssembleAndSend(fakeTx);
+
+      expect(mockRpc.simulateTransaction).toHaveBeenCalledWith(fakeTx);
+      expect(mockRpc.sendTransaction).toHaveBeenCalled();
+      expect(result).toEqual({ status: "PENDING", hash: "assembled-hash" });
+    });
+
+    it("#187 — throws a SimulationFailedError (not a generic Error) when simulation fails", async () => {
+      const StellarSDK = require("@stellar/stellar-sdk");
+      StellarSDK.rpc.Api.isSimulationError.mockReturnValue(true);
+      mockRpc.simulateTransaction.mockResolvedValue({ error: "contract reverted" });
+
+      const { SimulationFailedError } = require("./stellar.service");
+      const fakeTx = { sign: jest.fn() } as any;
+
+      await expect(service.simulateAssembleAndSend(fakeTx)).rejects.toThrow(SimulationFailedError);
+      expect(mockRpc.sendTransaction).not.toHaveBeenCalled();
+
+      StellarSDK.rpc.Api.isSimulationError.mockReturnValue(false);
+    });
+
+    it("throws when sendTransaction returns an ERROR status", async () => {
+      mockRpc.sendTransaction.mockResolvedValue({
+        status: "ERROR",
+        errorResult: "insufficient fee",
+      });
+      const fakeTx = { sign: jest.fn() } as any;
+
+      await expect(service.simulateAssembleAndSend(fakeTx)).rejects.toThrow(
+        "Transaction submission failed",
+      );
+    });
+  });
+
+  describe("waitForTransaction", () => {
+    let service: StellarService;
+    let mockRpc: { getTransaction: jest.Mock };
+
+    const mockConfigService = {
+      get: jest.fn((key: string) => {
+        if (key === "STELLAR_RPC_URL") return "https://soroban-testnet.stellar.org";
+        if (key === "STELLAR_NETWORK") return "testnet";
+        if (key === "KEEPER_SECRET_KEY") return "STEST_FAKE_SECRET_KEY";
+        return undefined;
+      }),
+    };
+
+    beforeEach(async () => {
+      jest.clearAllMocks();
+
+      mockRpc = { getTransaction: jest.fn() };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          StellarService,
+          { provide: ConfigService, useValue: mockConfigService },
+        ],
+      }).compile();
+
+      service = module.get<StellarService>(StellarService);
+      (service as unknown as { rpc: typeof mockRpc }).rpc = mockRpc;
+      jest
+        .spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep")
+        .mockResolvedValue(undefined);
+    });
+
+    it("resolves once the transaction reaches SUCCESS", async () => {
+      mockRpc.getTransaction
+        .mockResolvedValueOnce({ status: "NOT_FOUND" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const result = await service.waitForTransaction("tx-hash", 10_000);
+
+      expect(result.status).toBe("SUCCESS");
+    });
+
+    it("throws when the transaction reaches FAILED", async () => {
+      mockRpc.getTransaction.mockResolvedValue({ status: "FAILED", resultXdr: "revert-reason" });
+
+      await expect(service.waitForTransaction("tx-hash", 10_000)).rejects.toThrow(
+        "failed on-chain",
+      );
+    });
+
+    // #189 — the timeout path itself (never reaching SUCCESS or FAILED)
+    // was never exercised; only invokeContract's wrapping of a FAILED
+    // result was tested.
+    it("#189 — throws once timeoutMs elapses without reaching SUCCESS or FAILED", async () => {
+      mockRpc.getTransaction.mockResolvedValue({ status: "PENDING" });
+
+      await expect(service.waitForTransaction("tx-hash", 50)).rejects.toThrow(
+        "did not reach SUCCESS within 50ms",
+      );
+    });
+  });
+
+  describe("getAccountBalance", () => {
+    let service: StellarService;
+    let mockRpc: { getAccount: jest.Mock };
+
+    const mockConfigService = {
+      get: jest.fn((key: string) => {
+        if (key === "STELLAR_RPC_URL") return "https://soroban-testnet.stellar.org";
+        if (key === "STELLAR_NETWORK") return "testnet";
+        if (key === "KEEPER_SECRET_KEY") return "STEST_FAKE_SECRET_KEY";
+        return undefined;
+      }),
+    };
+
+    beforeEach(async () => {
+      jest.clearAllMocks();
+
+      mockRpc = { getAccount: jest.fn() };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          StellarService,
+          { provide: ConfigService, useValue: mockConfigService },
+        ],
+      }).compile();
+
+      service = module.get<StellarService>(StellarService);
+      (service as unknown as { rpc: typeof mockRpc }).rpc = mockRpc;
+    });
+
+    it("#189 — returns the native XLM balance for the account", async () => {
+      mockRpc.getAccount.mockResolvedValue({
+        balances: [
+          { asset_type: "native", balance: "123.4567890" },
+          { asset_type: "credit_alphanum4", balance: "5.0000000", asset_code: "USDC" },
+        ],
+      });
+
+      const balance = await service.getAccountBalance("GSOMEACCOUNT");
+
+      expect(balance).toBe("123.4567890");
+      expect(mockRpc.getAccount).toHaveBeenCalledWith("GSOMEACCOUNT");
+    });
+
+    it("#189 — returns '0' when the account has no native XLM balance line", async () => {
+      mockRpc.getAccount.mockResolvedValue({
+        balances: [{ asset_type: "credit_alphanum4", balance: "5.0000000", asset_code: "USDC" }],
+      });
+
+      const balance = await service.getAccountBalance("GSOMEACCOUNT");
+
+      expect(balance).toBe("0");
+    });
+
+    it("#189 — propagates the error when the RPC account lookup fails", async () => {
+      mockRpc.getAccount.mockRejectedValue(new Error("account not found"));
+
+      await expect(service.getAccountBalance("GSOMEACCOUNT")).rejects.toThrow("account not found");
+    });
   });
 });

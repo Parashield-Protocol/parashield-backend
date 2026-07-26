@@ -26,6 +26,24 @@ describe('PolicyStatusMachine', () => {
     it('should not allow CANCELLED -> ACTIVE', () => {
       expect(canTransition('CANCELLED', 'ACTIVE')).toBe(false);
     });
+
+    // #164/#166 — atomic claims-processing gate
+    it('should allow ACTIVE -> PROCESSING', () => {
+      expect(canTransition('ACTIVE', 'PROCESSING')).toBe(true);
+    });
+
+    it('should allow PROCESSING -> CLAIMED', () => {
+      expect(canTransition('PROCESSING', 'CLAIMED')).toBe(true);
+    });
+
+    it('should allow PROCESSING -> ACTIVE (payout failure recovery, #165)', () => {
+      expect(canTransition('PROCESSING', 'ACTIVE')).toBe(true);
+    });
+
+    it('should not allow PROCESSING -> EXPIRED or CANCELLED', () => {
+      expect(canTransition('PROCESSING', 'EXPIRED')).toBe(false);
+      expect(canTransition('PROCESSING', 'CANCELLED')).toBe(false);
+    });
   });
 
   describe('transition', () => {

@@ -37,6 +37,9 @@ describe('ClaimsService', () => {
       findUnique: jest.fn(),
       update:     jest.fn(),
       updateMany: jest.fn(),
+      findUnique:  jest.fn(),
+      update:      jest.fn(),
+      updateMany:  jest.fn(),
     },
     claim: {
       findFirst:  jest.fn(),

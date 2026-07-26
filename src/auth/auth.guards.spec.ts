@@ -130,4 +130,45 @@ describe('Auth guards', () => {
     expect(guard.canActivate(contextFor(request))).toBe(true);
     expect(request.wallet).toBe('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ');
   });
+
+  // #182 — the guard's whole job is telling a wrong/missing key and a
+  // non-admin caller apart from a legitimate operator/admin; these paths
+  // were never exercised.
+  it('rejects a wrong operator API key', () => {
+    const config = {
+      get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+    } as unknown as ConfigService;
+    const request = {
+      headers: { 'x-api-key': 'not-the-right-key' },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new OperatorAuthGuard(config, jwtService);
+
+    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
+  });
+
+  it('rejects a missing operator API key and missing bearer token', () => {
+    const config = {
+      get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+    } as unknown as ConfigService;
+    const request = { headers: {} } as Partial<AuthenticatedRequest>;
+
+    const guard = new OperatorAuthGuard(config, jwtService);
+
+    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
+  });
+
+  it('rejects a non-admin JWT for operator/admin-gated routes', () => {
+    const token = jwtService.signWithRole('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ', 'user', false);
+    const config = {
+      get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+    } as unknown as ConfigService;
+    const request = {
+      headers: { authorization: `Bearer ${token}` },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new OperatorAuthGuard(config, jwtService);
+
+    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
+  });
 });
