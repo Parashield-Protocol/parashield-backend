@@ -8,16 +8,20 @@ import { BadRequestException } from '@nestjs/common';
  * or paying out a cancelled policy.
  *
  * Transition graph:
- *   ACTIVE → EXPIRED     (endTime passed without trigger)
- *   ACTIVE → CANCELLED   (policyholder cancels before expiry)
- *   ACTIVE → CLAIMED     (trigger met, payout executed)
+ *   ACTIVE → EXPIRED        (endTime passed without trigger)
+ *   ACTIVE → CANCELLED      (policyholder cancels before expiry)
+ *   ACTIVE → CLAIMED        (trigger met, payout executed directly)
+ *   ACTIVE → PROCESSING     (#164 — atomic claims-processing gate acquired)
+ *   PROCESSING → CLAIMED    (#166 — payout completed)
+ *   PROCESSING → ACTIVE     (#165 — payout failed, gate released for retry)
  *   All terminal states → (no transitions allowed)
  */
 export const VALID_TRANSITIONS: Record<string, string[]> = {
-  ACTIVE:    ['EXPIRED', 'CANCELLED', 'CLAIMED'],
-  EXPIRED:   [],
-  CANCELLED: [],
-  CLAIMED:   [],
+  ACTIVE:     ['EXPIRED', 'CANCELLED', 'CLAIMED', 'PROCESSING'],
+  PROCESSING: ['CLAIMED', 'ACTIVE'],
+  EXPIRED:    [],
+  CANCELLED:  [],
+  CLAIMED:    [],
 };
 
 /**

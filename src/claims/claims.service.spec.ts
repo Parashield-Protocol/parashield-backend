@@ -34,8 +34,9 @@ describe('ClaimsService', () => {
 
   const mockPrismaService = {
     policy: {
-      findUnique: jest.fn(),
-      update:     jest.fn(),
+      findUnique:  jest.fn(),
+      update:      jest.fn(),
+      updateMany:  jest.fn(),
     },
     claim: {
       findFirst:  jest.fn(),
@@ -44,6 +45,7 @@ describe('ClaimsService', () => {
       create:     jest.fn(),
       update:     jest.fn(),
     },
+    $transaction: jest.fn(),
   };
 
   const POLICY_ID = 'test-policy-uuid';

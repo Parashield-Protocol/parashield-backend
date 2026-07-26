@@ -6,6 +6,7 @@ import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
+import { PolicyStatus } from '@prisma/client';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive';
 
@@ -178,7 +179,7 @@ export class ClaimsService {
       }),
       this.prisma.policy.update({
         where: { id: policyId },
-        data:  { status: transition('PROCESSING', 'CLAIMED') as any },
+        data:  { status: transition('PROCESSING', 'CLAIMED') as PolicyStatus },
       }),
     ]);
 

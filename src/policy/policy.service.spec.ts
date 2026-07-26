@@ -898,4 +898,80 @@ describe("PolicyService.calculatePremium", () => {
       });
     });
   });
+
+  describe("getPolicy — on-chain fallback (#216)", () => {
+    beforeEach(() => {
+      // Full reassignment, not .mockResolvedValue(): earlier tests in this
+      // file queue up mockResolvedValueOnce() calls on the shared
+      // mockPrismaService.policy.findUnique mock that aren't guaranteed to
+      // be fully drained if those tests fail first, which would otherwise
+      // leak a stale queued value into these tests.
+      mockPrismaService.policy.findUnique = jest.fn().mockResolvedValue(null);
+    });
+
+    it("falls back to policy-engine.get_policy when the policy is not in the DB", async () => {
+      const onChainPolicy = {
+        product_id:   "prod-1",
+        policyholder: "GABC",
+        coverage:     "1000",
+        premium_paid: "50",
+        oracle_key:   "flight-XY123",
+        start_time:   1700000000,
+        end_time:     1700086400,
+        status:       "ACTIVE",
+      };
+      mockStellarService.simulateInvoke = jest.fn().mockResolvedValue({
+        result: { retval: nativeToScVal(onChainPolicy) },
+      });
+
+      const result = await service.getPolicy("missing-policy-id");
+
+      expect(mockStellarService.simulateInvoke).toHaveBeenCalledWith(
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        "get_policy",
+        expect.anything(),
+      );
+      expect(result).toEqual({
+        id:           "missing-policy-id",
+        productId:    "prod-1",
+        policyholder: "GABC",
+        coverage:     "1000",
+        premiumPaid:  "50",
+        oracleKey:    "flight-XY123",
+        startTime:    1700000000,
+        endTime:      1700086400,
+        status:       "ACTIVE",
+      });
+    });
+
+    it("returns null when the on-chain simulation errors", async () => {
+      mockStellarService.simulateInvoke = jest.fn().mockResolvedValue({ error: "contract not found" });
+
+      const result = await service.getPolicy("missing-policy-id");
+      expect(result).toBeNull();
+    });
+
+    it("returns null when the simulation has no retval", async () => {
+      mockStellarService.simulateInvoke = jest.fn().mockResolvedValue({ result: { retval: null } });
+
+      const result = await service.getPolicy("missing-policy-id");
+      expect(result).toBeNull();
+    });
+
+    it("returns null when POLICY_ENGINE_CONTRACT is not configured", async () => {
+      mockConfigService.get.mockImplementationOnce(() => undefined);
+
+      const result = await service.getPolicy("missing-policy-id");
+
+      expect(result).toBeNull();
+      expect(mockStellarService.simulateInvoke).not.toHaveBeenCalled();
+    });
+
+    it("returns null when simulateInvoke throws", async () => {
+      mockStellarService.simulateInvoke = jest.fn().mockRejectedValue(new Error("RPC timeout"));
+
+      const result = await service.getPolicy("missing-policy-id");
+      expect(result).toBeNull();
+    });
+  });
 });
