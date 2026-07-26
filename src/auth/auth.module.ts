@@ -27,7 +27,7 @@ export class AuthModule implements NestModule {
         { path: 'policies/me', method: RequestMethod.GET },
         { path: 'policies/buy', method: RequestMethod.POST },
         { path: 'policies/confirm', method: RequestMethod.POST },
-        { path: 'claims/submit', method: RequestMethod.POST },
+        { path: 'claims', method: RequestMethod.POST },
         { path: 'claims/history/:wallet', method: RequestMethod.GET },
       );
   }

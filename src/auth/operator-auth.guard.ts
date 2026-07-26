@@ -1,5 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { timingSafeEqual } from 'crypto';
 import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
 
@@ -104,7 +105,22 @@ export class OperatorAuthGuard implements CanActivate {
     }
 
     const providedKey = this.getHeader(request, 'x-api-key') ?? this.getHeader(request, 'x-admin-api-key');
-    return providedKey === configuredKey;
+    if (!providedKey) return false;
+
+    return this.constantTimeEqual(providedKey, configuredKey);
+  }
+
+  // #181 — a static, long-lived secret checked on every request is a prime
+  // target for a byte-by-byte timing attack under plain string `===`.
+  // crypto.timingSafeEqual requires equal-length buffers (it throws
+  // otherwise), so the length check must happen first — but done as a
+  // simple early return, not a thrown exception, per the fix suggested in
+  // the issue.
+  private constantTimeEqual(a: string, b: string): boolean {
+    const bufA = Buffer.from(a);
+    const bufB = Buffer.from(b);
+    if (bufA.length !== bufB.length) return false;
+    return timingSafeEqual(bufA, bufB);
   }
 
   private getOptionalBearerToken(request: AuthenticatedRequest): string | null {
