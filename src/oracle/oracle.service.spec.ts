@@ -21,6 +21,7 @@ describe("OracleService.fetchRainfall", () => {
     oracleReading: {
       create: jest.fn().mockResolvedValue({ id: "mock-id" }),
       upsert: jest.fn().mockResolvedValue({ id: "mock-id" }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findFirst: jest.fn(),
     },
   };
@@ -473,6 +474,66 @@ describe("OracleService.fetchRainfall", () => {
       expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalled();
     });
 
+    it("should return NO_DATA with confidence 0 when AviationStack returns an empty result (#171)", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({ data: { data: [] } });
+
+      const reading = await service.fetchFlightDelayReading(
+        "KQ100",
+        "2026-06-27",
+      );
+
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("should return NO_DATA when the flight exists but the delay is null (#171)", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [{ departure: { delay: null } }] },
+      });
+
+      const reading = await service.fetchFlightDelayReading(
+        "KQ100",
+        "2026-06-27",
+      );
+
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("should keep confidence 95 for a genuine 0-minute delay (#171)", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [{ departure: { delay: 0 } }] },
+      });
+
+      const reading = await service.fetchFlightDelayReading(
+        "KQ100",
+        "2026-06-27",
+      );
+
+      expect(reading.status).toBe("OK");
+      expect(reading.confidence).toBe(95);
+      expect(reading.value).toBe("0");
+    });
+
+    it("should never persist a NO_DATA reading (#171)", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({ data: { data: [] } });
+
+      await service.fetchFlightDelay("KQ100", "2026-06-27");
+      expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+
     it("should skip DB persistence if reading confidence is 0 or source is mock", async () => {
       const mockReading = {
         dataType: "flight",
@@ -484,6 +545,190 @@ describe("OracleService.fetchRainfall", () => {
       };
       await service.persistReading(mockReading);
       expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("sanity bounds on upstream values (#173)", () => {
+    beforeEach(() => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+    });
+
+    it("rejects negative rainfall as a fetch failure", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            precipitation_sum: [10.0, -5.0],
+            time: ["2026-05-01", "2026-05-02"],
+          },
+        },
+      });
+
+      await expect(
+        service.fetchRainfallReading(-0.0917, 34.7679, 2026, 5),
+      ).rejects.toThrow(/outside the plausible range/);
+      expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+
+    it("rejects an absurd rainfall total as a fetch failure", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            precipitation_sum: [999_999],
+            time: ["2026-05-01"],
+          },
+        },
+      });
+
+      await expect(
+        service.fetchRainfallReading(-0.0917, 34.7679, 2026, 5),
+      ).rejects.toThrow(/outside the plausible range/);
+    });
+
+    it("accepts a valid rainfall edge value of exactly 0", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            precipitation_sum: [0, 0],
+            time: ["2026-05-01", "2026-05-02"],
+          },
+        },
+      });
+
+      const reading = await service.fetchRainfallReading(
+        -0.0917,
+        34.7679,
+        2026,
+        5,
+      );
+      expect(reading.value).toBe("0");
+    });
+
+    it("rejects physically impossible temperatures", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [25.0, 500.0],
+            time: ["2026-05-01", "2026-05-02"],
+          },
+        },
+      });
+
+      await expect(
+        service.fetchTemperatureReading(-0.0917, 34.7679, 2026, 5),
+      ).rejects.toThrow(/outside the plausible range/);
+    });
+
+    it("accepts temperatures at the boundary of the allowed range", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: {
+          daily: {
+            temperature_2m_max: [-100, 100],
+            time: ["2026-05-01", "2026-05-02"],
+          },
+        },
+      });
+
+      const reading = await service.fetchTemperatureReading(
+        -0.0917,
+        34.7679,
+        2026,
+        5,
+      );
+      expect(reading.value).toBe("0");
+    });
+
+    it("rejects a negative flight delay", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: { data: [{ departure: { delay: -30 } }] },
+      });
+
+      await expect(
+        service.fetchFlightDelayReading("KQ100", "2026-06-27"),
+      ).rejects.toThrow(/outside the plausible range/);
+    });
+
+    it("rejects an implausibly large flight delay", async () => {
+      mockedAxios.get = jest.fn().mockResolvedValue({
+        data: { data: [{ departure: { delay: 1_000_000 } }] },
+      });
+
+      await expect(
+        service.fetchFlightDelayReading("KQ100", "2026-06-27"),
+      ).rejects.toThrow(/outside the plausible range/);
+    });
+  });
+
+  describe("bucketed idempotency (#172)", () => {
+    const reading = {
+      dataType: "flight",
+      key: "flight:KQ100:2026-06-27",
+      value: "150000000",
+      confidence: 95,
+      // 2026-06-27T10:42:30Z
+      timestamp: Math.floor(Date.parse("2026-06-27T10:42:30Z") / 1000),
+      source: "aviationstack",
+    };
+
+    it("truncates timestamps to the start of the hourly bucket", () => {
+      expect(service.bucketStartFor(reading.timestamp).toISOString()).toBe(
+        "2026-06-27T10:00:00.000Z",
+      );
+    });
+
+    it("maps two readings in the same hour onto the same bucket", () => {
+      const later = reading.timestamp + 900; // +15 minutes
+      expect(service.bucketStartFor(later).getTime()).toBe(
+        service.bucketStartFor(reading.timestamp).getTime(),
+      );
+    });
+
+    it("upserts on (key, source, bucketStart) so a repeated cron run cannot insert twice", async () => {
+      await service.persistReading(reading);
+      await service.persistReading({ ...reading, timestamp: reading.timestamp + 900 });
+
+      expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalledTimes(2);
+      const [first, second] = (
+        mockPrismaService.oracleReading.upsert as jest.Mock
+      ).mock.calls;
+      expect(first[0].where).toEqual(second[0].where);
+      expect(first[0].where.key_source_bucket).toEqual({
+        key: reading.key,
+        source: reading.source,
+        bucketStart: new Date("2026-06-27T10:00:00.000Z"),
+      });
+    });
+
+    it("grants the on-chain submission claim to exactly one caller", async () => {
+      (mockPrismaService.oracleReading.updateMany as jest.Mock)
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
+
+      await expect(service.claimForOnChainSubmission(reading)).resolves.toBe(true);
+      await expect(service.claimForOnChainSubmission(reading)).resolves.toBe(false);
+
+      const claimWhere = (mockPrismaService.oracleReading.updateMany as jest.Mock)
+        .mock.calls[0][0];
+      expect(claimWhere.where.onChainSubmitted).toBe(false);
+      expect(claimWhere.data).toEqual({ onChainSubmitted: true });
+    });
+
+    it("releases the claim so a failed submission can be retried next cycle", async () => {
+      await service.releaseOnChainClaim(reading);
+
+      const call = (mockPrismaService.oracleReading.updateMany as jest.Mock).mock
+        .calls[0][0];
+      expect(call.where.onChainTxHash).toBeNull();
+      expect(call.data).toEqual({ onChainSubmitted: false });
+    });
+
+    it("records the transaction hash of a successful submission", async () => {
+      await service.recordOnChainSubmission(reading, "tx-abc");
+
+      const call = (mockPrismaService.oracleReading.updateMany as jest.Mock).mock
+        .calls[0][0];
+      expect(call.data).toEqual({ onChainTxHash: "tx-abc" });
     });
   });
 });

@@ -14,7 +14,17 @@ describe('OracleWorker', () => {
     source: 'open-meteo',
   };
 
-  let oracleService: jest.Mocked<Pick<OracleService, 'fetchRainfallReading' | 'fetchFlightDelayReading' | 'persistReading'>>;
+  let oracleService: jest.Mocked<
+    Pick<
+      OracleService,
+      | 'fetchRainfallReading'
+      | 'fetchFlightDelayReading'
+      | 'persistReading'
+      | 'claimForOnChainSubmission'
+      | 'recordOnChainSubmission'
+      | 'releaseOnChainClaim'
+    >
+  >;
   let configService: jest.Mocked<Pick<ConfigService, 'get'>>;
   let stellarService: jest.Mocked<Pick<StellarService, 'invokeContract'>>;
   let prismaService: jest.Mocked<any>;
@@ -27,6 +37,9 @@ describe('OracleWorker', () => {
       fetchRainfallReading: jest.fn(),
       fetchFlightDelayReading: jest.fn(),
       persistReading: jest.fn().mockResolvedValue(undefined),
+      claimForOnChainSubmission: jest.fn().mockResolvedValue(true),
+      recordOnChainSubmission: jest.fn().mockResolvedValue(undefined),
+      releaseOnChainClaim: jest.fn().mockResolvedValue(undefined),
     };
     configService = {
       get: jest.fn().mockReturnValue(''),
@@ -134,5 +147,145 @@ describe('OracleWorker', () => {
     expect(oracleService.persistReading).toHaveBeenCalledTimes(2);
     expect(oracleService.persistReading).toHaveBeenNthCalledWith(1, rainReading);
     expect(oracleService.persistReading).toHaveBeenNthCalledWith(2, flightReading);
+  });
+
+  describe('confidence gate and on-chain idempotency (#171, #172)', () => {
+    const contractId = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+
+    function buildWorker() {
+      return new OracleWorker(
+        oracleService as unknown as OracleService,
+        configService as unknown as ConfigService,
+        stellarService as unknown as StellarService,
+        prismaService as unknown as PrismaService,
+      );
+    }
+
+    beforeEach(() => {
+      configService.get.mockImplementation((key: string) =>
+        key === 'ORACLE_VERIFIER_CONTRACT' ? contractId : undefined,
+      );
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'flight:KQ200:2026-06-27' },
+      ]);
+      stellarService.invokeContract.mockResolvedValue('tx-hash-1');
+    });
+
+    it('never persists or submits a NO_DATA reading', async () => {
+      oracleService.fetchFlightDelayReading.mockResolvedValue({
+        dataType: 'flight',
+        key: 'flight:KQ200:2026-06-27',
+        value: '0',
+        confidence: 0,
+        timestamp: 1,
+        source: 'aviationstack',
+        status: 'NO_DATA',
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.persistReading).not.toHaveBeenCalled();
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().skipped).toBe(1);
+    });
+
+    it('honours a configured minimum confidence threshold', async () => {
+      configService.get.mockImplementation((key: string) => {
+        if (key === 'ORACLE_VERIFIER_CONTRACT') return contractId;
+        if (key === 'ORACLE_MIN_CONFIDENCE') return '90';
+        return undefined;
+      });
+      oracleService.fetchFlightDelayReading.mockResolvedValue({
+        ...reading,
+        key: 'flight:KQ200:2026-06-27',
+        confidence: 80,
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().skipped).toBe(1);
+    });
+
+    it('submits once and records the tx hash when the claim is granted', async () => {
+      oracleService.fetchFlightDelayReading.mockResolvedValue({
+        ...reading,
+        key: 'flight:KQ200:2026-06-27',
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.claimForOnChainSubmission).toHaveBeenCalledTimes(1);
+      expect(stellarService.invokeContract).toHaveBeenCalledTimes(1);
+      expect(oracleService.recordOnChainSubmission).toHaveBeenCalledWith(
+        expect.objectContaining({ key: 'flight:KQ200:2026-06-27' }),
+        'tx-hash-1',
+      );
+      expect(worker.getMetrics().submitted).toBe(1);
+    });
+
+    it('skips the contract call when another replica already claimed the bucket', async () => {
+      oracleService.fetchFlightDelayReading.mockResolvedValue({
+        ...reading,
+        key: 'flight:KQ200:2026-06-27',
+      });
+      oracleService.claimForOnChainSubmission.mockResolvedValue(false);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().duplicates).toBe(1);
+    });
+
+    it('submits only once across two cron runs in the same bucket', async () => {
+      oracleService.fetchFlightDelayReading.mockResolvedValue({
+        ...reading,
+        key: 'flight:KQ200:2026-06-27',
+      });
+      oracleService.claimForOnChainSubmission
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).toHaveBeenCalledTimes(1);
+      expect(worker.getMetrics()).toEqual(
+        expect.objectContaining({ submitted: 1, duplicates: 1 }),
+      );
+    });
+
+    it('releases the claim when the on-chain submission fails', async () => {
+      oracleService.fetchFlightDelayReading.mockResolvedValue({
+        ...reading,
+        key: 'flight:KQ200:2026-06-27',
+      });
+      stellarService.invokeContract.mockRejectedValue(new Error('rpc down'));
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.releaseOnChainClaim).toHaveBeenCalledTimes(1);
+      expect(oracleService.recordOnChainSubmission).not.toHaveBeenCalled();
+    });
+
+    it('counts a reading that failed both fetch attempts as invalid', async () => {
+      oracleService.fetchFlightDelayReading.mockRejectedValue(
+        new Error('upstream value outside the plausible range'),
+      );
+
+      const worker = buildWorker();
+      const poll = worker.pollAndSubmit();
+      await jest.advanceTimersByTimeAsync(5_000);
+      await poll;
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(1);
+    });
   });
 });

@@ -387,7 +387,13 @@ export class PolicyService {
 
     this.logger.log(`Transaction submitted: txHash=${sendResult.hash} status=${sendResult.status}`);
 
-    if (sendResult.status === 'TRY_AGAIN_LATER' || sendResult.status === 'PENDING') {
+    // DUPLICATE means the network already has this transaction; it must be
+    // awaited exactly like PENDING rather than falling through unconfirmed (#174).
+    if (
+      sendResult.status === 'TRY_AGAIN_LATER' ||
+      sendResult.status === 'PENDING' ||
+      (sendResult.status as string) === 'DUPLICATE'
+    ) {
       const txResult = await this.stellar.waitForTransaction(sendResult.hash);
       if (!txResult || txResult.status !== 'SUCCESS') {
         throw new BadRequestException(`Transaction ${sendResult.hash} did not confirm on-chain`);
@@ -395,7 +401,29 @@ export class PolicyService {
       this.logger.log(`Transaction confirmed on-chain: txHash=${sendResult.hash}`);
     }
 
-    const policy = await this.createPolicy(dto, sendResult.hash);
+    // Idempotency guard: a concurrent confirm call with the same signed XDR must
+    // return the existing policy instead of inserting a second row (#174).
+    const existing = await this.prisma.policy.findUnique({ where: { txHash: sendResult.hash } });
+    if (existing) {
+      this.logger.log(`Policy already exists for txHash=${sendResult.hash} — returning id=${existing.id}`);
+      return { policyId: existing.id, txHash: sendResult.hash };
+    }
+
+    let policy: { id: string };
+    try {
+      policy = await this.createPolicy(dto, sendResult.hash);
+    } catch (err) {
+      // Lost the race between the lookup above and the insert — the unique
+      // txHash index rejected the second write, so return the winner's row.
+      if (err instanceof ConflictException) {
+        const winner = await this.prisma.policy.findUnique({ where: { txHash: sendResult.hash } });
+        if (winner) {
+          this.logger.log(`Concurrent policy creation resolved for txHash=${sendResult.hash} — id=${winner.id}`);
+          return { policyId: winner.id, txHash: sendResult.hash };
+        }
+      }
+      throw err;
+    }
     this.logger.log(`Policy created: id=${policy.id} txHash=${sendResult.hash}`);
     return { policyId: policy.id, txHash: sendResult.hash };
   }

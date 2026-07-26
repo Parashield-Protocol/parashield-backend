@@ -14,7 +14,25 @@ export interface OracleReading {
   confidence: number;
   timestamp: number;
   source: string;
+  /** OK when the upstream returned real data, NO_DATA when the value is unknown (#171). */
+  status?: "OK" | "NO_DATA";
 }
+
+/** Length of an oracle idempotency bucket in ms — matches the hourly cron cadence (#172). */
+export const ORACLE_BUCKET_MS = 3_600_000;
+
+/**
+ * Plausibility bounds applied to upstream values before they can reach the
+ * chain (#173). Anything outside these ranges is treated as a fetch failure.
+ */
+export const SANITY_BOUNDS = {
+  /** Monthly rainfall in mm — negative is impossible, 20m/month is far beyond any record. */
+  rainfall: { min: 0, max: 20_000 },
+  /** Daily max temperature in °C. */
+  temperature: { min: -100, max: 100 },
+  /** Flight departure delay in minutes — capped at 14 days. */
+  delay: { min: 0, max: 20_160 },
+} as const;
 
 /**
  * OracleService — fetches real-world data and formats it for on-chain submission.
@@ -36,16 +54,60 @@ export class OracleService {
     private readonly prisma: PrismaService,
   ) {}
 
+  /**
+   * Truncate a Unix-second timestamp to the start of its idempotency bucket (#172).
+   * All replicas processing the same cron cycle derive the same bucket, so their
+   * upserts collapse onto a single row.
+   */
+  bucketStartFor(
+    timestampSeconds: number,
+    bucketMs: number = ORACLE_BUCKET_MS,
+  ): Date {
+    const ms = timestampSeconds * 1000;
+    return new Date(Math.floor(ms / bucketMs) * bucketMs);
+  }
+
+  /**
+   * Reject implausible upstream values before they can be submitted on-chain (#173).
+   * Out-of-range data is treated as a fetch failure so the worker's retry/skip
+   * path handles it instead of the contract.
+   */
+  private assertWithinBounds(
+    label: keyof typeof SANITY_BOUNDS,
+    value: number,
+    key: string,
+  ): void {
+    const { min, max } = SANITY_BOUNDS[label];
+    if (!Number.isFinite(value) || value < min || value > max) {
+      this.logger.error(
+        `Rejecting out-of-range ${label} value for key=${key}: ${value} (allowed ${min}..${max})`,
+      );
+      throw new ServiceUnavailableException(
+        `Upstream ${label} value ${value} is outside the plausible range ${min}..${max}`,
+      );
+    }
+  }
+
   /** Persist an OracleReading to the database. */
   async persistReading(reading: OracleReading): Promise<void> {
-    if (reading.confidence === 0 || reading.source === "mock") {
+    if (
+      reading.confidence === 0 ||
+      reading.status === "NO_DATA" ||
+      reading.source === "mock"
+    ) {
       this.logger.warn(
         `Skipping persistence of mock/confidence-0 reading for key: ${reading.key}`,
       );
       return;
     }
     await this.prisma.oracleReading.upsert({
-      where: { key_source: { key: reading.key, source: reading.source } },
+      where: {
+        key_source_bucket: {
+          key: reading.key,
+          source: reading.source,
+          bucketStart: this.bucketStartFor(reading.timestamp),
+        },
+      },
       update: {
         dataType: reading.dataType,
         value: BigInt(reading.value),
@@ -58,11 +120,70 @@ export class OracleService {
         value: BigInt(reading.value),
         confidence: reading.confidence,
         source: reading.source,
+        bucketStart: this.bucketStartFor(reading.timestamp),
       },
     });
     this.logger.log(
       `OracleReading persisted: key=${reading.key} value=${reading.value}`,
     );
+  }
+
+  /**
+   * Atomically claim the right to submit a reading on-chain for its bucket (#172).
+   *
+   * The conditional update is the distributed lock: only the replica whose
+   * UPDATE matches the still-unsubmitted row gets a count of 1, every other
+   * replica gets 0 and skips the contract call.
+   */
+  async claimForOnChainSubmission(reading: OracleReading): Promise<boolean> {
+    const { count } = await this.prisma.oracleReading.updateMany({
+      where: {
+        key: reading.key,
+        source: reading.source,
+        bucketStart: this.bucketStartFor(reading.timestamp),
+        onChainSubmitted: false,
+      },
+      data: { onChainSubmitted: true },
+    });
+
+    if (count === 0) {
+      this.logger.warn(
+        `Duplicate oracle submission suppressed for key=${reading.key} bucket=${this.bucketStartFor(reading.timestamp).toISOString()}`,
+      );
+      return false;
+    }
+    return true;
+  }
+
+  /** Record the transaction hash of a successful on-chain submission (#172). */
+  async recordOnChainSubmission(
+    reading: OracleReading,
+    txHash: string,
+  ): Promise<void> {
+    await this.prisma.oracleReading.updateMany({
+      where: {
+        key: reading.key,
+        source: reading.source,
+        bucketStart: this.bucketStartFor(reading.timestamp),
+      },
+      data: { onChainTxHash: txHash },
+    });
+  }
+
+  /**
+   * Release a claim whose on-chain submission failed so the next cron cycle can
+   * retry the same bucket (#172).
+   */
+  async releaseOnChainClaim(reading: OracleReading): Promise<void> {
+    await this.prisma.oracleReading.updateMany({
+      where: {
+        key: reading.key,
+        source: reading.source,
+        bucketStart: this.bucketStartFor(reading.timestamp),
+        onChainTxHash: null,
+      },
+      data: { onChainSubmitted: false },
+    });
   }
 
   /** Get all stored oracle readings ordered by submittedAt desc, with an optional row cap. */
@@ -166,9 +287,15 @@ export class OracleService {
     const coverage = observedCount / daysInMonth;
     const confidence = Math.round(coverage * 95);
 
+    const key = `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
+    for (const daily of observedReadings) {
+      this.assertWithinBounds("rainfall", daily, key);
+    }
+    this.assertWithinBounds("rainfall", totalMm, key);
+
     const oracleReading: OracleReading = {
       dataType: "weather",
-      key: `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`,
+      key,
       value: BigInt(Math.round(totalMm * 1e7)).toString(),
       confidence,
       timestamp: Math.floor(Date.now() / 1000),
@@ -236,9 +363,19 @@ export class OracleService {
     const coverage = temps.length / expectedDays;
     const confidence = Math.round(coverage * 95);
 
+    const key = `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
+    // Only validate observed data — an empty window legitimately yields 0 with
+    // confidence 0 and is filtered by the worker's confidence gate.
+    if (temps.length > 0) {
+      for (const daily of temps) {
+        this.assertWithinBounds("temperature", daily, key);
+      }
+      this.assertWithinBounds("temperature", avgTemp, key);
+    }
+
     const oracleReading: OracleReading = {
       dataType: "weather",
-      key: `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`,
+      key,
       value: BigInt(Math.round(avgTemp * 1e7)).toString(),
       confidence,
       timestamp: Math.floor(Date.now() / 1000),
@@ -281,22 +418,45 @@ export class OracleService {
     }
     const url = `https://api.aviationstack.com/v1/flights?flight_iata=${flightNumber}&flight_date=${date}`;
     const res = await axios.get<{
-      data: Array<{ departure: { delay: number } }>;
-    }>(url, { 
+      data?: Array<{ departure?: { delay?: number | null } | null } | null>;
+    }>(url, {
       timeout: 10_000,
       headers: {
         'Authorization': `Bearer ${apiKey}`
       }
     });
-    const delay = res.data.data?.[0]?.departure?.delay ?? 0;
+    const key = `flight:${flightNumber}:${date}`;
+    const flight = res.data.data?.[0];
+    const delay = flight?.departure?.delay;
+
+    // A missing flight or a null delay means "unknown", not "on time" (#171).
+    // Emitting confidence 0 + NO_DATA keeps it out of the DB and off-chain
+    // instead of masquerading as a genuine 0-minute delay.
+    if (!flight || delay === null || delay === undefined) {
+      this.logger.warn(
+        `AviationStack returned no usable delay for ${key} — emitting NO_DATA with confidence 0`,
+      );
+      return {
+        dataType: "flight",
+        key,
+        value: "0",
+        confidence: 0,
+        timestamp: Math.floor(Date.now() / 1000),
+        source: "aviationstack",
+        status: "NO_DATA",
+      };
+    }
+
+    this.assertWithinBounds("delay", delay, key);
 
     const oracleReading: OracleReading = {
       dataType: "flight",
-      key: `flight:${flightNumber}:${date}`,
+      key,
       value: BigInt(Math.round(delay * 1e7)).toString(),
       confidence: 95,
       timestamp: Math.floor(Date.now() / 1000),
       source: "aviationstack",
+      status: "OK",
     };
 
     return oracleReading;

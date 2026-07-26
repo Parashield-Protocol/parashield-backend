@@ -71,11 +71,19 @@ model OracleReading {
   value       BigInt
   confidence  Int
   source      String
+  // Start of the time bucket this reading belongs to (hourly by default).
+  // One reading per (key, source, bucket) so repeated cron cycles — including
+  // concurrent replicas — converge on a single row instead of appending.
+  bucketStart DateTime @default(now())
+  // Set atomically by the worker before the on-chain call so only one replica
+  // per bucket can submit the reading to the Oracle Verifier contract.
+  onChainSubmitted Boolean @default(false)
+  onChainTxHash    String?
   submittedAt DateTime @default(now())
- 
+
   @@index([key])
   @@index([dataType, submittedAt])
-  @@unique([key, source], name: "key_source")
+  @@unique([key, source, bucketStart], name: "key_source_bucket")
 }
 
 enum PolicyStatus {
