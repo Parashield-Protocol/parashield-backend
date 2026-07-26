@@ -286,6 +286,12 @@ describe('ClaimsService', () => {
   });
 
   describe('autoProcess', () => {
+    beforeEach(() => {
+      // Default: atomic gate succeeds (count=1) and $transaction resolves
+      mockPrismaService.policy.updateMany = jest.fn().mockResolvedValue({ count: 1 });
+      mockPrismaService.$transaction = jest.fn().mockResolvedValue([{}, {}]);
+    });
+
     it('should return PolicyNotActive when policy does not exist in DB', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(null);
 
@@ -303,8 +309,43 @@ describe('ClaimsService', () => {
       expect(result).toBe('PolicyNotActive');
     });
 
+    it('should return AlreadyProcessed when an existing non-terminal claim exists', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue({ id: 'c1', status: 'PROCESSING' });
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('AlreadyProcessed');
+      expect(mockPrismaService.policy.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('#164 — should use updateMany atomic gate before oracle read', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-1', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue(null);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      await service.autoProcess(POLICY_ID);
+
+      expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith({
+        where: { id: POLICY_ID, status: 'ACTIVE' },
+        data:  { status: 'PROCESSING' },
+      });
+    });
+
+    it('#164 — should return AlreadyProcessed when atomic gate finds count=0 (lost race)', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.updateMany.mockResolvedValue({ count: 0 });
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('AlreadyProcessed');
+      expect(mockPrismaService.claim.create).not.toHaveBeenCalled();
+    });
+
     it('should create a PROCESSING claim record for an ACTIVE policy', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-1', status: 'PROCESSING' });
       mockOracleService.getLatestReading.mockResolvedValue(null);
       mockPrismaService.claim.update.mockResolvedValue({});
@@ -323,6 +364,7 @@ describe('ClaimsService', () => {
 
     it('should return Rejected when no oracle reading is available', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-1', status: 'PROCESSING' });
       mockOracleService.getLatestReading.mockResolvedValue(null);
       mockPrismaService.claim.update.mockResolvedValue({});
@@ -333,6 +375,7 @@ describe('ClaimsService', () => {
 
     it('should return Rejected when oracle value is above the LessThan threshold', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-1', status: 'PROCESSING' });
       mockOracleService.getLatestReading.mockResolvedValue({
         key:        ACTIVE_POLICY.oracleKey,
@@ -348,6 +391,7 @@ describe('ClaimsService', () => {
 
     it('should return Paid and invoke Soroban when oracle value meets the trigger condition', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-1', status: 'PROCESSING' });
       mockOracleService.getLatestReading.mockResolvedValue({
         key:        ACTIVE_POLICY.oracleKey,
@@ -356,8 +400,6 @@ describe('ClaimsService', () => {
       });
       mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
       mockStellarService.invokeContract.mockResolvedValue('tx-hash-abc');
-      mockPrismaService.claim.update.mockResolvedValue({});
-      mockPrismaService.policy.update.mockResolvedValue({});
 
       const result = await service.autoProcess(POLICY_ID);
       expect(result).toBe('Paid');
@@ -366,6 +408,43 @@ describe('ClaimsService', () => {
         'process_claim',
         expect.any(Array),
       );
+    });
+
+    it('#166 — should wrap claim+policy DB writes in a single $transaction on success', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-1', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(200_000_000),
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
+      mockStellarService.invokeContract.mockResolvedValue('tx-hash-xyz');
+
+      await service.autoProcess(POLICY_ID);
+
+      expect(mockPrismaService.$transaction).toHaveBeenCalledWith(
+        expect.arrayContaining([expect.anything(), expect.anything()]),
+      );
+    });
+
+    it('#165 — should revert policy to ACTIVE and mark claim FAILED when Soroban invoke throws', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-fail', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(200_000_000),
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
+      mockStellarService.invokeContract.mockRejectedValue(new Error('Soroban RPC down'));
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('Rejected');
+      // Both the FAILED claim update and ACTIVE policy revert happen in one transaction
+      expect(mockPrismaService.$transaction).toHaveBeenCalled();
     });
   });
 });

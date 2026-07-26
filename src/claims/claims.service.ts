@@ -55,7 +55,7 @@ export class ClaimsService {
       return 'PolicyNotActive';
     }
 
-    // Duplicate guard: prevent double payouts or duplicate in-flight processing
+    // #163 — Duplicate guard: prevent double payouts or duplicate in-flight processing
     const existingClaim = await this.prisma.claim.findFirst({
       where: {
         policyId,
@@ -66,6 +66,22 @@ export class ClaimsService {
     if (existingClaim) {
       this.logger.warn(
         `Duplicate autoProcess call for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
+      );
+      return 'AlreadyProcessed';
+    }
+
+    // #164 — Atomic policy gate: flip policy to PROCESSING atomically so a concurrent
+    // autoProcess call that read the same ACTIVE snapshot loses the race here, before
+    // any oracle read or contract call is made. Using updateMany with a conditional
+    // WHERE ensures exactly one caller proceeds; the other sees count=0 and bails.
+    const gateResult = await this.prisma.policy.updateMany({
+      where: { id: policyId, status: 'ACTIVE' },
+      data:  { status: 'PROCESSING' },
+    });
+
+    if (gateResult.count === 0) {
+      this.logger.warn(
+        `Policy ${policyId} status gate missed — already claimed by a concurrent call`,
       );
       return 'AlreadyProcessed';
     }
@@ -135,23 +151,36 @@ export class ClaimsService {
       );
       this.logger.log(`Soroban payout initiated: txHash=${txHash} claimId=${claim.id}`);
     } catch (err) {
+      // #165 — payout failure: mark claim FAILED and revert the atomic policy gate so
+      // the policy can be retried on the next worker tick rather than being stuck.
       this.logger.error(`Soroban payout failed for claim ${claim.id}`, err);
-      await this.prisma.claim.update({
-        where: { id: claim.id },
-        data:  { status: 'FAILED', processedAt: new Date() },
-      });
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: 'FAILED', processedAt: new Date() },
+        }),
+        this.prisma.policy.update({
+          where: { id: policyId },
+          data:  { status: 'ACTIVE' },
+        }),
+      ]);
       return 'Rejected';
     }
 
-    await this.prisma.claim.update({
-      where: { id: claim.id },
-      data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
-    });
-
-    await this.prisma.policy.update({
-      where: { id: policyId },
-      data:  { status: transition(policy.status, 'CLAIMED') as any },
-    });
+    // #166 — Wrap both DB writes in a single transaction so a crash between them can't
+    // leave claim=PROCESSING / policy=PROCESSING while txHash is already on-chain.
+    // On retry the duplicate-guard or atomic gate above catches the already-PROCESSING
+    // claim/policy and returns AlreadyProcessed instead of re-invoking the contract.
+    await this.prisma.$transaction([
+      this.prisma.claim.update({
+        where: { id: claim.id },
+        data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
+      }),
+      this.prisma.policy.update({
+        where: { id: policyId },
+        data:  { status: transition('PROCESSING', 'CLAIMED') as any },
+      }),
+    ]);
 
     return 'Paid';
   }
