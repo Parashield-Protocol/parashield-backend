@@ -14,6 +14,21 @@ import {
 } from "@stellar/stellar-sdk";
 
 /**
+ * #187 — a reverting contract call is a deterministic simulation failure:
+ * the same inputs against the same on-chain state will fail identically
+ * every time, so retrying it like a transient network error just wastes
+ * time and buries the real revert reason behind a generic "all attempts
+ * failed" message. Thrown instead of a plain Error so callers with retry
+ * loops can distinguish "don't bother retrying this" from "try again."
+ */
+export class SimulationFailedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SimulationFailedError";
+  }
+}
+
+/**
  * StellarService — thin wrapper over the Stellar SDK for Soroban contract calls.
  *
  * Responsibilities:
@@ -128,7 +143,7 @@ export class StellarService {
           "simulateTransaction",
         );
         if (StellarRpc.Api.isSimulationError(simResult)) {
-          throw new Error(`Simulation failed: ${simResult.error}`);
+          throw new SimulationFailedError(`Simulation failed: ${simResult.error}`);
         }
 
         const assembledTx = StellarRpc.assembleTransaction(
@@ -164,6 +179,14 @@ export class StellarService {
         this.logger.warn(
           `sendTransaction attempt ${attempt}/${MAX_ATTEMPTS} failed: ${lastError.message}`,
         );
+        // #187 — a reverting contract call is deterministic: the same
+        // simulation will fail identically on every attempt, so retrying
+        // it burns ~4-6s of backoff for nothing and hides the real revert
+        // reason behind a generic "all attempts failed" message. Fail
+        // fast instead; only genuine network/send errors get retried.
+        if (err instanceof SimulationFailedError) {
+          throw err;
+        }
         if (attempt < MAX_ATTEMPTS) {
           // Exponential backoff: 2s, 4s, 8s...
           const backoffMs = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
@@ -197,7 +220,7 @@ export class StellarService {
       "simulateTransaction",
     );
     if (StellarRpc.Api.isSimulationError(simResult)) {
-      throw new Error(`Simulation failed: ${simResult.error}`);
+      throw new SimulationFailedError(`Simulation failed: ${simResult.error}`);
     }
 
     const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
