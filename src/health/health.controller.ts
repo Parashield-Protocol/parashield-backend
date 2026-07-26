@@ -1,7 +1,13 @@
 import { Controller, Get, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
+
+// #191 — default floor below which the keeper account is considered too low
+// to reliably keep paying transaction fees. Overridable via
+// KEEPER_MIN_BALANCE_XLM for deployments with different fee/volume profiles.
+const DEFAULT_KEEPER_MIN_BALANCE_XLM = 5;
 
 @ApiTags('health')
 @Controller('health')
@@ -11,6 +17,7 @@ export class HealthController {
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
+    private readonly config: ConfigService,
   ) {}
 
   /**
@@ -30,6 +37,7 @@ export class HealthController {
     let dbError: string | undefined;
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
+    let keeperBalanceXlm: string | undefined;
 
     try {
       await this.prisma.$queryRaw`SELECT 1`;
@@ -40,7 +48,21 @@ export class HealthController {
     }
 
     try {
-      await this.stellar.getAccountBalance(this.stellar.keeperKeypair.publicKey());
+      keeperBalanceXlm = await this.stellar.getAccountBalance(this.stellar.keeperKeypair.publicKey());
+
+      // #191 — RPC reachability alone isn't enough: a keeper account
+      // drained of XLM would still answer this call successfully (with a
+      // low/zero balance) while every real claim/policy submission fails
+      // to cover its transaction fee. Flag degraded once balance drops
+      // below a configurable floor, not just on outright RPC failure.
+      const minBalance = Number(
+        this.config.get<string>('KEEPER_MIN_BALANCE_XLM') ?? DEFAULT_KEEPER_MIN_BALANCE_XLM,
+      );
+      if (Number(keeperBalanceXlm) < minBalance) {
+        stellarStatus = 'error';
+        stellarError  = `Keeper balance ${keeperBalanceXlm} XLM is below the minimum floor of ${minBalance} XLM`;
+        this.logger.error(`Health check: ${stellarError}`);
+      }
     } catch (err) {
       stellarStatus = 'error';
       stellarError  = err instanceof Error ? err.message : String(err);
@@ -60,6 +82,7 @@ export class HealthController {
         },
         stellar: {
           status: stellarStatus,
+          ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
           ...(stellarError ? { error: stellarError } : {}),
         },
       },
