@@ -349,16 +349,20 @@ export class PolicyService {
       );
     }
 
-    // Validate XDR args match the expected DTO parameters (#122).
+    // Validate XDR args match the expected DTO parameters (#122) and
+    // derive persisted policy fields from decoded on-chain args (#167).
     // buy_policy(product_id: String, coverage: i128, oracle_key: String)
     const args = invokeContract.args();
     if (!args || args.length < 3) {
       throw new BadRequestException('buy_policy transaction must have at least 3 arguments (product_id, coverage, oracle_key)');
     }
+    let xdrProductId: string;
+    let xdrCoverage: string;
+    let xdrOracleKey: string;
     try {
-      const xdrProductId  = String(scValToNative(args[0]));
-      const xdrCoverage   = String(scValToNative(args[1]));
-      const xdrOracleKey  = String(scValToNative(args[2]));
+      xdrProductId  = String(scValToNative(args[0]));
+      xdrCoverage   = String(scValToNative(args[1]));
+      xdrOracleKey  = String(scValToNative(args[2]));
 
       if (xdrProductId !== dto.productId) {
         throw new BadRequestException(
@@ -395,7 +399,14 @@ export class PolicyService {
       this.logger.log(`Transaction confirmed on-chain: txHash=${sendResult.hash}`);
     }
 
-    const policy = await this.createPolicy(dto, sendResult.hash);
+    // Derive persisted fields from on-chain decoded args, not from client-supplied DTO (#167)
+    const chainDto = {
+      ...dto,
+      productId:  xdrProductId,
+      coverageXlm: parseInt(xdrCoverage, 10),
+      oracleKey:  xdrOracleKey,
+    };
+    const policy = await this.createPolicy(chainDto, sendResult.hash);
     this.logger.log(`Policy created: id=${policy.id} txHash=${sendResult.hash}`);
     return { policyId: policy.id, txHash: sendResult.hash };
   }
