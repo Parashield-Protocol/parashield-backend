@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { PolicyStatus } from '@prisma/client';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PolicyService } from '../policy/policy.service';
@@ -99,7 +100,7 @@ export class ClaimsWorker {
             // can't have this blindly overwrite whatever status is actually there.
             const { count } = await this.prisma.policy.updateMany({
               where: { id: policy.id, status: policy.status },
-              data:  { status: transition(policy.status, 'EXPIRED') as any },
+              data:  { status: transition(policy.status, 'EXPIRED') as PolicyStatus },
             });
             if (count === 0) {
               this.logger.warn(

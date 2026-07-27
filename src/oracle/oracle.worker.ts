@@ -7,6 +7,16 @@ import { StellarService } from '../stellar/stellar.service';
 import { PolicyStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
+// #307 — narrows an arbitrary fetchWithRetry<T> result for the success-path
+// log line without an `any` cast. Duck-typed rather than tied to a single
+// reading type, since fetchWithRetry is called with several distinct fetch
+// functions across this worker.
+function isLoggableReading(
+  value: unknown,
+): value is { key: unknown; value: unknown; confidence: unknown } {
+  return typeof value === 'object' && value !== null && 'key' in value;
+}
+
 /**
  * OracleWorker — scheduled job that fetches external data and submits it
  * to the Oracle Verifier contract on Stellar.
@@ -211,10 +221,9 @@ export class OracleWorker {
   private async fetchWithRetry<T>(fetchFn: () => Promise<T>): Promise<T | null> {
     try {
       const reading = await fetchFn();
-      const res = reading as any;
-      if (res && 'key' in res) {
+      if (isLoggableReading(reading)) {
         this.logger.log(
-          `Primary fetch succeeded: key=${res.key} value=${res.value} confidence=${res.confidence}`,
+          `Primary fetch succeeded: key=${reading.key} value=${reading.value} confidence=${reading.confidence}`,
         );
       }
       return reading;
@@ -224,9 +233,8 @@ export class OracleWorker {
 
       try {
         const reading = await fetchFn();
-        const res = reading as any;
-        if (res && 'key' in res) {
-          this.logger.log(`Retry succeeded: key=${res.key} value=${res.value}`);
+        if (isLoggableReading(reading)) {
+          this.logger.log(`Retry succeeded: key=${reading.key} value=${reading.value}`);
         }
         return reading;
       } catch (retryErr) {
