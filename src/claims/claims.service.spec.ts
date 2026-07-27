@@ -479,5 +479,127 @@ describe('ClaimsService', () => {
       expect(claimUpdateCalls.some((call: any[]) => call[0]?.data?.status === 'PAID')).toBe(false);
       expect(claimUpdateCalls.some((call: any[]) => call[0]?.data?.status === 'FAILED')).toBe(true);
     });
+
+    // #271 — The existing "Paid" test only asserted result==='Paid' and that
+    // invokeContract was called. It never checked the claim.update / policy.update
+    // arguments written into $transaction, so a regression that stored the wrong
+    // status or omitted triggerMet would go undetected.
+    it('#271 — Paid path writes claim status=PAID with triggerMet=true and policy status=CLAIMED', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-paid', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(200_000_000), // 20 mm — below 50 mm LessThan threshold, trigger MET
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
+      mockStellarService.invokeContract.mockResolvedValue('tx-hash-paid');
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('Paid');
+
+      // Verify the claim is written with PAID status, triggerMet=true, and the txHash
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'claim-paid' },
+          data: expect.objectContaining({
+            status:    'PAID',
+            triggerMet: true,
+            txHash:    'tx-hash-paid',
+          }),
+        }),
+      );
+
+      // Verify the policy is transitioned to CLAIMED (not left in PROCESSING)
+      expect(mockPrismaService.policy.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: POLICY_ID },
+          data: expect.objectContaining({ status: 'CLAIMED' }),
+        }),
+      );
+    });
+
+    // #273 — Every previous autoProcess test used comparison:'LessThan'. The GreaterThan
+    // branch (flight-delay-style products) was completely uncovered.
+    it('#273 — GreaterThan product: value above threshold triggers a Paid payout', async () => {
+      const GT_PRODUCT = { ...MOCK_PRODUCT, comparison: 'GreaterThan', threshold: '30.0000000' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-gt', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(450_000_000), // 45 min delay — above 30 min threshold, trigger MET
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(GT_PRODUCT);
+      mockStellarService.invokeContract.mockResolvedValue('tx-gt');
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('Paid');
+      expect(mockStellarService.invokeContract).toHaveBeenCalledWith(
+        expect.any(String),
+        'process_claim',
+        expect.any(Array),
+      );
+    });
+
+    it('#273 — GreaterThan product: value at or below threshold does not trigger', async () => {
+      const GT_PRODUCT = { ...MOCK_PRODUCT, comparison: 'GreaterThan', threshold: '30.0000000' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-gt-no', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(150_000_000), // 15 min delay — below 30 min threshold, trigger NOT MET
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(GT_PRODUCT);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+    });
+
+    // #274 — When getProductById returns null/undefined the service silently falls back
+    // to threshold=50 and comparison='LessThan'. This path was never constructed by any
+    // test, so a change to the fallback values or comparator would go undetected.
+    it('#274 — product not found falls back to threshold=50 LessThan; reading below 50 still triggers', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-fallback', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(200_000_000), // 20 mm — below the fallback threshold of 50 mm
+        confidence: 90,
+      });
+      // Simulate deactivated / not-found product
+      mockPolicyService.getProductById.mockResolvedValue(null);
+      mockStellarService.invokeContract.mockResolvedValue('tx-fallback');
+
+      const result = await service.autoProcess(POLICY_ID);
+      // The silent fallback to threshold=50 LessThan means a reading of 20 still pays out.
+      // This test documents the current behaviour so any change to the fallback is caught.
+      expect(result).toBe('Paid');
+      expect(mockStellarService.invokeContract).toHaveBeenCalled();
+    });
+
+    it('#274 — product not found falls back to threshold=50 LessThan; reading above 50 is rejected', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-fallback-no', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(800_000_000), // 80 mm — above fallback threshold of 50 mm
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(null);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+    });
   });
 });

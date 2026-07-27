@@ -3,6 +3,7 @@ import { OracleReading, OracleService } from './oracle.service';
 import { StellarService } from '../stellar/stellar.service';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
+import { nativeToScVal } from '@stellar/stellar-sdk';
 
 describe('OracleWorker', () => {
   const reading: OracleReading = {
@@ -272,6 +273,37 @@ describe('OracleWorker', () => {
 
       expect(oracleService.releaseOnChainClaim).toHaveBeenCalledTimes(1);
       expect(oracleService.recordOnChainSubmission).not.toHaveBeenCalled();
+    });
+
+    // #272 — Both earlier oracle worker tests mocked configService.get to return ''
+    // so ORACLE_VERIFIER_CONTRACT was always falsy and invokeContract was never reached.
+    // The ScVal type tags and argument order passed to invokeContract were completely
+    // untested — a wrong type tag or swapped argument would silently corrupt on-chain data.
+    it('#272 — invokeContract receives correctly typed and ordered ScVal arguments', async () => {
+      const submissionReading: OracleReading = {
+        dataType:   'weather',
+        key:        'flight:KQ200:2026-06-27',
+        value:      '250',
+        confidence: 92,
+        timestamp:  1_700_000_000,
+        source:     'aviationstack',
+      };
+      oracleService.fetchFlightDelayReading.mockResolvedValue(submissionReading);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).toHaveBeenCalledWith(
+        contractId,
+        'submit_data',
+        [
+          nativeToScVal(submissionReading.dataType,            { type: 'symbol' }),
+          nativeToScVal(submissionReading.key,                 { type: 'symbol' }),
+          nativeToScVal(BigInt(submissionReading.value),       { type: 'i128' }),
+          nativeToScVal(submissionReading.confidence,          { type: 'u32' }),
+          nativeToScVal(BigInt(submissionReading.timestamp),   { type: 'u64' }),
+        ],
+      );
     });
 
     it('counts a reading that failed both fetch attempts as invalid', async () => {
