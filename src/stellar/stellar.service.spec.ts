@@ -671,7 +671,7 @@ describe("StellarService", () => {
       (service as unknown as { horizon: typeof mockHorizon }).horizon = mockHorizon;
     });
 
-    it("#189/#185 — returns the native XLM balance for the account", async () => {
+    it("#279/#189/#185 — returns the native XLM balance for the account", async () => {
       mockHorizon.loadAccount.mockResolvedValue({
         balances: [
           { asset_type: "native", balance: "123.4567890" },
@@ -685,7 +685,7 @@ describe("StellarService", () => {
       expect(mockHorizon.loadAccount).toHaveBeenCalledWith("GSOMEACCOUNT");
     });
 
-    it("#189/#185 — returns '0' when the account has no native XLM balance line", async () => {
+    it("#279/#189/#185 — returns '0' when the account has no native XLM balance line", async () => {
       mockHorizon.loadAccount.mockResolvedValue({
         balances: [{ asset_type: "credit_alphanum4", balance: "5.0000000", asset_code: "USDC" }],
       });
@@ -695,7 +695,17 @@ describe("StellarService", () => {
       expect(balance).toBe("0");
     });
 
-    it("#189/#185 — propagates the error when the Horizon account lookup fails", async () => {
+    it("#279 — returns '0' when account balances array is empty", async () => {
+      mockHorizon.loadAccount.mockResolvedValue({
+        balances: [],
+      });
+
+      const balance = await service.getAccountBalance("GSOMEACCOUNT");
+
+      expect(balance).toBe("0");
+    });
+
+    it("#279/#189/#185 — propagates the error when the Horizon account lookup fails", async () => {
       mockHorizon.loadAccount.mockRejectedValue(new Error("account not found"));
 
       await expect(service.getAccountBalance("GSOMEACCOUNT")).rejects.toThrow("account not found");
