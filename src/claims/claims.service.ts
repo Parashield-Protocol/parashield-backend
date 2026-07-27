@@ -6,7 +6,7 @@ import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
-import { Prisma, PolicyStatus } from '@prisma/client';
+import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive';
 
@@ -51,7 +51,7 @@ export class ClaimsService {
       return 'PolicyNotActive';
     }
 
-    if (policy.status !== 'ACTIVE') {
+    if (policy.status !== PolicyStatus.ACTIVE) {
       this.logger.warn(`Policy ${policyId} is not ACTIVE (status: ${policy.status})`);
       return 'PolicyNotActive';
     }
@@ -60,7 +60,7 @@ export class ClaimsService {
     const existingClaim = await this.prisma.claim.findFirst({
       where: {
         policyId,
-        status: { in: ['PROCESSING', 'PAID', 'REJECTED'] },
+        status: { in: [ClaimStatus.PROCESSING, ClaimStatus.PAID, ClaimStatus.REJECTED] },
       },
     });
 
@@ -76,8 +76,8 @@ export class ClaimsService {
     // any oracle read or contract call is made. Using updateMany with a conditional
     // WHERE ensures exactly one caller proceeds; the other sees count=0 and bails.
     const gateResult = await this.prisma.policy.updateMany({
-      where: { id: policyId, status: 'ACTIVE' },
-      data:  { status: 'PROCESSING' },
+      where: { id: policyId, status: PolicyStatus.ACTIVE },
+      data:  { status: PolicyStatus.PROCESSING },
     });
 
     if (gateResult.count === 0) {
@@ -96,7 +96,7 @@ export class ClaimsService {
         claimant:       policy.policyholder,
         coverageAmount: policy.coverageXlm,
         triggerMet:     false,
-        status:         'PROCESSING',
+        status:         ClaimStatus.PROCESSING,
       },
     });
 
@@ -108,7 +108,7 @@ export class ClaimsService {
       this.logger.warn(`No oracle reading for key=${policy.oracleKey} — rejecting claim ${claim.id}`);
       await this.prisma.claim.update({
         where: { id: claim.id },
-        data:  { status: 'REJECTED', processedAt: new Date() },
+        data:  { status: ClaimStatus.REJECTED, processedAt: new Date() },
       });
       return 'Rejected';
     }
@@ -130,7 +130,7 @@ export class ClaimsService {
     if (!triggerMet) {
       await this.prisma.claim.update({
         where: { id: claim.id },
-        data:  { status: 'REJECTED', triggerMet: false, processedAt: new Date() },
+        data:  { status: ClaimStatus.REJECTED, triggerMet: false, processedAt: new Date() },
       });
       return 'Rejected';
     }
@@ -158,11 +158,11 @@ export class ClaimsService {
       await this.prisma.$transaction([
         this.prisma.claim.update({
           where: { id: claim.id },
-          data:  { status: 'FAILED', processedAt: new Date() },
+          data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
         this.prisma.policy.update({
           where: { id: policyId },
-          data:  { status: 'ACTIVE' },
+          data:  { status: PolicyStatus.ACTIVE },
         }),
       ]);
       return 'Rejected';
@@ -175,7 +175,7 @@ export class ClaimsService {
     await this.prisma.$transaction([
       this.prisma.claim.update({
         where: { id: claim.id },
-        data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
+        data:  { status: ClaimStatus.PAID, triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
       }),
       this.prisma.policy.update({
         where: { id: policyId },
@@ -194,7 +194,7 @@ export class ClaimsService {
     const existingClaim = await this.prisma.claim.findFirst({
       where: {
         policyId,
-        status: { in: ['PAID', 'PROCESSING', 'PENDING'] },
+        status: { in: [ClaimStatus.PAID, ClaimStatus.PROCESSING, ClaimStatus.PENDING] },
       },
     });
 
@@ -215,7 +215,7 @@ export class ClaimsService {
     if (policy.policyholder !== claimant) {
       throw new ForbiddenException(`Wallet ${claimant} does not own policy ${policyId}`);
     }
-    if (policy.status !== 'ACTIVE') {
+    if (policy.status !== PolicyStatus.ACTIVE) {
       throw new ConflictException(`Policy ${policyId} is not active`);
     }
 
@@ -234,7 +234,7 @@ export class ClaimsService {
           claimant,
           coverageAmount: policy.coverageXlm,
           triggerMet:     false,
-          status:         'PENDING',
+          status:         ClaimStatus.PENDING,
         },
       });
     } catch (error: unknown) {
@@ -262,14 +262,14 @@ export class ClaimsService {
       this.logger.log(`Manual claim submitted on-chain: id=${claim.id} txHash=${txHash}`);
       await this.prisma.claim.update({
         where: { id: claim.id },
-        data:  { status: 'PROCESSING', txHash },
+        data:  { status: ClaimStatus.PROCESSING, txHash },
       });
     } catch (err) {
       this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
       // Use FAILED (not REJECTED) for on-chain errors — REJECTED means trigger condition not met (#119)
       await this.prisma.claim.update({
         where: { id: claim.id },
-        data:  { status: 'FAILED', processedAt: new Date() },
+        data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
       });
     }
 
