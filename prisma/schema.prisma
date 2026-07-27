@@ -30,18 +30,20 @@ model Policy {
 }
 
 model Product {
-  id           String    @id @default(uuid())
+  id           String        @id @default(uuid())
   name         String
   category     String
   triggerType  String
-  threshold    String
+  threshold    Decimal       @db.Decimal(20, 7)
   comparison   String
-  coverageMin  String
-  coverageMax  String
+  coverageMin  Decimal       @db.Decimal(20, 7)
+  coverageMax  Decimal       @db.Decimal(20, 7)
   premiumRate  Int
   maxDuration  Int
-  status       String    @default("Active")
+  status       ProductStatus @default(ACTIVE)
   policies     Policy[]
+
+  @@index([category])
 }
 
 
@@ -59,6 +61,7 @@ model Claim {
   processedAt    DateTime?
   createdAt      DateTime   @default(now())
 
+  @@unique([txHash])
   @@index([policyId])
   @@index([claimant])
   @@index([status])
@@ -104,6 +107,12 @@ enum ClaimStatus {
   REJECTED
   FAILED
   EXPIRED
+}
+
+enum ProductStatus {
+  ACTIVE
+  INACTIVE
+  DEPRECATED
 }
 
 model AuthChallenge {
