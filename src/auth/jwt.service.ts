@@ -43,6 +43,7 @@ export class JwtService {
   sign(walletAddress: string): string {
     const payload: JwtPayload = { walletAddress };
     const token = jwt.sign(payload, this.secret, {
+      algorithm: 'HS256',
       expiresIn: "7d",
     } as any);
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
@@ -57,6 +58,7 @@ export class JwtService {
   signWithRole(walletAddress: string, role: string, admin = false): string {
     const payload: JwtPayload = { walletAddress, role, admin };
     const token = jwt.sign(payload, this.secret, {
+      algorithm: 'HS256',
       expiresIn: "7d",
     } as any);
     this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
@@ -69,7 +71,13 @@ export class JwtService {
    */
   verify(token: string): JwtPayload {
     try {
-      const decoded = jwt.verify(token, this.secret) as JwtPayload;
+      // #244 — Pin the allowed algorithm explicitly. Without this, jsonwebtoken
+      // falls back to trusting the `alg` header in the token itself, which opens
+      // the door to algorithm-confusion attacks (e.g. `alg: none`, or a token
+      // re-signed with RS256 using the HMAC secret as the public key).
+      const decoded = jwt.verify(token, this.secret, {
+        algorithms: ['HS256'],
+      }) as JwtPayload;
       return {
         walletAddress: decoded.walletAddress,
         role: decoded.role,

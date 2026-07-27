@@ -6,6 +6,7 @@ import { Keypair } from '@stellar/stellar-sdk';
 import { JwtService } from './jwt.service';
 import { PrismaService } from '../prisma/prisma.service';
 import * as crypto from 'crypto';
+import { timingSafeEqual } from 'crypto';
 
 // Auth endpoints are brute-force/enumeration targets, so they get a tighter
 // limit than the app-wide default (60 req/60s) configured in app.module.ts.
@@ -107,8 +108,16 @@ export class AuthController {
       throw new UnauthorizedException('Auth challenge expired. Please request a new one.');
     }
 
-    // Verify that the signed message equals the stored nonce
-    if (message !== challenge.nonce) {
+    // #243 — Use constant-time comparison to prevent timing side-channel leaks.
+    // Even though this nonce is single-use and high-entropy, consistent
+    // defense-in-depth matches the pattern used for API key comparison elsewhere.
+    // timingSafeEqual requires equal-length buffers (throws otherwise), so the
+    // length mismatch is caught by the same early-return false path.
+    const msgBuf   = Buffer.from(message);
+    const nonceBuf = Buffer.from(challenge.nonce);
+    const nonceMatches =
+      msgBuf.length === nonceBuf.length && timingSafeEqual(msgBuf, nonceBuf);
+    if (!nonceMatches) {
       this.logger.warn(`Login rejected: message does not match stored nonce for ${walletAddress}`);
       throw new UnauthorizedException('Invalid challenge message');
     }
