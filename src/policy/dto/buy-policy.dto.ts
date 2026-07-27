@@ -9,6 +9,7 @@ import {
   Matches,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { IsValidOracleKeyCoordinates } from './oracle-key-coordinates.validator';
 
 export class BuyPolicyDto {
   @ApiProperty({ description: 'Insurance product ID', example: '1' })
@@ -58,5 +59,6 @@ export class BuyPolicyDto {
   @Matches(/^(rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])|flight:[A-Z0-9]+:20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])|defi:[a-zA-Z0-9_:-]+)$/, {
     message: 'oracleKey must match product category format (rainfall:lat,lng:YYYY-MM, flight:flightNumber:YYYY-MM-DD, or defi:key)',
   })
+  @IsValidOracleKeyCoordinates()
   oracleKey: string;
 }

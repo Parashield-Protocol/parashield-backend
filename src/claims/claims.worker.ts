@@ -87,11 +87,19 @@ export class ClaimsWorker {
             throw err;
           }
 
-          if (result !== 'Paid') {
-            await this.prisma.policy.update({
-              where: { id: policy.id },
+          if (result !== 'Paid' && result !== 'PendingFinalPeriod') {
+            // #260 — guard on the expected status so a concurrent status-writing
+            // path (a cancel endpoint, admin override, overlapping cron ticks)
+            // can't have this blindly overwrite whatever status is actually there.
+            const { count } = await this.prisma.policy.updateMany({
+              where: { id: policy.id, status: policy.status },
               data:  { status: transition(policy.status, 'EXPIRED') as any },
             });
+            if (count === 0) {
+              this.logger.warn(
+                `Policy ${policy.id} status guard missed on EXPIRED transition — status changed underneath the worker`,
+              );
+            }
           }
 
           return { policyId: policy.id, result };

@@ -512,10 +512,12 @@ describe('ClaimsService', () => {
         }),
       );
 
-      // Verify the policy is transitioned to CLAIMED (not left in PROCESSING)
-      expect(mockPrismaService.policy.update).toHaveBeenCalledWith(
+      // Verify the policy is transitioned to CLAIMED (not left in PROCESSING).
+      // #260 — this now guards on the expected status via updateMany rather
+      // than an unconditional update({ where: { id } }).
+      expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: POLICY_ID },
+          where: { id: POLICY_ID, status: 'PROCESSING' },
           data: expect.objectContaining({ status: 'CLAIMED' }),
         }),
       );
@@ -563,27 +565,38 @@ describe('ClaimsService', () => {
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
     });
 
-    // #274 — When getProductById returns null/undefined the service silently falls back
-    // to threshold=50 and comparison='LessThan'. This path was never constructed by any
-    // test, so a change to the fallback values or comparator would go undetected.
-    it('#274 — product not found falls back to threshold=50 LessThan; reading below 50 still triggers', async () => {
+    // #259 — When getProductById returns null/undefined (product deactivated after
+    // the policy was sold), the claim must fail loud for manual review rather than
+    // silently substituting a threshold/comparison that may not match what the
+    // policyholder actually bought.
+    it('#259 — product not found fails the claim for manual review instead of silently falling back', async () => {
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
       mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-fallback', status: 'PROCESSING' });
       mockOracleService.getLatestReading.mockResolvedValue({
         key:        ACTIVE_POLICY.oracleKey,
-        value:      BigInt(200_000_000), // 20 mm — below the fallback threshold of 50 mm
+        value:      BigInt(200_000_000),
         confidence: 90,
       });
       // Simulate deactivated / not-found product
       mockPolicyService.getProductById.mockResolvedValue(null);
-      mockStellarService.invokeContract.mockResolvedValue('tx-fallback');
 
       const result = await service.autoProcess(POLICY_ID);
-      // The silent fallback to threshold=50 LessThan means a reading of 20 still pays out.
-      // This test documents the current behaviour so any change to the fallback is caught.
-      expect(result).toBe('Paid');
-      expect(mockStellarService.invokeContract).toHaveBeenCalled();
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'claim-fallback' },
+          data:  expect.objectContaining({ status: 'FAILED' }),
+        }),
+      );
+      expect(mockPrismaService.policy.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: POLICY_ID },
+          data:  expect.objectContaining({ status: 'ACTIVE' }),
+        }),
+      );
     });
 
     it('#274 — product not found falls back to threshold=50 LessThan; reading above 50 is rejected', async () => {

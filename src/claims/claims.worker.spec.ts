@@ -6,7 +6,7 @@ describe('ClaimsWorker', () => {
   let worker: ClaimsWorker;
   let mockClaims: jest.Mocked<Pick<ClaimsService, 'autoProcess'>>;
   let mockPrisma: {
-    policy: { findMany: jest.Mock; update: jest.Mock };
+    policy: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
   };
 
   function policy(id: string, overrides: Partial<{ status: string }> = {}) {
@@ -24,6 +24,7 @@ describe('ClaimsWorker', () => {
       policy: {
         findMany: jest.fn(),
         update: jest.fn().mockResolvedValue(undefined),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
     worker = new ClaimsWorker(mockClaims as unknown as ClaimsService, mockPrisma as unknown as PrismaService);
@@ -66,8 +67,10 @@ describe('ClaimsWorker', () => {
 
     await worker.processActivePolicies();
 
-    expect(mockPrisma.policy.update).toHaveBeenCalledWith({
-      where: { id: 'p1' },
+    // #260 — guarded via updateMany({ where: { id, status: expected } }) rather
+    // than an unconditional update({ where: { id } }).
+    expect(mockPrisma.policy.updateMany).toHaveBeenCalledWith({
+      where: { id: 'p1', status: 'ACTIVE' },
       data: { status: 'EXPIRED' },
     });
   });

@@ -8,7 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 import { Prisma, PolicyStatus } from '@prisma/client';
 
-export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive';
+export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
 export interface ClaimSummary {
   id:             string;
@@ -54,6 +54,21 @@ export class ClaimsService {
     if (policy.status !== 'ACTIVE') {
       this.logger.warn(`Policy ${policyId} is not ACTIVE (status: ${policy.status})`);
       return 'PolicyNotActive';
+    }
+
+    // #258 — the worker looks ahead up to 1 hour before endTime so the Soroban
+    // tx has time to confirm, but oracle keys that aggregate a whole period
+    // (e.g. a rainfall month) may not be fully ingested until that period has
+    // actually elapsed. Evaluating the trigger against a partial reading and
+    // terminally REJECTING would be silent and irreversible. Skip without
+    // touching any state until endTime has actually passed — the next hourly
+    // tick will pick this policy back up (it's still ACTIVE with the same
+    // endTime) once the full period's data is available.
+    if (new Date() < policy.endTime) {
+      this.logger.log(
+        `Policy ${policyId} endTime (${policy.endTime.toISOString()}) not yet reached — deferring trigger evaluation`,
+      );
+      return 'PendingFinalPeriod';
     }
 
     // #163 — Duplicate guard: prevent double payouts or duplicate in-flight processing
@@ -114,9 +129,30 @@ export class ClaimsService {
     }
 
     // Evaluate trigger condition against product definition (#120: direct lookup instead of full scan)
-    const product    = await this.policyService.getProductById(policy.productId);
-    const threshold  = BigInt(Math.round(parseFloat(product?.threshold ?? '50') * 1e7));
-    const comparison = product?.comparison ?? 'LessThan';
+    const product = await this.policyService.getProductById(policy.productId);
+    if (!product) {
+      // #259 — the product may have been deactivated after this policy was
+      // sold. Silently substituting a hardcoded threshold/comparison here
+      // would evaluate the claim against rules that don't match what the
+      // policyholder actually bought. Fail loud and revert the atomic gate
+      // so this is caught for manual review instead of silently mis-scored.
+      this.logger.error(
+        `Product ${policy.productId} not found for policy ${policyId} — cannot evaluate trigger, marking claim FAILED for manual review`,
+      );
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: 'FAILED', processedAt: new Date() },
+        }),
+        this.prisma.policy.update({
+          where: { id: policyId },
+          data:  { status: 'ACTIVE' },
+        }),
+      ]);
+      return 'Rejected';
+    }
+    const threshold  = BigInt(Math.round(parseFloat(product.threshold) * 1e7));
+    const comparison = product.comparison;
 
     const readingValue = BigInt(reading.value);
     const triggerMet = comparison === 'LessThan'
@@ -172,16 +208,26 @@ export class ClaimsService {
     // leave claim=PROCESSING / policy=PROCESSING while txHash is already on-chain.
     // On retry the duplicate-guard or atomic gate above catches the already-PROCESSING
     // claim/policy and returns AlreadyProcessed instead of re-invoking the contract.
-    await this.prisma.$transaction([
+    //
+    // #260 — the policy write is guarded with an expected-status WHERE (rather than
+    // `where: { id }` alone) so a second status-writing path racing on this row can't
+    // silently clobber it; the affected-row count is checked below.
+    const [, policyUpdateResult] = await this.prisma.$transaction([
       this.prisma.claim.update({
         where: { id: claim.id },
         data:  { status: 'PAID', triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
       }),
-      this.prisma.policy.update({
-        where: { id: policyId },
+      this.prisma.policy.updateMany({
+        where: { id: policyId, status: 'PROCESSING' },
         data:  { status: transition('PROCESSING', 'CLAIMED') as PolicyStatus },
       }),
     ]);
+
+    if (policyUpdateResult.count === 0) {
+      this.logger.error(
+        `Policy ${policyId} status guard missed on CLAIMED transition — status changed underneath a paid claim (claim ${claim.id}, txHash ${txHash})`,
+      );
+    }
 
     return 'Paid';
   }
