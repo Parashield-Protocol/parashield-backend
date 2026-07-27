@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
@@ -9,17 +9,18 @@ import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 
 // Global serialization patch for BigInt fields (PRISMA compatibility with JSON.stringify)
-(BigInt.prototype as any).toJSON = function () {
+(BigInt.prototype as unknown as { toJSON: () => string }).toJSON = function () {
   return this.toString();
 };
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const logger = new Logger('Bootstrap');
 
   const configService = app.get(ConfigService);
   const jwtSecret = configService.get<string>('JWT_SECRET');
   if (!jwtSecret) {
-    console.error('Fatal Error: JWT_SECRET environment variable is required');
+    logger.error('Fatal Error: JWT_SECRET environment variable is required');
     process.exit(1);
   }
 
@@ -40,13 +41,13 @@ async function bootstrap() {
 
   const corsOrigin = process.env.CORS_ORIGIN;
   if (!corsOrigin) {
-    console.error('Fatal Error: CORS_ORIGIN environment variable is required');
+    logger.error('Fatal Error: CORS_ORIGIN environment variable is required');
     process.exit(1);
   }
 
   const operatorApiKey = configService.get<string>('ORACLE_OPERATOR_API_KEY');
   if (!operatorApiKey) {
-    console.error('Fatal Error: ORACLE_OPERATOR_API_KEY environment variable is required');
+    logger.error('Fatal Error: ORACLE_OPERATOR_API_KEY environment variable is required');
     process.exit(1);
   }
 
@@ -85,7 +86,7 @@ async function bootstrap() {
 
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
-  console.log(`Parashield API running on http://localhost:${port}/api/v1`);
-  console.log(`Swagger docs available at http://localhost:${port}/docs`);
+  logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
+  logger.log(`Swagger docs available at http://localhost:${port}/docs`);
 }
 bootstrap();
