@@ -158,7 +158,30 @@ export class ClaimsService {
       ]);
       return 'Rejected';
     }
-    const threshold  = BigInt(Math.round(parseFloat(product.threshold) * 1e7));
+    // #245 — Guard against non-numeric threshold values. Product.threshold is a
+    // free-text string at the service boundary (Decimal serialised via .toString()).
+    // parseFloat('') or parseFloat('N/A') yields NaN, and BigInt(NaN) throws a
+    // RangeError — crashing mid-flow after the claim row is already PROCESSING.
+    // Treat an unparseable threshold the same as a missing product: fail loud for
+    // manual review and revert the atomic gate so the policy can be retried.
+    const rawThreshold = parseFloat(product.threshold);
+    if (!isFinite(rawThreshold)) {
+      this.logger.error(
+        `Product ${policy.productId} has non-numeric threshold "${product.threshold}" — cannot evaluate trigger for policy ${policyId}, marking claim FAILED for manual review`,
+      );
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
+        }),
+        this.prisma.policy.update({
+          where: { id: policyId },
+          data:  { status: PolicyStatus.ACTIVE },
+        }),
+      ]);
+      return 'Rejected';
+    }
+    const threshold  = BigInt(Math.round(rawThreshold * 1e7));
     const comparison = product.comparison;
 
     const readingValue = BigInt(reading.value);

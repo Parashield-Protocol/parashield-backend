@@ -167,5 +167,78 @@ describe('AuthController', () => {
 
       expect(mockPrismaService.authChallenge.delete).not.toHaveBeenCalled();
     });
+
+    // #243 — Nonce comparison was plain `!==` (non-constant-time). These tests
+    // assert the timing-safe path rejects correctly for both same-length and
+    // different-length mismatches, and that the correct-match path still works.
+    describe('#243 — constant-time nonce comparison', () => {
+      it('rejects when the submitted message has the same length as the nonce but different content', async () => {
+        const storedNonce = 'a'.repeat(64); // 64-char hex nonce
+        const sameLength  = 'b'.repeat(64); // same length, different bytes
+
+        mockPrismaService.authChallenge.findUnique.mockResolvedValue({
+          walletAddress,
+          nonce: storedNonce,
+          expiresAt: new Date(Date.now() + 60000),
+        });
+
+        await expect(
+          controller.login({ walletAddress, signature: 'sig', message: sameLength }),
+        ).rejects.toThrow(UnauthorizedException);
+        await expect(
+          controller.login({ walletAddress, signature: 'sig', message: sameLength }),
+        ).rejects.toThrow('Invalid challenge message');
+      });
+
+      it('rejects when the submitted message is shorter than the stored nonce', async () => {
+        const storedNonce = 'a'.repeat(64);
+        const shorter     = 'a'.repeat(32); // different length
+
+        mockPrismaService.authChallenge.findUnique.mockResolvedValue({
+          walletAddress,
+          nonce: storedNonce,
+          expiresAt: new Date(Date.now() + 60000),
+        });
+
+        // Must not throw a RangeError from timingSafeEqual — the length guard
+        // must catch this before the timingSafeEqual call.
+        await expect(
+          controller.login({ walletAddress, signature: 'sig', message: shorter }),
+        ).rejects.toThrow(UnauthorizedException);
+      });
+
+      it('rejects when the submitted message is longer than the stored nonce', async () => {
+        const storedNonce = 'a'.repeat(64);
+        const longer      = 'a'.repeat(128); // different length
+
+        mockPrismaService.authChallenge.findUnique.mockResolvedValue({
+          walletAddress,
+          nonce: storedNonce,
+          expiresAt: new Date(Date.now() + 60000),
+        });
+
+        await expect(
+          controller.login({ walletAddress, signature: 'sig', message: longer }),
+        ).rejects.toThrow(UnauthorizedException);
+      });
+
+      it('accepts when the submitted message exactly matches the stored nonce', async () => {
+        const nonce = 'a'.repeat(64);
+        const messageBytes = Buffer.from(nonce, 'utf8');
+        const signature = keypair.sign(messageBytes).toString('base64');
+
+        mockPrismaService.authChallenge.findUnique.mockResolvedValue({
+          walletAddress,
+          nonce,
+          expiresAt: new Date(Date.now() + 60000),
+        });
+        mockPrismaService.authChallenge.delete.mockResolvedValue({});
+
+        const result = await controller.login({ walletAddress, signature, message: nonce });
+
+        expect(result.success).toBe(true);
+        expect(result.data.token).toBe('mock-jwt-token');
+      });
+    });
   });
 });

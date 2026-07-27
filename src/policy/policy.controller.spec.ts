@@ -3,7 +3,8 @@ import { PolicyController } from "./policy.controller";
 import { PolicyService } from "./policy.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../auth/authenticated-request";
-import { ForbiddenException, BadRequestException } from "@nestjs/common";
+import { ForbiddenException, BadRequestException, NotFoundException } from "@nestjs/common";
+import { Reflector } from "@nestjs/core";
 
 describe("PolicyController", () => {
   let controller: PolicyController;
@@ -361,6 +362,83 @@ describe("PolicyController", () => {
           100,
         );
       });
+    });
+  });
+
+  // #246 — GET /policies/:id previously had no guard and no ownership check,
+  // leaking full policy details (policyholder address, coverage, premium,
+  // oracle key) to any unauthenticated caller who guessed a UUID.
+  describe("#246 — getPolicy (GET /policies/:id)", () => {
+    const OWNER   = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+    const STRANGER = "GBSTRANGERWALLET00000000000000000000000000000000000000000";
+    const POLICY_ID = "policy-uuid-1234";
+
+    const MOCK_POLICY = {
+      id:           POLICY_ID,
+      productId:    "prod-1",
+      policyholder: OWNER,
+      coverage:     "500.0000000",
+      premiumPaid:  "25.0000000",
+      oracleKey:    "rainfall:0,0:2026-06",
+      startTime:    1704067200,
+      endTime:      1711929600,
+      status:       "ACTIVE",
+    };
+
+    const ownerReq = {
+      user: { walletAddress: OWNER },
+      wallet: OWNER,
+    } as AuthenticatedRequest;
+
+    const strangerReq = {
+      user: { walletAddress: STRANGER },
+      wallet: STRANGER,
+    } as AuthenticatedRequest;
+
+    it("returns the policy when the authenticated wallet is the owner", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(MOCK_POLICY);
+
+      const result = await controller.getPolicy(POLICY_ID, ownerReq);
+
+      expect(result).toEqual({ success: true, data: MOCK_POLICY });
+      expect(mockPolicyService.getPolicy).toHaveBeenCalledWith(POLICY_ID);
+    });
+
+    it("#246 — throws ForbiddenException when the authenticated wallet does not own the policy", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(MOCK_POLICY);
+
+      await expect(controller.getPolicy(POLICY_ID, strangerReq)).rejects.toThrow(
+        ForbiddenException,
+      );
+      await expect(controller.getPolicy(POLICY_ID, strangerReq)).rejects.toThrow(
+        "Policy belongs to a different wallet",
+      );
+    });
+
+    it("#246 — throws NotFoundException when the policy does not exist", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(null);
+
+      await expect(controller.getPolicy("nonexistent-id", ownerReq)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it("#246 — JwtAuthGuard is registered on the getPolicy handler", () => {
+      // Reflector reads the guard metadata set by @UseGuards(JwtAuthGuard).
+      // If the decorator were missing, getMetadata returns undefined/empty.
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.getPolicy);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(JwtAuthGuard);
+    });
+
+    it("#246 — a stranger cannot read sensitive fields from another wallet's policy", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(MOCK_POLICY);
+
+      // Must reject before any data is returned to the caller
+      await expect(controller.getPolicy(POLICY_ID, strangerReq)).rejects.toThrow(
+        ForbiddenException,
+      );
     });
   });
 });

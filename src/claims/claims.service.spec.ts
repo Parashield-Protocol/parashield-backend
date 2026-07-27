@@ -599,20 +599,48 @@ describe('ClaimsService', () => {
       );
     });
 
-    it('#274 — product not found falls back to threshold=50 LessThan; reading above 50 is rejected', async () => {
+    // #245 — Product.threshold is serialised as a free-text string at the service
+    // boundary. A non-numeric value (e.g. empty string, "N/A") makes parseFloat
+    // return NaN, and BigInt(NaN) throws a RangeError — crashing mid-flow after
+    // the claim row is already PROCESSING. The fix must catch this before the
+    // BigInt conversion and treat it the same as a missing product: FAILED + revert.
+    it('#245 — non-numeric product threshold marks claim FAILED and reverts policy to ACTIVE', async () => {
+      const BAD_THRESHOLD_PRODUCT = { ...MOCK_PRODUCT, threshold: 'N/A' };
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
       mockPrismaService.claim.findFirst.mockResolvedValue(null);
-      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-fallback-no', status: 'PROCESSING' });
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-bad-threshold', status: 'PROCESSING' });
       mockOracleService.getLatestReading.mockResolvedValue({
         key:        ACTIVE_POLICY.oracleKey,
-        value:      BigInt(800_000_000), // 80 mm — above fallback threshold of 50 mm
+        value:      BigInt(200_000_000),
         confidence: 90,
       });
-      mockPolicyService.getProductById.mockResolvedValue(null);
-      mockPrismaService.claim.update.mockResolvedValue({});
+      mockPolicyService.getProductById.mockResolvedValue(BAD_THRESHOLD_PRODUCT);
+      // $transaction is called for the FAILED-claim + ACTIVE-policy revert
+      mockPrismaService.$transaction.mockResolvedValue([{}, {}]);
 
       const result = await service.autoProcess(POLICY_ID);
+
       expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+      // Claim must be marked FAILED (not left as PROCESSING)
+      expect(mockPrismaService.$transaction).toHaveBeenCalled();
+    });
+
+    it('#245 — empty-string product threshold marks claim FAILED (NaN guard)', async () => {
+      const EMPTY_THRESHOLD_PRODUCT = { ...MOCK_PRODUCT, threshold: '' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-empty-threshold', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(200_000_000),
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(EMPTY_THRESHOLD_PRODUCT);
+      mockPrismaService.$transaction.mockResolvedValue([{}, {}]);
+
+      // Must not throw a RangeError from BigInt(NaN)
+      await expect(service.autoProcess(POLICY_ID)).resolves.toBe('Rejected');
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
     });
   });

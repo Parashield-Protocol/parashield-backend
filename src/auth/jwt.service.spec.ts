@@ -94,5 +94,55 @@ describe('JwtService', () => {
       expect(adminDecoded.role).toBe('admin');
       expect(adminDecoded.admin).toBe(true);
     });
+
+    // #244 — jwt.verify had no algorithms option, so it trusted the `alg`
+    // header in the incoming token. Pinning algorithms: ['HS256'] prevents
+    // algorithm-confusion attacks. These tests assert that tokens with any
+    // other algorithm header are rejected regardless of their signature.
+    describe('#244 — algorithm allow-list enforcement', () => {
+      const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+
+      it('rejects a token with alg:none (unsigned token attack)', () => {
+        // Craft a token with algorithm "none" — no signature required by the spec
+        // but must be treated as invalid when the verifier pins HS256.
+        const header  = Buffer.from(JSON.stringify({ alg: 'none', typ: 'JWT' })).toString('base64url');
+        const payload = Buffer.from(JSON.stringify({ walletAddress, iat: Math.floor(Date.now() / 1000) })).toString('base64url');
+        const noneToken = `${header}.${payload}.`;
+
+        expect(() => service.verify(noneToken)).toThrow(UnauthorizedException);
+      });
+
+      it('rejects a token signed with HS384 (algorithm outside the allow-list)', () => {
+        // Signed with the same secret but a different algorithm — should fail
+        // because HS384 is not in the ['HS256'] allow-list.
+        const hs384Token = jwt.sign({ walletAddress }, 'my-secret-key', {
+          algorithm: 'HS384',
+          expiresIn: '7d',
+        } as any);
+
+        expect(() => service.verify(hs384Token)).toThrow(UnauthorizedException);
+      });
+
+      it('accepts a legitimately issued HS256 token', () => {
+        const token = service.sign(walletAddress);
+        // Confirm the issued token header declares HS256
+        const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString('utf8'));
+        expect(header.alg).toBe('HS256');
+        // And that verify accepts it
+        const decoded = service.verify(token);
+        expect(decoded.walletAddress).toBe(walletAddress);
+      });
+
+      it('sign and signWithRole both embed alg:HS256 in the token header', () => {
+        const token     = service.sign(walletAddress);
+        const roleToken = service.signWithRole(walletAddress, 'operator');
+
+        const decodeHeader = (t: string) =>
+          JSON.parse(Buffer.from(t.split('.')[0], 'base64url').toString('utf8'));
+
+        expect(decodeHeader(token).alg).toBe('HS256');
+        expect(decodeHeader(roleToken).alg).toBe('HS256');
+      });
+    });
   });
 });
