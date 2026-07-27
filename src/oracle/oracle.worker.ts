@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { OracleService, OracleReading } from './oracle.service';
 import { StellarService } from '../stellar/stellar.service';
+import { PolicyStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 
 /**
@@ -65,7 +66,7 @@ export class OracleWorker {
     let activePolicies: Array<{ oracleKey: string }> = [];
     try {
       activePolicies = await this.prisma.policy.findMany({
-        where: { status: 'ACTIVE' },
+        where: { status: PolicyStatus.ACTIVE },
         select: { oracleKey: true },
         distinct: ['oracleKey'],
         take: 500,

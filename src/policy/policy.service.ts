@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, GoneException, Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { Prisma, PolicyStatus } from '@prisma/client';
 import { TransactionBuilder, Transaction, Address, Operation, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -237,7 +237,7 @@ export class PolicyService {
 
     const result = await this.prisma.policy.aggregate({
       _sum: { coverageXlm: true },
-      where: { status: 'ACTIVE' },
+      where: { status: PolicyStatus.ACTIVE },
     });
 
     const committed = result._sum.coverageXlm ? parseFloat(result._sum.coverageXlm.toString()) : 0;
@@ -303,7 +303,7 @@ export class PolicyService {
           oracleKey:    dto.oracleKey,
           startTime:    now,
           endTime,
-          status:       'ACTIVE',
+          status:       PolicyStatus.ACTIVE,
           txHash,
         },
       });
