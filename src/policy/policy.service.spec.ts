@@ -49,6 +49,8 @@ describe("PolicyService.calculatePremium", () => {
     }),
   };
 
+  const MOCK_NOW = new Date("2026-06-15T12:00:00.000Z");
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       providers: [
@@ -66,6 +68,7 @@ describe("PolicyService.calculatePremium", () => {
     mockStellarService.simulateInvoke.mockResolvedValue({
       result: { retval: null },
     });
+    jest.spyOn(Date, "now").mockReturnValue(MOCK_NOW.getTime());
   });
 
   it("should return the correct premium for standard coverage", () => {
