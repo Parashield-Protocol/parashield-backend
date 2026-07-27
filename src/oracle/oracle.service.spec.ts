@@ -471,7 +471,17 @@ describe("OracleService.fetchRainfall", () => {
       expect(reading.value).toBe("150000000");
       expect(reading.confidence).toBe(95);
       expect(reading.source).toBe("aviationstack");
-      expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalled();
+      expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          create: expect.objectContaining({
+            dataType: "flight",
+            key: "flight:KQ100:2026-06-27",
+            value: BigInt("150000000"),
+            confidence: 95,
+            source: "aviationstack",
+          }),
+        }),
+      );
     });
 
     it("should return NO_DATA with confidence 0 when AviationStack returns an empty result (#171)", async () => {
@@ -544,6 +554,81 @@ describe("OracleService.fetchRainfall", () => {
         source: "mock",
       };
       await service.persistReading(mockReading);
+      expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+
+    it("#171 — returns NO_DATA when data array element is null", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [null] },
+      });
+
+      const reading = await service.fetchFlightDelayReading("KQ100", "2026-06-27");
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("#171 — returns NO_DATA when the element has no departure field", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [{}] },
+      });
+
+      const reading = await service.fetchFlightDelayReading("KQ100", "2026-06-27");
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("#171 — returns NO_DATA when departure is null", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [{ departure: null }] },
+      });
+
+      const reading = await service.fetchFlightDelayReading("KQ100", "2026-06-27");
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("#171 — returns NO_DATA when departure exists but has no delay field", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [{ departure: {} }] },
+      });
+
+      const reading = await service.fetchFlightDelayReading("KQ100", "2026-06-27");
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("#171 — returns NO_DATA when the top-level response has no data field", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({ data: {} });
+
+      const reading = await service.fetchFlightDelayReading("KQ100", "2026-06-27");
+      expect(reading.status).toBe("NO_DATA");
+      expect(reading.confidence).toBe(0);
+    });
+
+    it("#171 — does not persist NO_DATA from a malformed response (null element)", async () => {
+      mockConfigService.get.mockImplementation((key) =>
+        key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
+      );
+      mockedAxios.get.mockResolvedValue({
+        data: { data: [null] },
+      });
+
+      await service.fetchFlightDelay("KQ100", "2026-06-27");
       expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
     });
   });

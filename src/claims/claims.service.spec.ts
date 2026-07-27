@@ -6,6 +6,7 @@ import { StellarService } from '../stellar/stellar.service';
 import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { Prisma } from '@prisma/client';
 
 describe('ClaimsService', () => {
   let service: ClaimsService;
@@ -55,7 +56,7 @@ describe('ClaimsService', () => {
     id:           POLICY_ID,
     productId:    '1',
     policyholder: CLAIMANT,
-    coverageXlm:  100,
+    coverageXlm:  new Prisma.Decimal("100"),
     oracleKey:    'rainfall:1',
     status:       'ACTIVE',
   };
