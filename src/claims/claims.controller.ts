@@ -81,8 +81,8 @@ export class ClaimsController {
     }
     const result = await this.claims.getClaimsByWallet(
       targetWallet,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 20,
+      page ? parseInt(page, 10) || 1 : 1,
+      limit ? parseInt(limit, 10) || 20 : 20,
     );
     return { success: true, ...result };
   }
@@ -163,8 +163,8 @@ export class ClaimsController {
     }
     const result = await this.claims.getClaimsByWallet(
       targetWallet,
-      page ? parseInt(page, 10) : 1,
-      limit ? parseInt(limit, 10) : 20,
+      page ? parseInt(page, 10) || 1 : 1,
+      limit ? parseInt(limit, 10) || 20 : 20,
     );
     return { success: true, ...result };
   }

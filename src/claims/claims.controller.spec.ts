@@ -63,6 +63,14 @@ describe('ClaimsController', () => {
         controller.getClaimsByWalletQuery(OTHER_WALLET, undefined as any, undefined as any, reqWith(WALLET)),
       ).rejects.toThrow(ForbiddenException);
     });
+
+    it('falls back to default page 1 and limit 20 when non-numeric strings are passed (#304)', async () => {
+      mockClaims.getClaimsByWallet.mockResolvedValue({ data: [], total: 0, page: 1, limit: 20 } as any);
+
+      await controller.getClaimsByWalletQuery(WALLET, 'abc', 'xyz', reqWith(WALLET));
+
+      expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
+    });
   });
 
   describe('autoProcess', () => {
@@ -106,6 +114,14 @@ describe('ClaimsController', () => {
 
       expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
       expect(result).toMatchObject({ success: true, total: 1 });
+    });
+
+    it('falls back to default page 1 and limit 20 when non-numeric strings are passed (#304)', async () => {
+      mockClaims.getClaimsByWallet.mockResolvedValue({ data: [{ id: 'c1' }], total: 1, page: 1, limit: 20 } as any);
+
+      await controller.getClaimHistory(WALLET, 'invalid', 'invalid', reqWith(WALLET));
+
+      expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
     });
 
     it('throws Forbidden when reading claims for another wallet', async () => {

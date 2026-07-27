@@ -1,6 +1,7 @@
 import { ClaimsWorker } from './claims.worker';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { PolicyService } from '../policy/policy.service';
 
 describe('ClaimsWorker', () => {
   let worker: ClaimsWorker;
@@ -8,6 +9,7 @@ describe('ClaimsWorker', () => {
   let mockPrisma: {
     policy: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
   };
+  let mockPolicyService: { getActiveProducts: jest.Mock };
 
   function policy(id: string, overrides: Partial<{ status: string }> = {}) {
     return {
@@ -27,7 +29,12 @@ describe('ClaimsWorker', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
-    worker = new ClaimsWorker(mockClaims as unknown as ClaimsService, mockPrisma as unknown as PrismaService);
+    mockPolicyService = { getActiveProducts: jest.fn().mockResolvedValue([]) };
+    worker = new ClaimsWorker(
+      mockClaims as unknown as ClaimsService,
+      mockPrisma as unknown as PrismaService,
+      mockPolicyService as unknown as PolicyService,
+    );
   });
 
   it('does nothing when no policies are expiring', async () => {
@@ -51,13 +58,15 @@ describe('ClaimsWorker', () => {
     );
   });
 
-  it('auto-processes each expiring policy and leaves a "Paid" result untouched', async () => {
+  it('auto-processes each expiring policy with pre-fetched productsMap (#266)', async () => {
     mockPrisma.policy.findMany.mockResolvedValue([policy('p1')]);
     mockClaims.autoProcess.mockResolvedValue('Paid');
+    mockPolicyService.getActiveProducts.mockResolvedValue([{ id: 'prod1', name: 'Product 1' }]);
 
     await worker.processActivePolicies();
 
-    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1');
+    expect(mockPolicyService.getActiveProducts).toHaveBeenCalledTimes(1);
+    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1', expect.any(Map));
     expect(mockPrisma.policy.update).not.toHaveBeenCalled();
   });
 
@@ -84,8 +93,8 @@ describe('ClaimsWorker', () => {
 
     await expect(worker.processActivePolicies()).resolves.toBeUndefined();
 
-    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1');
-    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p2');
+    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1', expect.any(Map));
+    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p2', expect.any(Map));
     // p1's failure must not mark it EXPIRED, and p2's "Paid" also skips the update.
     expect(mockPrisma.policy.update).not.toHaveBeenCalled();
   });

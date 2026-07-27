@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { OracleService } from '../oracle/oracle.service';
-import { PolicyService } from '../policy/policy.service';
+import { PolicyService, ProductSummary } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
@@ -41,7 +41,7 @@ export class ClaimsService {
   ) {}
 
   /** Trigger automatic claim evaluation for a policy. */
-  async autoProcess(policyId: string): Promise<ClaimResult> {
+  async autoProcess(policyId: string, productsMap?: Map<string, ProductSummary>): Promise<ClaimResult> {
     this.logger.log(`auto_process policy: ${policyId}`);
 
     // Fetch policy from DB to verify it exists and is active
@@ -135,8 +135,8 @@ export class ClaimsService {
       return 'Rejected';
     }
 
-    // Evaluate trigger condition against product definition (#120: direct lookup instead of full scan)
-    const product = await this.policyService.getProductById(policy.productId);
+    // Evaluate trigger condition against product definition (#120: direct lookup, #266: cached map lookup)
+    const product = productsMap?.get(policy.productId) ?? (await this.policyService.getProductById(policy.productId));
     if (!product) {
       // #259 — the product may have been deactivated after this policy was
       // sold. Silently substituting a hardcoded threshold/comparison here

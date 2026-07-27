@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { PolicyService } from '../policy/policy.service';
 import { transition } from '../policy/policy-status.machine';
 
 const BATCH_SIZE = 10;
@@ -29,6 +30,7 @@ export class ClaimsWorker {
   constructor(
     private readonly claims: ClaimsService,
     private readonly prisma: PrismaService,
+    private readonly policyService: PolicyService,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
@@ -51,6 +53,10 @@ export class ClaimsWorker {
       this.logger.log('No expiring policies found');
       return;
     }
+
+    // #266 — Fetch active products once per tick to avoid repeating N+1 Product queries inside batch loop
+    const activeProducts = await this.policyService.getActiveProducts();
+    const productsMap = new Map(activeProducts.map((p) => [p.id, p]));
 
     this.logger.log(
       `Found ${expiringPolicies.length} expiring policies — processing in batches of ${BATCH_SIZE}`,
@@ -75,7 +81,7 @@ export class ClaimsWorker {
 
           let result: string;
           try {
-            result = await this.claims.autoProcess(policy.id);
+            result = await this.claims.autoProcess(policy.id, productsMap);
           } catch (err) {
             const isRpcError =
               err instanceof Error &&

@@ -643,5 +643,25 @@ describe('ClaimsService', () => {
       await expect(service.autoProcess(POLICY_ID)).resolves.toBe('Rejected');
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
     });
+
+    it('#266 — uses provided productsMap without querying policyService.getProductById', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-cached-product', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(40_000_000), // < 50 threshold -> trigger met
+        confidence: 90,
+      });
+      mockStellarService.invokeContract.mockResolvedValue('tx-hash-cached');
+      mockPrismaService.claim.update.mockResolvedValue({});
+      mockPrismaService.policy.update.mockResolvedValue({});
+
+      const productsMap = new Map([[MOCK_PRODUCT.id, MOCK_PRODUCT]]);
+      const result = await service.autoProcess(POLICY_ID, productsMap);
+
+      expect(result).toBe('Paid');
+      expect(mockPolicyService.getProductById).not.toHaveBeenCalled();
+    });
   });
 });
