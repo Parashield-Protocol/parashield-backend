@@ -89,4 +89,28 @@ describe('ClaimsWorker', () => {
     // p1's failure must not mark it EXPIRED, and p2's "Paid" also skips the update.
     expect(mockPrisma.policy.update).not.toHaveBeenCalled();
   });
+
+  // #264 — the worker's in-memory policy.status snapshot is always 'ACTIVE'
+  // (guaranteed by the findMany filter) and is never re-read after
+  // autoProcess resolves, which can take seconds (oracle lookup + Stellar
+  // RPC). If a concurrent path (e.g. a payout completing, or a cancellation)
+  // moves the policy to CLAIMED/CANCELLED during that window, the guarded
+  // updateMany({ where: { id, status: 'ACTIVE' } }) added for #260 must find
+  // zero matching rows and must NOT clobber the real status back to EXPIRED.
+  it('does not clobber a policy that moved to CLAIMED/CANCELLED underneath the worker (#264)', async () => {
+    mockPrisma.policy.findMany.mockResolvedValue([policy('p1')]);
+    mockClaims.autoProcess.mockResolvedValue('PolicyNotActive');
+    mockPrisma.policy.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(worker.processActivePolicies()).resolves.toBeUndefined();
+
+    expect(mockPrisma.policy.updateMany).toHaveBeenCalledWith({
+      where: { id: 'p1', status: 'ACTIVE' },
+      data: { status: 'EXPIRED' },
+    });
+    // The guard's WHERE clause (status: 'ACTIVE') means a real CLAIMED/CANCELLED
+    // row simply doesn't match and updateMany affects 0 rows — asserted above by
+    // resolving mockResolvedValue({ count: 0 }) without the call throwing.
+    expect(mockPrisma.policy.update).not.toHaveBeenCalled();
+  });
 });
