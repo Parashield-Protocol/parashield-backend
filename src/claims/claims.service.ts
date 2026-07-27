@@ -6,7 +6,7 @@ import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
-import { PolicyStatus } from '@prisma/client';
+import { Prisma, PolicyStatus } from '@prisma/client';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive';
 
@@ -237,9 +237,14 @@ export class ClaimsService {
           status:         'PENDING',
         },
       });
-    } catch (e: any) {
-      if (e?.code === 'P2002') throw new ConflictException('Claim already exists for this policy');
-      throw e;
+    } catch (error: unknown) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === 'P2002'
+      ) {
+        throw new ConflictException('Claim already exists for this policy');
+      }
+      throw error;
     }
 
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
