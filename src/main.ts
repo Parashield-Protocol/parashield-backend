@@ -4,14 +4,10 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { ThrottleGuard } from './common/guards/throttle.guard';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
-
-// Global serialization patch for BigInt fields (PRISMA compatibility with JSON.stringify)
-(BigInt.prototype as unknown as { toJSON: () => string }).toJSON = function () {
-  return this.toString();
-};
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -31,13 +27,15 @@ async function bootstrap() {
   app.useGlobalFilters(new GlobalExceptionFilter());
 
   // Global interceptors
-  app.useGlobalInterceptors(new LoggingInterceptor());
+  app.useGlobalInterceptors(new LoggingInterceptor(), new BigIntSerializerInterceptor());
 
   // Global guards
   app.useGlobalGuards(new ThrottleGuard());
 
   // Global validation pipe
-  app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+  app.useGlobalPipes(
+    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+  );
 
   const corsOrigin = process.env.CORS_ORIGIN;
   if (!corsOrigin) {
