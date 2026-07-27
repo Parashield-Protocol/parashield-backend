@@ -37,7 +37,7 @@ async function bootstrap() {
     new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
   );
 
-  const corsOrigin = process.env.CORS_ORIGIN;
+  const corsOrigin = configService.get<string>('CORS_ORIGIN');
   if (!corsOrigin) {
     logger.error('Fatal Error: CORS_ORIGIN environment variable is required');
     process.exit(1);
@@ -82,7 +82,7 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
 
-  const port = process.env.PORT ?? 3001;
+  const port = configService.get<string>('PORT') ?? 3001;
   await app.listen(port);
   logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
   logger.log(`Swagger docs available at http://localhost:${port}/docs`);
