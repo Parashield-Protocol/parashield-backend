@@ -583,6 +583,58 @@ describe("StellarService", () => {
         "did not reach SUCCESS within 50ms",
       );
     });
+
+    it("#248 — retries on transient RPC network errors until SUCCESS is reached", async () => {
+      mockRpc.getTransaction
+        .mockRejectedValueOnce(new Error("RPC gateway timeout"))
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const result = await service.waitForTransaction("tx-hash", 10_000);
+
+      expect(result.status).toBe("SUCCESS");
+      expect(mockRpc.getTransaction).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe("formatXdr", () => {
+    let service: StellarService;
+
+    const mockConfigService = {
+      get: jest.fn((key: string) => {
+        if (key === "STELLAR_RPC_URL") return "https://soroban-testnet.stellar.org";
+        if (key === "STELLAR_NETWORK") return "testnet";
+        if (key === "KEEPER_SECRET_KEY") return "STEST_FAKE_SECRET_KEY";
+        return undefined;
+      }),
+    };
+
+    beforeEach(async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          StellarService,
+          { provide: ConfigService, useValue: mockConfigService },
+        ],
+      }).compile();
+
+      service = module.get<StellarService>(StellarService);
+    });
+
+    it("#247 — formats XDR SDK class instances with toXDR method to base64 string", () => {
+      const mockXdrInstance = {
+        toXDR: jest.fn().mockReturnValue("AAAAAQAAAAE="),
+      };
+      expect(service.formatXdr(mockXdrInstance)).toBe("AAAAAQAAAAE=");
+      expect(mockXdrInstance.toXDR).toHaveBeenCalledWith("base64");
+    });
+
+    it("#247 — returns plain strings directly", () => {
+      expect(service.formatXdr("tx_failed_bad_seq")).toBe("tx_failed_bad_seq");
+    });
+
+    it("#247 — handles empty or null/undefined values safely", () => {
+      expect(service.formatXdr(null)).toBe("");
+      expect(service.formatXdr(undefined)).toBe("");
+    });
   });
 
   describe("getAccountBalance", () => {
