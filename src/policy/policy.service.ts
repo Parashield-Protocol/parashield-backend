@@ -1,6 +1,6 @@
 import { BadRequestException, ConflictException, GoneException, Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
-import { TransactionBuilder, Transaction, Address, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
+import { TransactionBuilder, Transaction, Address, Operation, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
@@ -121,7 +121,7 @@ export class PolicyService {
       const simResult = await this.stellar.simulateInvoke(usdcContract, 'balance', [engineAddress]);
 
       if (StellarRpc.Api.isSimulationError(simResult)) {
-        this.logger.warn(`Pool balance simulation error: ${(simResult as any).error}`);
+        this.logger.warn(`Pool balance simulation error: ${simResult.error}`);
         return Infinity;
       }
 
@@ -328,7 +328,8 @@ export class PolicyService {
       );
     }
 
-    const hostFunc = (firstOp as any).func;
+    const invokeOp = firstOp as Operation.InvokeHostFunction;
+    const hostFunc = invokeOp.func;
     if (!hostFunc || hostFunc.switch().name !== 'hostFunctionTypeInvokeContract') {
       throw new BadRequestException('Transaction does not invoke a contract function');
     }
@@ -451,7 +452,7 @@ export class PolicyService {
 
   async getProductById(id: string): Promise<ProductSummary | null> {
     const product = await this.prisma.product.findFirst({
-      where: { id, status: 'Active' },
+      where: { id, status: 'ACTIVE' },
     });
     if (!product) return null;
     return {
@@ -459,10 +460,10 @@ export class PolicyService {
       name:        product.name,
       category:    product.category,
       triggerType: product.triggerType,
-      threshold:   product.threshold,
+      threshold:   product.threshold.toString(),
       comparison:  product.comparison,
-      coverageMin: product.coverageMin,
-      coverageMax: product.coverageMax,
+      coverageMin: product.coverageMin.toString(),
+      coverageMax: product.coverageMax.toString(),
       premiumRate: product.premiumRate,
       maxDuration: product.maxDuration,
       status:      product.status,
@@ -472,17 +473,17 @@ export class PolicyService {
   async getActiveProducts(): Promise<ProductSummary[]> {
     this.logger.log('get_active_products called');
     const dbProducts = await this.prisma.product.findMany({
-      where: { status: 'Active' },
+      where: { status: 'ACTIVE' },
     });
     return dbProducts.map((product) => ({
       id:          product.id,
       name:        product.name,
       category:    product.category,
       triggerType: product.triggerType,
-      threshold:   product.threshold,
+      threshold:   product.threshold.toString(),
       comparison:  product.comparison,
-      coverageMin: product.coverageMin,
-      coverageMax: product.coverageMax,
+      coverageMin: product.coverageMin.toString(),
+      coverageMax: product.coverageMax.toString(),
       premiumRate: product.premiumRate,
       maxDuration: product.maxDuration,
       status:      product.status,
@@ -525,7 +526,7 @@ export class PolicyService {
       );
 
       if (StellarRpc.Api.isSimulationError(simResult)) {
-        this.logger.warn(`get_policy on-chain fallback simulation error for ${policyId}: ${(simResult as any).error}`);
+        this.logger.warn(`get_policy on-chain fallback simulation error for ${policyId}: ${simResult.error}`);
         return null;
       }
 
