@@ -56,6 +56,13 @@ export class ClaimsService {
       return 'PolicyNotActive';
     }
 
+    // Expired check — policy.endTime is the authoritative reference, not the
+    // lazily-updated status column (the EXPIRED cron runs at best once an hour).
+    if (new Date() > policy.endTime) {
+      this.logger.warn(`Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`);
+      return 'Expired';
+    }
+
     // #163 — Duplicate guard: prevent double payouts or duplicate in-flight processing
     const existingClaim = await this.prisma.claim.findFirst({
       where: {
@@ -217,6 +224,12 @@ export class ClaimsService {
     }
     if (policy.status !== 'ACTIVE') {
       throw new ConflictException(`Policy ${policyId} is not active`);
+    }
+
+    // Expired check — policy.endTime is the authoritative reference, not the
+    // lazily-updated status column (the EXPIRED cron runs at best once an hour).
+    if (new Date() > policy.endTime) {
+      throw new ConflictException(`Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`);
     }
 
     const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';

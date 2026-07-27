@@ -77,8 +77,15 @@ export class PolicyService {
   /**
    * Validate the oracleKey format for a given product category.
    * Called during quote generation (buyPolicy) so errors are surfaced immediately.
+   * When startTime/endTime are provided, also validates the oracleKey's embedded
+   * period aligns with the policy coverage window.
    */
-  validateOracleKey(oracleKey: string, product: ProductSummary): OracleKeyValidationResult {
+  validateOracleKey(
+    oracleKey: string,
+    product: ProductSummary,
+    startTime?: Date,
+    endTime?: Date,
+  ): OracleKeyValidationResult {
     if (
       product.category === 'crop' &&
       !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(oracleKey)
@@ -97,6 +104,37 @@ export class PolicyService {
         reason: 'oracleKey format must be flight:flightNumber:YYYY-MM-DD for flight products',
       };
     }
+
+    if (startTime && endTime) {
+      if (product.category === 'crop') {
+        const match = oracleKey.match(/:(\d{4}-(?:0[1-9]|1[0-2]))$/);
+        if (match) {
+          const keyMonth = match[1];
+          const monthStart = new Date(keyMonth + '-01T00:00:00.000Z');
+          const monthEnd = new Date(monthStart);
+          monthEnd.setUTCMonth(monthEnd.getUTCMonth() + 1);
+          if (endTime <= monthStart || startTime >= monthEnd) {
+            return {
+              valid: false,
+              reason: `oracleKey month ${keyMonth} does not overlap with the policy coverage period (${startTime.toISOString().slice(0, 10)} to ${endTime.toISOString().slice(0, 10)})`,
+            };
+          }
+        }
+      }
+      if (product.category === 'flight') {
+        const match = oracleKey.match(/:(\d{4}-\d{2}-\d{2})$/);
+        if (match) {
+          const keyDate = new Date(match[1] + 'T00:00:00.000Z');
+          if (keyDate < startTime || keyDate > endTime) {
+            return {
+              valid: false,
+              reason: `oracleKey date ${match[1]} falls outside the policy coverage period (${startTime.toISOString().slice(0, 10)} to ${endTime.toISOString().slice(0, 10)})`,
+            };
+          }
+        }
+      }
+    }
+
     return { valid: true };
   }
 
@@ -243,6 +281,14 @@ export class PolicyService {
     const validation = await this.validateCoverage(dto.coverageXlm, product, dto.oracleKey);
     if (!validation.valid) {
       throw new BadRequestException(validation.reason);
+    }
+
+    // Temporal oracle key validation: ensure the period embedded in oracleKey
+    // aligns with the policy coverage window, preventing the use of known
+    // historical readings to game claim evaluation.
+    const periodValidation = this.validateOracleKey(dto.oracleKey, product, now, endTime);
+    if (!periodValidation.valid) {
+      throw new BadRequestException(periodValidation.reason);
     }
 
     const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
