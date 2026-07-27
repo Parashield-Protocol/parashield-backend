@@ -67,12 +67,14 @@ export class OracleWorker {
       activePolicies = await this.prisma.policy.findMany({
         where: { status: 'ACTIVE' },
         select: { oracleKey: true },
+        distinct: ['oracleKey'],
+        take: 500,
       });
     } catch (err) {
       this.logger.error('Failed to fetch active policies from database', err);
     }
 
-    let uniqueKeys = [...new Set(activePolicies.map((p) => p.oracleKey))];
+    let uniqueKeys = activePolicies.map((p) => p.oracleKey);
     if (uniqueKeys.length === 0) {
       this.logger.log('No active policies found. Using Kisumu rainfall coordinates as fallback.');
       uniqueKeys = [`rainfall:-0.0917,34.7679:${year}-${formattedMonth}`];

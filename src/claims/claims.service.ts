@@ -284,7 +284,7 @@ export class ClaimsService {
     const [claims, total] = await this.prisma.$transaction([
       this.prisma.claim.findMany({
         where: { claimant: walletAddress },
-        orderBy: { submittedAt: 'desc' },
+        orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
         skip: (safePage - 1) * safeLimit,
         take: safeLimit,
       }),

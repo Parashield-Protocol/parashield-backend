@@ -436,10 +436,10 @@ export class PolicyService {
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
 
-    const [policies, total] = await Promise.all([
+    const [policies, total] = await this.prisma.$transaction([
       this.prisma.policy.findMany({
         where: { policyholder: address },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take,
         skip,
       }),
