@@ -42,10 +42,11 @@ export class JwtService {
    */
   sign(walletAddress: string): string {
     const payload: JwtPayload = { walletAddress };
-    const token = jwt.sign(payload, this.secret, {
+    const options: jwt.SignOptions = {
       algorithm: 'HS256',
-      expiresIn: "7d",
-    } as any);
+      expiresIn: '7d',
+    };
+    const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
     return token;
   }
@@ -57,10 +58,11 @@ export class JwtService {
    */
   signWithRole(walletAddress: string, role: string, admin = false): string {
     const payload: JwtPayload = { walletAddress, role, admin };
-    const token = jwt.sign(payload, this.secret, {
+    const options: jwt.SignOptions = {
       algorithm: 'HS256',
-      expiresIn: "7d",
-    } as any);
+      expiresIn: '7d',
+    };
+    const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
     return token;
   }
