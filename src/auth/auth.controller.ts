@@ -1,10 +1,15 @@
 import { Controller, Post, Body, UnauthorizedException, Logger, HttpCode, HttpStatus, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { IsString, Matches } from 'class-validator';
 import { Keypair } from '@stellar/stellar-sdk';
 import { JwtService } from './jwt.service';
 import { PrismaService } from '../prisma/prisma.service';
 import * as crypto from 'crypto';
+
+// Auth endpoints are brute-force/enumeration targets, so they get a tighter
+// limit than the app-wide default (60 req/60s) configured in app.module.ts.
+const AUTH_THROTTLE = { default: { limit: 10, ttl: 60000 } };
 
 class WalletLoginDto {
   @IsString()
@@ -39,6 +44,7 @@ export class AuthController {
    * Issue a server-generated nonce for a given wallet address.
    */
   @Get('challenge')
+  @Throttle(AUTH_THROTTLE)
   @ApiOperation({ summary: 'Obtain a server-issued nonce before login' })
   @ApiResponse({ status: 200, description: 'Returns the challenge nonce' })
   @ApiResponse({ status: 400, description: 'Invalid wallet address' })
@@ -77,6 +83,7 @@ export class AuthController {
    */
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @Throttle(AUTH_THROTTLE)
   @ApiOperation({ summary: 'Authenticate with a Stellar wallet signature and receive a JWT' })
   @ApiResponse({ status: 200, description: 'Returns a JWT token for the authenticated wallet' })
   @ApiResponse({ status: 401, description: 'Invalid or missing wallet signature' })
