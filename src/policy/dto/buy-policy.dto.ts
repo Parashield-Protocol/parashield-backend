@@ -23,7 +23,7 @@ export class BuyPolicyDto {
     maximum: 100000,
     example: 500,
   })
-  @IsNumber()
+  @IsNumber({ maxDecimalPlaces: 7 })
   @IsPositive()
   @Min(10)
   @Max(100000)
@@ -56,8 +56,8 @@ export class BuyPolicyDto {
   })
   @IsString()
   @IsNotEmpty()
-  @Matches(/^(rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])|flight:[A-Z0-9]+:20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])|defi:[a-zA-Z0-9_:-]+)$/, {
-    message: 'oracleKey must match product category format (rainfall:lat,lng:YYYY-MM, flight:flightNumber:YYYY-MM-DD, or defi:key)',
+  @Matches(/^(rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])|flight:[A-Z0-9]+:20\d{2}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01]))$/, {
+    message: 'oracleKey must match product category format (rainfall:lat,lng:YYYY-MM or flight:flightNumber:YYYY-MM-DD). defi: is not yet serviceable by the oracle worker.',
   })
   @IsValidOracleKeyCoordinates()
   oracleKey: string;

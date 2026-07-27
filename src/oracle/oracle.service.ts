@@ -205,9 +205,13 @@ export class OracleService {
 
   /** Get the latest reading for a given oracle key from the database. */
   async getLatestReading(key: string): Promise<OracleReading | null> {
+    // #265 — submittedAt alone has no guaranteed tiebreak on ties (plausible
+    // under bulk/backfill writes or fast successive submissions), and this
+    // result directly drives claim payout decisions. id is a stable secondary
+    // sort key.
     const record = await this.prisma.oracleReading.findFirst({
       where: { key },
-      orderBy: { submittedAt: "desc" },
+      orderBy: [{ submittedAt: "desc" }, { id: "desc" }],
     });
 
     if (!record) return null;
