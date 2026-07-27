@@ -174,7 +174,7 @@ export class StellarService {
         }
         if (sendResult.status === "ERROR") {
           throw new Error(
-            `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
+            `Transaction submission failed: ${this.formatXdr(sendResult.errorResult)}`,
           );
         }
         // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
@@ -253,7 +253,7 @@ export class StellarService {
     );
     if (sendResult.status === "ERROR") {
       throw new Error(
-        `Transaction submission failed: ${JSON.stringify(sendResult.errorResult)}`,
+        `Transaction submission failed: ${this.formatXdr(sendResult.errorResult)}`,
       );
     }
     // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
@@ -281,38 +281,96 @@ export class StellarService {
    * @param timeoutMs  Maximum time to wait in milliseconds (default 60s)
    * @returns The final transaction response with status SUCCESS
    */
+  /**
+   * Format XDR object or error for diagnostic output.
+   * Class instances from the Stellar SDK (like xdr.TransactionResult)
+   * lack plain properties, causing JSON.stringify to yield {} and template
+   * interpolation to yield [object Object]. This helper extracts base64 XDR or JSON.
+   */
+  formatXdr(val: any): string {
+    if (val === null || val === undefined) {
+      return '';
+    }
+    if (typeof val === 'string') {
+      return val;
+    }
+    if (typeof val?.toXDR === 'function') {
+      try {
+        return val.toXDR('base64');
+      } catch {
+        try {
+          return val.toXDR().toString('base64');
+        } catch {
+          // fallback
+        }
+      }
+    }
+    if (typeof val === 'object') {
+      try {
+        const json = JSON.stringify(val);
+        if (json !== '{}' && json !== '[]') {
+          return json;
+        }
+      } catch {
+        // fallback
+      }
+    }
+    return String(val);
+  }
+
+  /**
+   * Poll getTransaction until the status is SUCCESS or FAILED.
+   * Throws on FAILED or if the timeout is reached.
+   * Transient RPC/network errors are caught and retried within the remaining timeout budget.
+   *
+   * @param txHash  Transaction hash to poll
+   * @param timeoutMs  Maximum time to wait in milliseconds (default 60s)
+   * @returns The final transaction response with status SUCCESS
+   */
   async waitForTransaction(
     txHash: string,
     timeoutMs: number = 60000,
   ): Promise<StellarRpc.Api.GetTransactionResponse> {
     const start = Date.now();
     const POLL_INTERVAL_MS = 2000;
+    let lastError: Error | null = null;
 
     while (Date.now() - start < timeoutMs) {
-      const txResult = await this.withTimeout(
-        this.rpc.getTransaction(txHash),
-        "getTransaction",
-      );
+      try {
+        const txResult = await this.withTimeout(
+          this.rpc.getTransaction(txHash),
+          "getTransaction",
+        );
 
-      if (txResult.status === "SUCCESS") {
-        this.logger.log(`Transaction confirmed: ${txHash}`);
-        return txResult;
-      }
+        if (txResult.status === "SUCCESS") {
+          this.logger.log(`Transaction confirmed: ${txHash}`);
+          return txResult;
+        }
 
-      if (txResult.status === "FAILED") {
-        throw new Error(
-          `Transaction ${txHash} failed on-chain: ${txResult.resultXdr ?? "unknown error"}`,
+        if (txResult.status === "FAILED") {
+          throw new Error(
+            `Transaction ${txHash} failed on-chain: ${this.formatXdr(txResult.resultXdr) || "unknown error"}`,
+          );
+        }
+
+        this.logger.log(
+          `Transaction ${txHash} status=${txResult.status} — waiting ${POLL_INTERVAL_MS}ms...`,
+        );
+      } catch (err) {
+        if (err instanceof Error && err.message.includes('failed on-chain')) {
+          throw err;
+        }
+        lastError = err instanceof Error ? err : new Error(String(err));
+        this.logger.warn(
+          `waitForTransaction: transient RPC error polling txHash=${txHash}: ${lastError.message}. Retrying...`,
         );
       }
 
-      this.logger.log(
-        `Transaction ${txHash} status=${txResult.status} — waiting ${POLL_INTERVAL_MS}ms...`,
-      );
       await this.sleep(POLL_INTERVAL_MS);
     }
 
     throw new Error(
-      `Transaction ${txHash} did not reach SUCCESS within ${timeoutMs}ms`,
+      `Transaction ${txHash} did not reach SUCCESS within ${timeoutMs}ms${lastError ? `. Last RPC error: ${lastError.message}` : ''}`,
     );
   }
 
