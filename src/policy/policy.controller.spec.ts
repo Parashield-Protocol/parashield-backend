@@ -3,7 +3,7 @@ import { PolicyController } from "./policy.controller";
 import { PolicyService } from "./policy.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { AuthenticatedRequest } from "../auth/authenticated-request";
-import { ForbiddenException, BadRequestException, NotFoundException } from "@nestjs/common";
+import { ForbiddenException, BadRequestException, NotFoundException, UnauthorizedException } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 
 describe("PolicyController", () => {
@@ -15,6 +15,7 @@ describe("PolicyController", () => {
     getUserPolicies: jest.fn(),
     getPolicy: jest.fn(),
     validateCoverage: jest.fn().mockResolvedValue({ valid: true }),
+    validatePoolCapacity: jest.fn(),
     calculatePremium: jest.fn(),
     confirmAndCreatePolicy: jest.fn(),
   };
@@ -439,6 +440,173 @@ describe("PolicyController", () => {
       await expect(controller.getPolicy(POLICY_ID, strangerReq)).rejects.toThrow(
         ForbiddenException,
       );
+    });
+  });
+
+  describe("getProducts (GET /products)", () => {
+    const MOCK_PRODUCTS = [
+      {
+        id: "prod-1", name: "Crop Insurance", category: "crop",
+        triggerType: "rainfall", threshold: "100", comparison: "lte",
+        coverageMin: "100", coverageMax: "10000", premiumRate: 500,
+        maxDuration: 365, status: "ACTIVE",
+      },
+    ];
+
+    it("returns a list of active products", async () => {
+      mockPolicyService.getActiveProducts.mockResolvedValue(MOCK_PRODUCTS);
+
+      const result = await controller.getProducts();
+
+      expect(mockPolicyService.getActiveProducts).toHaveBeenCalled();
+      expect(result).toEqual({ success: true, data: MOCK_PRODUCTS });
+    });
+
+    it("returns an empty array when no products are active", async () => {
+      mockPolicyService.getActiveProducts.mockResolvedValue([]);
+
+      const result = await controller.getProducts();
+
+      expect(result).toEqual({ success: true, data: [] });
+    });
+
+    it("has no auth guard registered (public endpoint)", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.getProducts);
+      expect(guards).toBeUndefined();
+    });
+  });
+
+  describe("buyPolicy (POST /policies/buy)", () => {
+    const WALLET = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+
+    const VALID_DTO = {
+      productId: "prod-1",
+      coverageXlm: 500,
+      walletAddress: WALLET,
+      duration: 90,
+      oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+    };
+
+    const MOCK_PRODUCT = {
+      id: "prod-1", name: "Crop Insurance", category: "crop",
+      triggerType: "rainfall", threshold: "100", comparison: "lte",
+      coverageMin: "10", coverageMax: "10000", premiumRate: 500,
+      maxDuration: 365, status: "ACTIVE",
+    };
+
+    const ownerReq = {
+      user: { walletAddress: WALLET },
+      wallet: WALLET,
+    } as AuthenticatedRequest;
+
+    beforeEach(() => {
+      mockPolicyService.getActiveProducts.mockResolvedValue([MOCK_PRODUCT]);
+      mockPolicyService.validateCoverage.mockResolvedValue({ valid: true });
+      mockPolicyService.validatePoolCapacity.mockResolvedValue(undefined);
+      mockPolicyService.calculatePremium.mockReturnValue(75);
+    });
+
+    it("returns a premium quote when all inputs are valid", async () => {
+      const result = await controller.buyPolicy(ownerReq, VALID_DTO);
+
+      expect(mockPolicyService.getActiveProducts).toHaveBeenCalled();
+      expect(mockPolicyService.validateCoverage).toHaveBeenCalledWith(
+        500, MOCK_PRODUCT, VALID_DTO.oracleKey,
+      );
+      expect(mockPolicyService.calculatePremium).toHaveBeenCalledWith(500, 500, 90);
+      expect(result).toEqual({
+        success: true,
+        data: {
+          quote: {
+            productId: "prod-1",
+            productName: "Crop Insurance",
+            coverageXlm: 500,
+            premiumXlm: 75,
+            duration: 90,
+            wallet: WALLET,
+          },
+        },
+      });
+    });
+
+    it("throws ForbiddenException when wallet address does not match authenticated user", async () => {
+      const dto = { ...VALID_DTO, walletAddress: "GOTHERWALLET0000000000000000000000000000000000" };
+
+      await expect(controller.buyPolicy(ownerReq, dto)).rejects.toThrow(ForbiddenException);
+      expect(mockPolicyService.getActiveProducts).not.toHaveBeenCalled();
+    });
+
+    it("throws NotFoundException when product is not found or inactive", async () => {
+      mockPolicyService.getActiveProducts.mockResolvedValue([]);
+
+      await expect(controller.buyPolicy(ownerReq, VALID_DTO)).rejects.toThrow(NotFoundException);
+    });
+
+    it("throws BadRequestException when coverage validation fails", async () => {
+      mockPolicyService.validateCoverage.mockResolvedValue({ valid: false, reason: "Coverage exceeds max" });
+
+      await expect(controller.buyPolicy(ownerReq, VALID_DTO)).rejects.toThrow(BadRequestException);
+    });
+
+    it("has JwtAuthGuard registered", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.buyPolicy);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(JwtAuthGuard);
+    });
+  });
+
+  describe("confirmPolicy (POST /policies/confirm)", () => {
+    const WALLET = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+
+    const VALID_DTO = {
+      signedXdr: "AAAAAgAAA...",
+      productId: "prod-1",
+      coverageXlm: 500,
+      walletAddress: WALLET,
+      duration: 90,
+      oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+    };
+
+    const ownerReq = {
+      user: { walletAddress: WALLET },
+      wallet: WALLET,
+    } as AuthenticatedRequest;
+
+    const MOCK_RESULT = { policyId: "policy-uuid-5678", txHash: "abc123def456" };
+
+    it("confirms and creates a policy successfully", async () => {
+      mockPolicyService.confirmAndCreatePolicy.mockResolvedValue(MOCK_RESULT);
+
+      const result = await controller.confirmPolicy(VALID_DTO, ownerReq);
+
+      expect(mockPolicyService.confirmAndCreatePolicy).toHaveBeenCalledWith(VALID_DTO, WALLET);
+      expect(result).toEqual({ success: true, data: MOCK_RESULT });
+    });
+
+    it("throws ForbiddenException when wallet address does not match authenticated user", async () => {
+      const dto = { ...VALID_DTO, walletAddress: "GOTHERWALLET0000000000000000000000000000000000" };
+
+      await expect(controller.confirmPolicy(dto, ownerReq)).rejects.toThrow(ForbiddenException);
+      expect(mockPolicyService.confirmAndCreatePolicy).not.toHaveBeenCalled();
+    });
+
+    it("throws UnauthorizedException when no authenticated wallet is present", async () => {
+      const reqNoWallet = {
+        user: { walletAddress: null },
+        wallet: undefined,
+      } as AuthenticatedRequest;
+
+      await expect(controller.confirmPolicy(VALID_DTO, reqNoWallet)).rejects.toThrow(UnauthorizedException);
+      expect(mockPolicyService.confirmAndCreatePolicy).not.toHaveBeenCalled();
+    });
+
+    it("has JwtAuthGuard registered", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.confirmPolicy);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(JwtAuthGuard);
     });
   });
 });
