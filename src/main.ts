@@ -86,6 +86,8 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
 
+  app.enableShutdownHooks();
+
   const port = configService.get<string>('PORT') ?? 3001;
   await app.listen(port);
   logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
