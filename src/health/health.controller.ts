@@ -43,8 +43,7 @@ export class HealthController {
       await this.prisma.$queryRaw`SELECT 1`;
     } catch (err) {
       dbStatus = 'error';
-      dbError  = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Health check DB query failed: ${dbError}`);
+      this.logger.error(`Health check DB query failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     try {
@@ -65,8 +64,7 @@ export class HealthController {
       }
     } catch (err) {
       stellarStatus = 'error';
-      stellarError  = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Health check Stellar RPC failed: ${stellarError}`);
+      this.logger.error(`Health check Stellar RPC failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     const healthy = dbStatus === 'ok' && stellarStatus === 'ok';
