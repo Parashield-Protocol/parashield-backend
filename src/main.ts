@@ -8,6 +8,10 @@ import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serial
 import { ThrottleGuard } from './common/guards/throttle.guard';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
+import { json, urlencoded } from 'express';
+
+const REQUEST_BODY_LIMIT = '1mb';
+const SERVER_TIMEOUT_MS = 30_000;
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -22,6 +26,10 @@ async function bootstrap() {
 
   // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
   app.use(helmet());
+
+  // Explicit request body size limit (defaults are implicit and adapter-dependent)
+  app.use(json({ limit: REQUEST_BODY_LIMIT }));
+  app.use(urlencoded({ limit: REQUEST_BODY_LIMIT, extended: true }));
 
   // Global exception filter
   app.useGlobalFilters(new GlobalExceptionFilter());
@@ -56,7 +64,7 @@ async function bootstrap() {
   // CORS
   app.enableCors({
     origin: parsedCorsOrigin,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'x-wallet-address', 'x-wallet-signature', 'x-wallet-message', 'x-api-key', 'x-admin-api-key'],
   });
 
@@ -87,7 +95,8 @@ async function bootstrap() {
   SwaggerModule.setup('docs', app, document);
 
   const port = configService.get<string>('PORT') ?? 3001;
-  await app.listen(port);
+  const server = await app.listen(port);
+  server.timeout = SERVER_TIMEOUT_MS;
   logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
   logger.log(`Swagger docs available at http://localhost:${port}/docs`);
 }

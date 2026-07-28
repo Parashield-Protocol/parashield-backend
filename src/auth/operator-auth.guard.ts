@@ -90,7 +90,7 @@ export class OperatorAuthGuard implements CanActivate {
   private getClientIp(request: AuthenticatedRequest): string {
     const forwarded = request.headers['x-forwarded-for'];
     const ip = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0];
-    return ip?.trim() ?? (request as any).ip ?? 'unknown';
+    return ip?.trim() ?? request.ip ?? 'unknown';
   }
 
   private hasValidApiKey(request: AuthenticatedRequest): boolean {
