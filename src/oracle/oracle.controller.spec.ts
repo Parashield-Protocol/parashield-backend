@@ -1,5 +1,8 @@
+import { Reflector } from "@nestjs/core";
 import { OracleController } from "./oracle.controller";
 import { OracleService } from "./oracle.service";
+import { OperatorAuthGuard } from "../auth/operator-auth.guard";
+import { AviationStackApiKeyGuard } from "./guards/aviation-stack-api-key.guard";
 
 describe("OracleController — Access Control & Rate Limiting", () => {
   let controller: OracleController;
@@ -74,17 +77,13 @@ describe("OracleController — Access Control & Rate Limiting", () => {
       expect(mockOracleService.getAllReadings).toHaveBeenCalledWith(500);
     });
 
-    it("GET /oracle/rainfall should allow anonymous access", async () => {
-      mockOracleService.fetchRainfall.mockResolvedValue(mockReading);
+    it("GET /oracle/reading should return not found when key is empty", async () => {
+      mockOracleService.getLatestReading.mockResolvedValue(null);
 
-      const result = await controller.getRainfall(
-        "-0.0917",
-        "34.7679",
-        "2026",
-        "6",
-      );
+      const result = await controller.getReadingByKey("");
 
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("No reading found");
     });
   });
 
@@ -115,12 +114,63 @@ describe("OracleController — Access Control & Rate Limiting", () => {
       expect(result.success).toBe(true);
     });
 
+    it("GET /oracle/rainfall should require OperatorAuthGuard", async () => {
+      mockOracleService.fetchRainfall.mockResolvedValue(mockReading);
+
+      const result = await controller.getRainfall(
+        "-0.0917",
+        "34.7679",
+        "2026",
+        "6",
+      );
+
+      expect(result.success).toBe(true);
+    });
+
     it("GET /oracle/flight should require AviationStackApiKeyGuard", async () => {
       mockOracleService.fetchFlightDelay.mockResolvedValue(mockReading);
 
       const result = await controller.getFlight("KQ100", "2026-06-27");
 
       expect(result.success).toBe(true);
+    });
+  });
+
+  describe("Guard Registration (Decorator Metadata)", () => {
+    it("fetchRainfall has OperatorAuthGuard registered", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.fetchRainfall);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(OperatorAuthGuard);
+    });
+
+    it("fetchTemperature has OperatorAuthGuard registered", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.fetchTemperature);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(OperatorAuthGuard);
+    });
+
+    it("getRainfall has OperatorAuthGuard registered", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.getRainfall);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(OperatorAuthGuard);
+    });
+
+    it("getFlight has OperatorAuthGuard and AviationStackApiKeyGuard registered", () => {
+      const reflector = new Reflector();
+      const guards = reflector.get<unknown[]>("__guards__", controller.getFlight);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(OperatorAuthGuard);
+      expect(guards).toContain(AviationStackApiKeyGuard);
+    });
+
+    it("public endpoints (latest/:key, reading, readings) have NO guards registered", () => {
+      const reflector = new Reflector();
+      expect(reflector.get<unknown[]>("__guards__", controller.getLatestReading)).toBeUndefined();
+      expect(reflector.get<unknown[]>("__guards__", controller.getReadingByKey)).toBeUndefined();
+      expect(reflector.get<unknown[]>("__guards__", controller.getAllReadings)).toBeUndefined();
     });
   });
 
