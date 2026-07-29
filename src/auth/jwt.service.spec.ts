@@ -60,6 +60,27 @@ describe('JwtService', () => {
       expect(() => service.verify(expiredToken)).toThrow(/expired/i);
     });
 
+    // #280 — Explicitly test the TokenExpiredError branch. Use the string
+    // format (`'-1s'`) to mirror real-world token expiry, and assert the
+    // exact error message so a regression that swaps the generic
+    // "Invalid token" message for the expired path is caught.
+    it('should surface "Token has expired" (not generic "Invalid token") for an expired token', () => {
+      const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+      const expiredToken = jwt.sign({ walletAddress }, 'my-secret-key', { expiresIn: '-1s' });
+
+      // Must be the *expired* message, not the generic JsonWebTokenError one
+      expect(() => service.verify(expiredToken)).toThrow('Token has expired');
+      expect(() => service.verify(expiredToken)).toThrow(UnauthorizedException);
+
+      // Sanity: a malformed string yields a *different* message
+      try {
+        service.verify('garbage.token.here');
+        fail('should have thrown');
+      } catch (err) {
+        expect((err as Error).message).toBe('Invalid token');
+      }
+    });
+
     // #182 — a validly-issued token that's been bit-flipped in transit (or
     // deliberately tampered with) must fail signature verification, not be
     // silently accepted with a corrupted payload.
