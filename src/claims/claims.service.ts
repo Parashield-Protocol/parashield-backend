@@ -7,6 +7,7 @@ import { PolicyService, ProductSummary } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
+import { StatusEventsService } from '../common/events/status-events.service';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -42,7 +43,18 @@ export class ClaimsService {
     private readonly policyService: PolicyService,
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
+    private readonly statusEvents: StatusEventsService,
   ) {}
+
+  // #350 — builds an auditLog.create() operation to append to a
+  // $transaction([...]) array alongside the status-changing write itself,
+  // so the two commit together and the audit trail can't fall out of sync
+  // with the actual status history.
+  private auditOp(entityType: 'Policy' | 'Claim', entityId: string, fromStatus: string, toStatus: string, reason?: string) {
+    return this.prisma.auditLog.create({
+      data: { entityType, entityId, fromStatus, toStatus, reason },
+    });
+  }
 
   /** Trigger automatic claim evaluation for a policy. */
   async autoProcess(policyId: string, productsMap?: Map<string, ProductSummary>): Promise<ClaimResult> {
@@ -112,6 +124,12 @@ export class ClaimsService {
       );
       return 'AlreadyProcessed';
     }
+    // #350 — best-effort audit write after the guarded update succeeds; not
+    // folded into the update itself so the gate can't be blocked by an
+    // audit-log write failure.
+    await this.auditOp('Policy', policyId, PolicyStatus.ACTIVE, PolicyStatus.PROCESSING, 'autoProcess claim evaluation started')
+      .catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} PROCESSING gate`, err));
+    this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.PROCESSING);
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
@@ -132,10 +150,13 @@ export class ClaimsService {
     const reading = await this.oracleService.getLatestReading(policy.oracleKey);
     if (!reading) {
       this.logger.warn(`No oracle reading for key=${policy.oracleKey} — rejecting claim ${claim.id}`);
-      await this.prisma.claim.update({
-        where: { id: claim.id },
-        data:  { status: ClaimStatus.REJECTED, processedAt: new Date() },
-      });
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: ClaimStatus.REJECTED, processedAt: new Date() },
+        }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.REJECTED, 'No oracle reading available'),
+      ]);
       return 'Rejected';
     }
 
@@ -159,7 +180,10 @@ export class ClaimsService {
           where: { id: policyId },
           data:  { status: PolicyStatus.ACTIVE },
         }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Product not found'),
+        this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: product not found'),
       ]);
+      this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       return 'Rejected';
     }
     // #245 — Guard against non-numeric threshold values. Product.threshold is a
@@ -182,7 +206,10 @@ export class ClaimsService {
           where: { id: policyId },
           data:  { status: PolicyStatus.ACTIVE },
         }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
+        this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: non-numeric product threshold'),
       ]);
+      this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       return 'Rejected';
     }
     const threshold  = BigInt(Math.round(rawThreshold * 1e7));
@@ -198,10 +225,13 @@ export class ClaimsService {
     );
 
     if (!triggerMet) {
-      await this.prisma.claim.update({
-        where: { id: claim.id },
-        data:  { status: ClaimStatus.REJECTED, triggerMet: false, processedAt: new Date() },
-      });
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: ClaimStatus.REJECTED, triggerMet: false, processedAt: new Date() },
+        }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.REJECTED, 'Trigger condition not met'),
+      ]);
       return 'Rejected';
     }
 
@@ -234,7 +264,10 @@ export class ClaimsService {
           where: { id: policyId },
           data:  { status: PolicyStatus.ACTIVE },
         }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'On-chain payout failed'),
+        this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: on-chain payout failed'),
       ]);
+      this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       return 'Rejected';
     }
 
@@ -255,12 +288,25 @@ export class ClaimsService {
         where: { id: policyId, status: PolicyStatus.PROCESSING },
         data:  { status: transition('PROCESSING', 'CLAIMED') as PolicyStatus },
       }),
+      this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.PAID, `Payout confirmed, txHash=${txHash}`),
     ]);
 
     if (policyUpdateResult.count === 0) {
       this.logger.error(
         `Policy ${policyId} status guard missed on CLAIMED transition — status changed underneath a paid claim (claim ${claim.id}, txHash ${txHash})`,
       );
+    } else {
+      // Logged outside the transaction above since whether the policy guard
+      // succeeded is only known from its result, and the array $transaction
+      // form runs every statement unconditionally -- an audit row here can't
+      // be made conditional on `count` without an interactive transaction,
+      // which would mean re-running the payout-confirming claim write inside
+      // a second transaction. A best-effort log call after the fact is an
+      // acceptable tradeoff for this rare guard-miss path.
+      await this.prisma.auditLog.create({
+        data: { entityType: 'Policy', entityId: policyId, fromStatus: PolicyStatus.PROCESSING, toStatus: PolicyStatus.CLAIMED, reason: `Payout confirmed, txHash=${txHash}` },
+      }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} CLAIMED transition`, err));
+      this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CLAIMED);
     }
 
     return 'Paid';
@@ -346,17 +392,23 @@ export class ClaimsService {
         ],
       );
       this.logger.log(`Manual claim submitted on-chain: id=${claim.id} txHash=${txHash}`);
-      await this.prisma.claim.update({
-        where: { id: claim.id },
-        data:  { status: ClaimStatus.PROCESSING, txHash },
-      });
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: ClaimStatus.PROCESSING, txHash },
+        }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PENDING, ClaimStatus.PROCESSING, `Submitted on-chain, txHash=${txHash}`),
+      ]);
     } catch (err) {
       this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
       // Use FAILED (not REJECTED) for on-chain errors — REJECTED means trigger condition not met (#119)
-      await this.prisma.claim.update({
-        where: { id: claim.id },
-        data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
-      });
+      await this.prisma.$transaction([
+        this.prisma.claim.update({
+          where: { id: claim.id },
+          data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
+        }),
+        this.auditOp('Claim', claim.id, ClaimStatus.PENDING, ClaimStatus.FAILED, 'On-chain submission failed'),
+      ]);
     }
 
     return claim.id;

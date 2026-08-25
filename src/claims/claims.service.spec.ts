@@ -6,6 +6,7 @@ import { StellarService } from '../stellar/stellar.service';
 import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
+import { StatusEventsService } from '../common/events/status-events.service';
 import { Prisma } from '@prisma/client';
 
 describe('ClaimsService', () => {
@@ -17,6 +18,11 @@ describe('ClaimsService', () => {
 
   const mockOracleService = {
     getLatestReading: jest.fn(),
+  };
+
+  const mockStatusEventsService = {
+    emitPolicyStatusChange: jest.fn(),
+    subscribeToPolicyStatus: jest.fn(),
   };
 
   const mockPolicyService = {
@@ -45,6 +51,9 @@ describe('ClaimsService', () => {
       findUnique: jest.fn(),
       create:     jest.fn(),
       update:     jest.fn(),
+    },
+    auditLog: {
+      create: jest.fn().mockResolvedValue({}),
     },
     $transaction: jest.fn(),
   };
@@ -84,6 +93,7 @@ describe('ClaimsService', () => {
         { provide: PolicyService,  useValue: mockPolicyService },
         { provide: ConfigService,  useValue: mockConfigService },
         { provide: PrismaService,  useValue: mockPrismaService },
+        { provide: StatusEventsService, useValue: mockStatusEventsService },
       ],
     }).compile();
 

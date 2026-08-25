@@ -123,3 +123,20 @@ model AuthChallenge {
 
   @@index([expiresAt])
 }
+
+// #350 — tamper-evident record of every Policy/Claim status transition.
+// Written alongside the status-changing DB write (same $transaction where
+// one is already used) rather than derived after the fact, so it can't
+// silently fall out of sync with the actual status history.
+model AuditLog {
+  id         String   @id @default(uuid())
+  entityType String
+  entityId   String
+  fromStatus String
+  toStatus   String
+  reason     String?
+  occurredAt DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([occurredAt])
+}
