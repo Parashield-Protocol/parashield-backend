@@ -36,6 +36,7 @@ describe("PolicyService.calculatePremium", () => {
     product: {
       findMany: jest.fn(),
       findUnique: jest.fn(),
+      findFirst: jest.fn(),
     },
   };
 
@@ -298,6 +299,9 @@ describe("PolicyService.calculatePremium", () => {
     beforeEach(() => {
       // Pool has infinite capacity by default in createPolicy tests
       jest.spyOn(service, "getPoolAvailableBalance").mockResolvedValue(Infinity);
+      // createPolicy looks products up via getProductById (#336), which
+      // uses findFirst rather than findMany.
+      mockPrismaService.product.findFirst.mockResolvedValue(validCropProduct);
     });
 
     it("should successfully create policy with a valid crop oracleKey", async () => {
@@ -327,6 +331,7 @@ describe("PolicyService.calculatePremium", () => {
 
     it("should throw BadRequestException if product does not exist", async () => {
       mockPrismaService.product.findMany.mockResolvedValue([]);
+      mockPrismaService.product.findFirst.mockResolvedValue(null);
 
       const dto = {
         productId: "nonexistent",
@@ -647,21 +652,21 @@ describe("PolicyService.calculatePremium", () => {
       (service as any).stellar.networkPassphrase =
         "Test SDF Network ; September 2015";
 
-      mockPrismaService.product.findMany.mockResolvedValue([
-        {
-          id: "prod-1",
-          name: "Crop Product",
-          category: "crop",
-          triggerType: "Threshold",
-          threshold: "50.0",
-          comparison: "LessThan",
-          coverageMin: "10.0",
-          coverageMax: "1000.0",
-          premiumRate: 500,
-          maxDuration: 365,
-          status: "Active",
-        },
-      ]);
+      const confirmProduct = {
+        id: "prod-1",
+        name: "Crop Product",
+        category: "crop",
+        triggerType: "Threshold",
+        threshold: "50.0",
+        comparison: "LessThan",
+        coverageMin: "10.0",
+        coverageMax: "1000.0",
+        premiumRate: 500,
+        maxDuration: 365,
+        status: "Active",
+      };
+      mockPrismaService.product.findMany.mockResolvedValue([confirmProduct]);
+      mockPrismaService.product.findFirst.mockResolvedValue(confirmProduct);
       mockPrismaService.policy.create.mockResolvedValue({ id: "policy-123" });
 
       const result = await service.confirmAndCreatePolicy(dto, validWallet);
@@ -828,6 +833,7 @@ describe("PolicyService.calculatePremium", () => {
           "Test SDF Network ; September 2015";
         mockStellarService.simulateInvoke = jest.fn();
         mockPrismaService.product.findMany.mockResolvedValue([product]);
+        mockPrismaService.product.findFirst.mockResolvedValue(product);
       });
 
       it("waits for confirmation instead of inserting blindly when sendTransaction returns DUPLICATE", async () => {

@@ -262,7 +262,7 @@ export class PolicyService {
     const now = new Date(nowSeconds * 1000);
     const endTime = new Date(endTimeSeconds * 1000);
 
-    const product = (await this.getActiveProducts()).find((p) => p.id === dto.productId);
+    const product = await this.getProductById(dto.productId);
     if (!product) {
       throw new BadRequestException(`Product with ID ${dto.productId} not found or inactive`);
     }
