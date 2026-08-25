@@ -16,6 +16,15 @@ export class ProductResponseDto {
   @ApiProperty({ description: 'Trigger threshold in 7-decimal fixed point' })
   threshold: string;
 
+  @ApiProperty({ description: 'Comparison operator (gte, lte, eq)' })
+  comparison: string;
+
+  @ApiProperty({ description: 'Minimum coverage amount in 7-decimal fixed point' })
+  coverageMin: string;
+
+  @ApiProperty({ description: 'Maximum coverage amount in 7-decimal fixed point' })
+  coverageMax: string;
+
   @ApiProperty({ description: 'Premium rate in basis points (500 = 5%)' })
   premiumRate: number;
 

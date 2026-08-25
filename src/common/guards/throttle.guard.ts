@@ -4,6 +4,7 @@ import {
   ExecutionContext,
   HttpException,
   HttpStatus,
+  OnModuleDestroy,
 } from '@nestjs/common';
 import { Request } from 'express';
 
@@ -13,20 +14,28 @@ interface RequestWindow {
 }
 
 @Injectable()
-export class ThrottleGuard implements CanActivate {
+export class ThrottleGuard implements CanActivate, OnModuleDestroy {
   private readonly requests = new Map<string, RequestWindow>();
   private readonly MAX_REQUESTS = 60;
   private readonly TIME_WINDOW_MS = 60_000;
+  private cleanupInterval: NodeJS.Timeout;
 
   constructor() {
-    setInterval(() => {
+    this.cleanupInterval = setInterval(() => {
       const now = Date.now();
       for (const [ip, window] of this.requests) {
         if (now - window.windowStart > this.TIME_WINDOW_MS) {
           this.requests.delete(ip);
         }
       }
-    }, this.TIME_WINDOW_MS).unref();
+    }, this.TIME_WINDOW_MS);
+    this.cleanupInterval.unref();
+  }
+
+  onModuleDestroy() {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
   }
 
   canActivate(context: ExecutionContext): boolean {

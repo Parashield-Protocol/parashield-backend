@@ -283,22 +283,23 @@ export class OracleController {
   }
 
   /**
-   * GET /api/v1/oracle/rainfall — legacy: fetch rainfall via query params
+   * POST /api/v1/oracle/rainfall — fetch rainfall via query params
    *
-   * PUBLIC ENDPOINT: No authentication required.
-   * Legacy endpoint. Use POST /fetch/rainfall for operator-only functionality.
+   * AUTHENTICATED ENDPOINT: Requires operator API key or admin bearer token.
+   * Changed from GET to POST to comply with HTTP semantics since this endpoint
+   * mutates state by persisting data to the database.
    *
    * Rate limited: 60 requests/minute per IP (global ThrottleGuard)
    */
-  @Get("rainfall")
+  @Post("rainfall")
   @UseGuards(OperatorAuthGuard)
   @ApiBearerAuth()
   @ApiSecurity("operator-api-key")
   @Throttle({ default: { limit: 60, ttl: 60000 } })
   @ApiOperation({
-    summary: "Fetch rainfall (legacy query-param endpoint)",
+    summary: "Fetch rainfall (query-param endpoint)",
     description:
-      "Operator-only endpoint. Legacy endpoint for fetching rainfall data. Requires x-api-key header with operator API key or Bearer JWT with admin role. Rate limited to 60 requests/minute per IP.",
+      "Operator-only endpoint. Fetches rainfall data and persists to database. Requires x-api-key header with operator API key or Bearer JWT with admin role. Rate limited to 60 requests/minute per IP.",
   })
   @ApiQuery({ name: "lat", required: true, description: "Latitude" })
   @ApiQuery({ name: "lng", required: true, description: "Longitude" })
