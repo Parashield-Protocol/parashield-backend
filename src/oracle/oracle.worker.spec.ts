@@ -320,4 +320,208 @@ describe('OracleWorker', () => {
       expect(worker.getMetrics().invalid).toBe(1);
     });
   });
+
+  describe('edge cases and error handling', () => {
+    const contractId = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+
+    function buildWorker() {
+      return new OracleWorker(
+        oracleService as unknown as OracleService,
+        configService as unknown as ConfigService,
+        stellarService as unknown as StellarService,
+        prismaService as unknown as PrismaService,
+      );
+    }
+
+    beforeEach(() => {
+      configService.get.mockImplementation((key: string) =>
+        key === 'ORACLE_VERIFIER_CONTRACT' ? contractId : undefined,
+      );
+    });
+
+    it('skips invalid rainfall key format', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'rainfall:invalid-format' },
+      ]);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.fetchRainfallReading).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(0);
+    });
+
+    it('skips invalid flight key format', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'flight:invalid-format' },
+      ]);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.fetchFlightDelayReading).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(0);
+    });
+
+    it('skips unsupported DeFi oracle keys', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'defi:some-key' },
+      ]);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.fetchRainfallReading).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(0);
+    });
+
+    it('skips unknown oracle key types', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'unknown:some-key' },
+      ]);
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.fetchRainfallReading).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(0);
+    });
+
+    it('handles errors when fetching active policies from database', async () => {
+      prismaService.policy.findMany.mockRejectedValue(new Error('db connection failed'));
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(worker.getMetrics()).toEqual({
+        submitted: 0,
+        skipped: 0,
+        duplicates: 0,
+        invalid: 0,
+      });
+    });
+
+    it('uses fallback Kisumu coordinates when no policies are found', async () => {
+      prismaService.policy.findMany.mockResolvedValue([]);
+      oracleService.fetchRainfallReading.mockResolvedValue({
+        dataType: 'weather',
+        key: 'rainfall:-0.0917,34.7679:2026-06',
+        value: '100',
+        confidence: 95,
+        timestamp: 1,
+        source: 'open-meteo',
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.fetchRainfallReading).toHaveBeenCalledWith(-0.0917, 34.7679, 2026, 6);
+      expect(worker.getMetrics().submitted).toBe(1);
+    });
+
+    it('handles error when persisting reading', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'rainfall:1.2345,5.6789:2026-06' },
+      ]);
+      oracleService.fetchRainfallReading.mockResolvedValue({
+        dataType: 'weather',
+        key: 'rainfall:1.2345,5.6789:2026-06',
+        value: '100',
+        confidence: 95,
+        timestamp: 1,
+        source: 'open-meteo',
+      });
+      oracleService.persistReading.mockRejectedValue(new Error('db write failed'));
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(0);
+    });
+
+    it('skips on-chain submission when reading has zero confidence', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'rainfall:1.2345,5.6789:2026-06' },
+      ]);
+      oracleService.fetchRainfallReading.mockResolvedValue({
+        dataType: 'weather',
+        key: 'rainfall:1.2345,5.6789:2026-06',
+        value: '100',
+        confidence: 0,
+        timestamp: 1,
+        source: 'open-meteo',
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().submitted).toBe(0);
+    });
+
+    it('skips on-chain submission when reading is from mock source', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'rainfall:1.2345,5.6789:2026-06' },
+      ]);
+      oracleService.fetchRainfallReading.mockResolvedValue({
+        dataType: 'weather',
+        key: 'rainfall:1.2345,5.6789:2026-06',
+        value: '100',
+        confidence: 95,
+        timestamp: 1,
+        source: 'mock',
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().submitted).toBe(0);
+    });
+
+    it('processes multiple keys concurrently', async () => {
+      const keys = Array.from({ length: 5 }, (_, i) => `rainfall:1.${i},5.${i}:2026-06`);
+      prismaService.policy.findMany.mockResolvedValue(
+        keys.map((key) => ({ oracleKey: key }))
+      );
+      oracleService.fetchRainfallReading.mockResolvedValue({
+        dataType: 'weather',
+        key: 'rainfall:1.0,5.0:2026-06',
+        value: '100',
+        confidence: 95,
+        timestamp: 1,
+        source: 'open-meteo',
+      });
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(oracleService.fetchRainfallReading).toHaveBeenCalledTimes(5);
+      expect(worker.getMetrics().submitted).toBe(5);
+    });
+
+    it('handles error when claiming on-chain submission slot', async () => {
+      prismaService.policy.findMany.mockResolvedValue([
+        { oracleKey: 'rainfall:1.2345,5.6789:2026-06' },
+      ]);
+      oracleService.fetchRainfallReading.mockResolvedValue({
+        dataType: 'weather',
+        key: 'rainfall:1.2345,5.6789:2026-06',
+        value: '100',
+        confidence: 95,
+        timestamp: 1,
+        source: 'open-meteo',
+      });
+      oracleService.claimForOnChainSubmission.mockRejectedValue(
+        new Error('claim failed')
+      );
+
+      const worker = buildWorker();
+      await worker.pollAndSubmit();
+
+      expect(stellarService.invokeContract).not.toHaveBeenCalled();
+      expect(worker.getMetrics().invalid).toBe(0);
+    });
+  });
 });
