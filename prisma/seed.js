@@ -30,28 +30,12 @@ async function main() {
     console.log('Seed: Initial product already exists');
   }
 
-  // 2. Perform data migration: Identify policies with legacy 'rainfall:1' oracleKey and update them
-  const legacyPolicies = await prisma.policy.findMany({
-    where: { oracleKey: 'rainfall:1' },
-  });
-
-  if (legacyPolicies.length > 0) {
-    console.log(`Found ${legacyPolicies.length} policies with legacy 'rainfall:1' oracleKey. Updating them...`);
-    const updateResult = await prisma.policy.updateMany({
-      where: { oracleKey: 'rainfall:1' },
-      data: { oracleKey: 'rainfall:-0.0917,34.7679:2026-06' },
-    });
-    console.log(`Successfully migrated ${updateResult.count} policies.`);
-  } else {
-    console.log('No legacy policies with oracleKey "rainfall:1" found.');
-  }
-
-  console.log('Database seeding & migrations complete.');
+  console.log('Database seeding complete.');
 }
 
 main()
   .catch((e) => {
-    console.error('Error during database seed/migration:', e);
+    console.error('Error during database seed:', e);
     process.exit(1);
   })
   .finally(async () => {
