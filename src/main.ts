@@ -51,9 +51,14 @@ async function bootstrap() {
     process.exit(1);
   }
 
+  // #329 — OperatorAuthGuard falls back to ADMIN_API_KEY when
+  // ORACLE_OPERATOR_API_KEY is unset, so requiring ORACLE_OPERATOR_API_KEY
+  // specifically here caused a startup failure even in a valid
+  // ADMIN_API_KEY-only configuration. Require at least one of the two.
   const operatorApiKey = configService.get<string>('ORACLE_OPERATOR_API_KEY');
-  if (!operatorApiKey) {
-    logger.error('Fatal Error: ORACLE_OPERATOR_API_KEY environment variable is required');
+  const adminApiKey = configService.get<string>('ADMIN_API_KEY');
+  if (!operatorApiKey && !adminApiKey) {
+    logger.error('Fatal Error: ORACLE_OPERATOR_API_KEY or ADMIN_API_KEY environment variable is required');
     process.exit(1);
   }
 
