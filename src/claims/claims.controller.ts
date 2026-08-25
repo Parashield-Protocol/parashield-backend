@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UnauthorizedException, NotFoundException, Throttle } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
@@ -26,6 +26,7 @@ export class ClaimsController {
   @Post()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
   @ApiResponse({
     status: 201,

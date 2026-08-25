@@ -7,6 +7,7 @@ import { PolicyService, ProductSummary } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
+import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
@@ -44,6 +45,7 @@ export class ClaimsService {
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
     private readonly statusEvents: StatusEventsService,
+    private readonly webhooks: WebhooksService,
   ) {}
 
   // #350 — builds an auditLog.create() operation to append to a
@@ -130,6 +132,12 @@ export class ClaimsService {
     await this.auditOp('Policy', policyId, PolicyStatus.ACTIVE, PolicyStatus.PROCESSING, 'autoProcess claim evaluation started')
       .catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} PROCESSING gate`, err));
     this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.PROCESSING);
+    this.webhooks.notifyClaimStatusChange({
+      claimId: claim.id,
+      fromStatus: PolicyStatus.ACTIVE,
+      toStatus: PolicyStatus.PROCESSING,
+      timestamp: Date.now(),
+    });
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
@@ -184,6 +192,12 @@ export class ClaimsService {
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: product not found'),
       ]);
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
+    this.webhooks.notifyClaimStatusChange({
+      claimId: claim.id,
+      fromStatus: ClaimStatus.PROCESSING,
+      toStatus: PolicyStatus.ACTIVE,
+      timestamp: Date.now(),
+    });
       return 'Rejected';
     }
     // #245 — Guard against non-numeric threshold values. Product.threshold is a
@@ -206,11 +220,17 @@ export class ClaimsService {
           where: { id: policyId },
           data:  { status: PolicyStatus.ACTIVE },
         }),
-        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
+this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: non-numeric product threshold'),
       ]);
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
-      return 'Rejected';
+    this.webhooks.notifyClaimStatusChange({
+      claimId: claim.id,
+      fromStatus: ClaimStatus.PROCESSING,
+      toStatus: PolicyStatus.ACTIVE,
+      timestamp: Date.now(),
+    });
+    return 'Rejected';
     }
     const threshold  = BigInt(Math.round(rawThreshold * 1e7));
     const comparison = product.comparison;
@@ -267,8 +287,14 @@ export class ClaimsService {
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'On-chain payout failed'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: on-chain payout failed'),
       ]);
-      this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
-      return 'Rejected';
+this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
+    this.webhooks.notifyClaimStatusChange({
+      claimId: claim.id,
+      fromStatus: ClaimStatus.PROCESSING,
+      toStatus: PolicyStatus.ACTIVE,
+      timestamp: Date.now(),
+    });
+    return 'Rejected';
     }
 
     // #166 — Wrap both DB writes in a single transaction so a crash between them can't
@@ -307,6 +333,12 @@ export class ClaimsService {
         data: { entityType: 'Policy', entityId: policyId, fromStatus: PolicyStatus.PROCESSING, toStatus: PolicyStatus.CLAIMED, reason: `Payout confirmed, txHash=${txHash}` },
       }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} CLAIMED transition`, err));
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CLAIMED);
+    this.webhooks.notifyClaimStatusChange({
+      claimId: claim.id,
+      fromStatus: ClaimStatus.PROCESSING,
+      toStatus: PolicyStatus.CLAIMED,
+      timestamp: Date.now(),
+    });
     }
 
     return 'Paid';

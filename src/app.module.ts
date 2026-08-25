@@ -3,7 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PolicyModule }  from './policy/policy.module';
 import { OracleModule }  from './oracle/oracle.module';
 import { ClaimsModule }  from './claims/claims.module';
@@ -12,6 +12,8 @@ import { PrismaModule }  from './prisma/prisma.module';
 import { AuthModule }    from './auth/auth.module';
 import { HealthModule }  from './health/health.module';
 import { RedisModule }   from './redis/redis.module';
+import { VersioningInterceptor } from './common/interceptors/versioning.interceptor';
+import { WebhooksModule } from './common/webhooks/webhooks.module';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -91,11 +93,16 @@ function validateConfig(config: Record<string, unknown>) {
     OracleModule,
     ClaimsModule,
     HealthModule,
+    WebhooksModule,
   ],
   providers: [
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: VersioningInterceptor,
     },
   ],
 })

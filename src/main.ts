@@ -77,6 +77,15 @@ async function bootstrap() {
     .setTitle('ParaShield API')
     .setDescription('Decentralized parametric insurance protocol on Stellar Soroban')
     .setVersion('1.0')
+    .addApiKey(
+      {
+        type: 'apiKey',
+        in: 'header',
+        name: 'x-api-version',
+        description: 'API version (defaults to v1)',
+      },
+      'x-api-version',
+    )
     .addBearerAuth()
     .addApiKey(
       {

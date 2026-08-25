@@ -49,12 +49,14 @@ export class PolicyController {
     private readonly statusEvents: StatusEventsService,
   ) {}
 
-  /** GET /api/v1/products — list all active insurance products */
+  /** GET /api/v1/products — list all active insurance products with pagination */
   @Get('products')
-  @ApiOperation({ summary: 'List all active insurance products' })
+  @ApiOperation({ summary: 'List all active insurance products with pagination' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiResponse({
     status: 200,
-    description: 'Returns list of active products',
+    description: 'Returns paginated products — { success, data, total, page, limit }',
     schema: {
       allOf: [
         { $ref: getSchemaPath(ResponseDto) },
@@ -66,9 +68,14 @@ export class PolicyController {
       ],
     },
   })
-  async getProducts() {
-    const products = await this.policy.getActiveProducts();
-    return { success: true, data: products };
+  async getProducts(
+    @Query('page') page: string = '1',
+    @Query('limit') limit: string = '20',
+  ) {
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+    const result = await this.policy.getActiveProducts(pageNum, limitNum);
+    return { success: true, ...result };
   }
 
   /** GET /api/v1/policies/me?page=&limit= — get paginated policies for the authenticated wallet */

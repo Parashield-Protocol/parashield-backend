@@ -8,7 +8,7 @@ import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { ConfigService } from '@nestjs/config';
 import { transition } from './policy-status.machine';
 import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
-import { StatusEventsService } from '../common/events/status-events.service';
+import { WebhooksService } from '../common/events/webhooks.service';
 
 export interface ProductSummary {
   id:           string;
@@ -60,6 +60,7 @@ export class PolicyService {
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
     private readonly statusEvents: StatusEventsService,
+    private readonly webhooks: WebhooksService,
   ) {}
 
   /**
@@ -521,12 +522,25 @@ export class PolicyService {
     };
   }
 
-  async getActiveProducts(): Promise<ProductSummary[]> {
-    this.logger.log('get_active_products called');
-    const dbProducts = await this.prisma.product.findMany({
-      where: { status: 'ACTIVE' },
-    });
-    return dbProducts.map((product) => ({
+  async getActiveProducts(
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: ProductSummary[]; total: number; page: number; limit: number }> {
+    const take = Math.min(limit, 100);
+    const skip = (page - 1) * take;
+    this.logger.log(`get_active_products: page=${page} limit=${limit}`);
+
+    const [dbProducts, total] = await this.prisma.$transaction([
+      this.prisma.product.findMany({
+        where: { status: 'ACTIVE' },
+        take,
+        skip,
+        orderBy: [{ name: 'asc' }],
+      }),
+      this.prisma.product.count({ where: { status: 'ACTIVE' } }),
+    ]);
+
+    const data = dbProducts.map((product) => ({
       id:          product.id,
       name:        product.name,
       category:    product.category,
@@ -539,6 +553,9 @@ export class PolicyService {
       maxDuration: product.maxDuration,
       status:      product.status,
     }));
+
+    this.logger.log(`get_active_products: ${data.length}/${total} products (page ${page})`);
+    return { data, total, page, limit: take };
   }
 
   async getPolicy(policyId: string): Promise<PolicySummary | null> {
@@ -680,6 +697,12 @@ export class PolicyService {
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
     this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CANCELLED);
+    this.webhooks.notifyPolicyStatusChange({
+      policyId,
+      fromStatus: PolicyStatus.ACTIVE,
+      toStatus: PolicyStatus.CANCELLED,
+      timestamp: Date.now(),
+    });
 
     const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
     return {
