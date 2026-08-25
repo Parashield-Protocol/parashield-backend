@@ -1,70 +1,70 @@
-import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus, OnModuleDestroy } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
+import Redis from 'ioredis';
 import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
 
-interface FailureRecord {
-  count: number;
-  resetAt: number;
-}
-
 const RATE_LIMIT_WINDOW_MS = 60_000;  // 1 minute
 const RATE_LIMIT_MAX_FAILURES = 5;
+const FAILURE_KEY_PREFIX = 'operator-auth-failures:';
 
 @Injectable()
-export class OperatorAuthGuard implements CanActivate {
-  private readonly failureMap = new Map<string, FailureRecord>();
+export class OperatorAuthGuard implements CanActivate, OnModuleDestroy {
+  // #327 — failure tracking moved to Redis so brute-force counters survive
+  // a server restart/redeploy and are shared across instances, instead of
+  // an in-process Map that resets (silently re-opening the rate-limit
+  // window) every time the process restarts.
+  private readonly redis: Redis;
 
   constructor(
     private readonly config: ConfigService,
     private readonly jwtService: JwtService,
-  ) {}
+  ) {
+    this.redis = new Redis(this.config.get<string>('REDIS_URL') || 'redis://localhost:6379');
+  }
 
-  canActivate(context: ExecutionContext): boolean {
+  onModuleDestroy(): void {
+    this.redis.disconnect();
+  }
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const ip = this.getClientIp(request);
 
-    this.checkRateLimit(ip);
+    await this.checkRateLimit(ip);
 
     if (this.hasValidApiKey(request)) {
-      this.resetFailures(ip);
+      await this.resetFailures(ip);
       return true;
     }
 
     const token = this.getOptionalBearerToken(request);
     if (!token) {
-      this.recordFailure(ip);
+      await this.recordFailure(ip);
       throw new UnauthorizedException('Operator API key or admin bearer token required');
     }
 
     try {
       const payload = this.jwtService.verify(token);
       if (payload.admin !== true && payload.role !== 'admin') {
-        this.recordFailure(ip);
+        await this.recordFailure(ip);
         throw new UnauthorizedException('Admin bearer token required');
       }
-      this.resetFailures(ip);
+      await this.resetFailures(ip);
       request.wallet = payload.walletAddress;
       request.user = payload;
       return true;
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err;
-      this.recordFailure(ip);
+      await this.recordFailure(ip);
       throw new UnauthorizedException('Invalid bearer token');
     }
   }
 
-  private checkRateLimit(ip: string): void {
-    const record = this.failureMap.get(ip);
-    if (!record) return;
-
-    if (Date.now() > record.resetAt) {
-      this.failureMap.delete(ip);
-      return;
-    }
-
-    if (record.count >= RATE_LIMIT_MAX_FAILURES) {
+  private async checkRateLimit(ip: string): Promise<void> {
+    const count = await this.redis.get(FAILURE_KEY_PREFIX + ip);
+    if (count !== null && Number(count) >= RATE_LIMIT_MAX_FAILURES) {
       throw new HttpException(
         'Too many failed authentication attempts. Try again in 1 minute.',
         HttpStatus.TOO_MANY_REQUESTS,
@@ -72,19 +72,16 @@ export class OperatorAuthGuard implements CanActivate {
     }
   }
 
-  private recordFailure(ip: string): void {
-    const now = Date.now();
-    const existing = this.failureMap.get(ip);
-
-    if (!existing || now > existing.resetAt) {
-      this.failureMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
-    } else {
-      existing.count += 1;
+  private async recordFailure(ip: string): Promise<void> {
+    const key = FAILURE_KEY_PREFIX + ip;
+    const count = await this.redis.incr(key);
+    if (count === 1) {
+      await this.redis.pexpire(key, RATE_LIMIT_WINDOW_MS);
     }
   }
 
-  private resetFailures(ip: string): void {
-    this.failureMap.delete(ip);
+  private async resetFailures(ip: string): Promise<void> {
+    await this.redis.del(FAILURE_KEY_PREFIX + ip);
   }
 
   private getClientIp(request: AuthenticatedRequest): string {
