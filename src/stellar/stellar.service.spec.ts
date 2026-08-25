@@ -635,6 +635,26 @@ describe("StellarService", () => {
       expect(service.formatXdr(null)).toBe("");
       expect(service.formatXdr(undefined)).toBe("");
     });
+
+    it("#366 — formats numbers as strings", () => {
+      expect(service.formatXdr(42)).toBe("42");
+      expect(service.formatXdr(0)).toBe("0");
+      expect(service.formatXdr(-123)).toBe("-123");
+      expect(service.formatXdr(3.14)).toBe("3.14");
+    });
+
+    it("#366 — formats booleans as strings", () => {
+      expect(service.formatXdr(true)).toBe("true");
+      expect(service.formatXdr(false)).toBe("false");
+    });
+
+    it("#366 — handles circular references gracefully", () => {
+      const circularObj: any = { key: "value" };
+      circularObj.self = circularObj;
+
+      const result = service.formatXdr(circularObj);
+      expect(typeof result).toBe("string");
+    });
   });
 
   describe("getAccountBalance", () => {
