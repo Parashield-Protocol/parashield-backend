@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
@@ -19,6 +19,15 @@ import { RedisModule }   from './redis/redis.module';
  */
 function validateConfig(config: Record<string, unknown>) {
   const errors: string[] = [];
+  const logger = new Logger('ConfigValidation');
+
+  // #343 — not a hard requirement (a localhost fallback is fine for local
+  // dev), but the ThrottlerModule storage below falls back to it silently,
+  // which is easy to miss in a real deployment that meant to point at a
+  // shared Redis instance.
+  if (!config['REDIS_URL']) {
+    logger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
+  }
 
   if (!config['JWT_SECRET']) {
     errors.push('JWT_SECRET is required');
