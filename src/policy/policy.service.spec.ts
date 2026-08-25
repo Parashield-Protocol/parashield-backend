@@ -929,6 +929,24 @@ describe("PolicyService.calculatePremium", () => {
         });
       });
 
+      it("rejects when waitForTransaction throws an exception (e.g., timeout)", async () => {
+        mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
+          status: "DUPLICATE",
+          hash: "dup-hash-timeout",
+        });
+        (mockStellarService as any).waitForTransaction = jest
+          .fn()
+          .mockRejectedValue(new Error("RPC timeout"));
+
+        await expect(
+          service.confirmAndCreatePolicy(
+            dtoFor(buildTestTxXdr({})),
+            validWallet,
+          ),
+        ).rejects.toThrow("RPC timeout");
+        expect(mockPrismaService.policy.create).not.toHaveBeenCalled();
+      });
+
       it("propagates the conflict when the duplicate is not a txHash collision", async () => {
         mockStellarService.simulateAssembleAndSend = jest.fn().mockResolvedValue({
           status: "SUCCESS",
