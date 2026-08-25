@@ -13,15 +13,16 @@ export interface JwtPayload {
 /**
  * JwtService — issues and verifies JWTs tied to Stellar wallet addresses.
  *
- * Tokens are signed with JWT_SECRET from the environment and expire in 7 days.
- * The token payload contains the wallet address, which is used to identify
- * the authenticated user on protected endpoints.
+ * Tokens are signed with JWT_SECRET from the environment and expire in 1 hour.
+ * For a financial application, short-lived tokens reduce the window of
+ * unauthorized access if a token is compromised. Consider implementing
+ * refresh tokens for longer sessions.
  */
 @Injectable()
 export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
-  private readonly tokenExpiry = "7d";
+  private readonly tokenExpiry = "1h";
 
   constructor(private readonly config: ConfigService) {
     const secret = config.get<string>("JWT_SECRET");
@@ -38,13 +39,13 @@ export class JwtService {
 
   /**
    * Sign a JWT for the given wallet address.
-   * Token expires in 7 days.
+   * Token expires in 1 hour.
    */
   sign(walletAddress: string): string {
     const payload: JwtPayload = { walletAddress };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
-      expiresIn: '7d',
+      expiresIn: '1h',
     };
     const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
@@ -54,13 +55,13 @@ export class JwtService {
   /**
    * Sign a JWT for the given wallet address with explicit role and admin flag.
    * Useful for issuing tokens to privileged users (e.g. operators, admins).
-   * Token expires in 7 days.
+   * Token expires in 1 hour.
    */
   signWithRole(walletAddress: string, role: string, admin = false): string {
     const payload: JwtPayload = { walletAddress, role, admin };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
-      expiresIn: '7d',
+      expiresIn: '1h',
     };
     const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);

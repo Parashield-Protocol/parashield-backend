@@ -144,6 +144,7 @@ export class PolicyService {
    * POLICY_ENGINE_CONTRACT account, which holds the pooled collateral.
    * Returns the balance as a number (in XLM-equivalent units, 7-decimal fixed point).
    * Returns Infinity when the contract is not configured so tests are unaffected.
+   * Throws an error when RPC fails to prevent invalid liquidity validation.
    */
   async getPoolAvailableBalance(): Promise<number> {
     const usdcContract = this.config.get<string>('USDC_CONTRACT');
@@ -159,22 +160,22 @@ export class PolicyService {
       const simResult = await this.stellar.simulateInvoke(usdcContract, 'balance', [engineAddress]);
 
       if (StellarRpc.Api.isSimulationError(simResult)) {
-        this.logger.warn(`Pool balance simulation error: ${simResult.error}`);
-        return Infinity;
+        this.logger.error(`Pool balance simulation error: ${simResult.error}`);
+        throw new Error(`Failed to fetch pool balance: simulation error - ${simResult.error}`);
       }
 
       const raw = (simResult as StellarRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
       if (!raw) {
-        this.logger.warn('Pool balance simulation returned no result');
-        return Infinity;
+        this.logger.error('Pool balance simulation returned no result');
+        throw new Error('Failed to fetch pool balance: no result returned');
       }
 
       const balance = Number(scValToNative(raw));
       this.logger.log(`Pool available balance: ${balance} (7-decimal fixed point)`);
       return balance;
     } catch (err) {
-      this.logger.warn(`Failed to fetch pool balance: ${(err as Error).message}`);
-      return Infinity;
+      this.logger.error(`Failed to fetch pool balance: ${(err as Error).message}`);
+      throw new Error(`Failed to fetch pool balance: ${(err as Error).message}`);
     }
   }
 

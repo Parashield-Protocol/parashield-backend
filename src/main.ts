@@ -52,8 +52,10 @@ async function bootstrap() {
   }
 
   const operatorApiKey = configService.get<string>('ORACLE_OPERATOR_API_KEY');
-  if (!operatorApiKey) {
-    logger.error('Fatal Error: ORACLE_OPERATOR_API_KEY environment variable is required');
+  const adminApiKey = configService.get<string>('ADMIN_API_KEY');
+  
+  if (!operatorApiKey && !adminApiKey) {
+    logger.error('Fatal Error: At least one of ORACLE_OPERATOR_API_KEY or ADMIN_API_KEY environment variables is required');
     process.exit(1);
   }
 

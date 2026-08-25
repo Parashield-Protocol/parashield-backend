@@ -1,8 +1,9 @@
-import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
+import Redis from 'ioredis';
 
 interface FailureRecord {
   count: number;
@@ -11,56 +12,60 @@ interface FailureRecord {
 
 const RATE_LIMIT_WINDOW_MS = 60_000;  // 1 minute
 const RATE_LIMIT_MAX_FAILURES = 5;
+const REDIS_KEY_PREFIX = 'auth:operator:failures:';
 
 @Injectable()
 export class OperatorAuthGuard implements CanActivate {
-  private readonly failureMap = new Map<string, FailureRecord>();
-
   constructor(
     private readonly config: ConfigService,
     private readonly jwtService: JwtService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
-  canActivate(context: ExecutionContext): boolean {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<AuthenticatedRequest>();
     const ip = this.getClientIp(request);
 
-    this.checkRateLimit(ip);
+    await this.checkRateLimit(ip);
 
     if (this.hasValidApiKey(request)) {
-      this.resetFailures(ip);
+      await this.resetFailures(ip);
       return true;
     }
 
     const token = this.getOptionalBearerToken(request);
     if (!token) {
-      this.recordFailure(ip);
+      await this.recordFailure(ip);
       throw new UnauthorizedException('Operator API key or admin bearer token required');
     }
 
     try {
       const payload = this.jwtService.verify(token);
       if (payload.admin !== true && payload.role !== 'admin') {
-        this.recordFailure(ip);
+        await this.recordFailure(ip);
         throw new UnauthorizedException('Admin bearer token required');
       }
-      this.resetFailures(ip);
+      await this.resetFailures(ip);
       request.wallet = payload.walletAddress;
       request.user = payload;
       return true;
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err;
-      this.recordFailure(ip);
+      await this.recordFailure(ip);
       throw new UnauthorizedException('Invalid bearer token');
     }
   }
 
-  private checkRateLimit(ip: string): void {
-    const record = this.failureMap.get(ip);
-    if (!record) return;
+  private async checkRateLimit(ip: string): Promise<void> {
+    const key = `${REDIS_KEY_PREFIX}${ip}`;
+    const recordStr = await this.redis.get(key);
+    
+    if (!recordStr) return;
 
+    const record: FailureRecord = JSON.parse(recordStr);
+    
     if (Date.now() > record.resetAt) {
-      this.failureMap.delete(ip);
+      await this.redis.del(key);
       return;
     }
 
@@ -72,19 +77,30 @@ export class OperatorAuthGuard implements CanActivate {
     }
   }
 
-  private recordFailure(ip: string): void {
+  private async recordFailure(ip: string): Promise<void> {
+    const key = `${REDIS_KEY_PREFIX}${ip}`;
     const now = Date.now();
-    const existing = this.failureMap.get(ip);
+    const recordStr = await this.redis.get(key);
 
-    if (!existing || now > existing.resetAt) {
-      this.failureMap.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+    if (!recordStr) {
+      const newRecord: FailureRecord = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
+      await this.redis.set(key, JSON.stringify(newRecord), 'PX', RATE_LIMIT_WINDOW_MS);
     } else {
-      existing.count += 1;
+      const record: FailureRecord = JSON.parse(recordStr);
+      if (now > record.resetAt) {
+        const newRecord: FailureRecord = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
+        await this.redis.set(key, JSON.stringify(newRecord), 'PX', RATE_LIMIT_WINDOW_MS);
+      } else {
+        record.count += 1;
+        const ttl = record.resetAt - now;
+        await this.redis.set(key, JSON.stringify(record), 'PX', Math.max(ttl, 1000));
+      }
     }
   }
 
-  private resetFailures(ip: string): void {
-    this.failureMap.delete(ip);
+  private async resetFailures(ip: string): Promise<void> {
+    const key = `${REDIS_KEY_PREFIX}${ip}`;
+    await this.redis.del(key);
   }
 
   private getClientIp(request: AuthenticatedRequest): string {

@@ -11,6 +11,7 @@ import { StellarModule } from './stellar/stellar.module';
 import { PrismaModule }  from './prisma/prisma.module';
 import { AuthModule }    from './auth/auth.module';
 import { HealthModule }  from './health/health.module';
+import { RedisModule }   from './redis/redis.module';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -73,6 +74,7 @@ function validateConfig(config: Record<string, unknown>) {
         storage: new ThrottlerStorageRedisService(config.get<string>('REDIS_URL') || 'redis://localhost:6379'),
       }),
     }),
+    RedisModule,
     PrismaModule,
     StellarModule,
     AuthModule,
