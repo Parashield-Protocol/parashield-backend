@@ -20,6 +20,10 @@ export interface ClaimSummary {
   status:         string;
   submittedAt:    number;
   processedAt:    number | null;
+  // #344 — both columns exist on the Claim model but were dropped when
+  // mapping to this summary shape, so the API response silently lost them.
+  txHash:         string | null;
+  createdAt:      number;
 }
 
 /**
@@ -385,6 +389,8 @@ export class ClaimsService {
       processedAt:    claim.processedAt
         ? Math.floor(claim.processedAt.getTime() / 1000)
         : null,
+      txHash:         claim.txHash,
+      createdAt:      Math.floor(claim.createdAt.getTime() / 1000),
     }));
 
     return {
@@ -412,6 +418,8 @@ export class ClaimsService {
       processedAt:    claim.processedAt
         ? Math.floor(claim.processedAt.getTime() / 1000)
         : null,
+      txHash:         claim.txHash,
+      createdAt:      Math.floor(claim.createdAt.getTime() / 1000),
     };
   }
 }

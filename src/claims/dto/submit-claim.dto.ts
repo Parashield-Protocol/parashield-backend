@@ -50,4 +50,7 @@ export class ClaimResponseDto {
 
   @ApiProperty({ description: 'Stellar transaction hash for payout', nullable: true })
   txHash: string | null;
+
+  @ApiProperty({ description: 'Claim record creation timestamp (Unix seconds)' })
+  createdAt: number;
 }
