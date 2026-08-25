@@ -13,7 +13,12 @@ export interface JwtPayload {
 /**
  * JwtService — issues and verifies JWTs tied to Stellar wallet addresses.
  *
- * Tokens are signed with JWT_SECRET from the environment and expire in 7 days.
+ * Tokens are signed with JWT_SECRET from the environment and expire in 24
+ * hours (#328) -- previously 7 days, which meant a compromised token granted
+ * a full week of unauthorized access on a financial application. A full
+ * refresh-token mechanism (so a 24h access-token lifetime doesn't force
+ * re-signing every day) is a larger follow-up beyond this fix; for now a
+ * shorter, non-renewable window is a strict improvement over 7 days.
  * The token payload contains the wallet address, which is used to identify
  * the authenticated user on protected endpoints.
  */
@@ -21,7 +26,7 @@ export interface JwtPayload {
 export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
-  private readonly tokenExpiry = "7d";
+  private readonly tokenExpiry = "24h";
 
   constructor(private readonly config: ConfigService) {
     const secret = config.get<string>("JWT_SECRET");
@@ -38,13 +43,13 @@ export class JwtService {
 
   /**
    * Sign a JWT for the given wallet address.
-   * Token expires in 7 days.
+   * Token expires in 24 hours (#328).
    */
   sign(walletAddress: string): string {
     const payload: JwtPayload = { walletAddress };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
-      expiresIn: '7d',
+      expiresIn: this.tokenExpiry,
     };
     const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
@@ -54,13 +59,13 @@ export class JwtService {
   /**
    * Sign a JWT for the given wallet address with explicit role and admin flag.
    * Useful for issuing tokens to privileged users (e.g. operators, admins).
-   * Token expires in 7 days.
+   * Token expires in 24 hours (#328).
    */
   signWithRole(walletAddress: string, role: string, admin = false): string {
     const payload: JwtPayload = { walletAddress, role, admin };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
-      expiresIn: '7d',
+      expiresIn: this.tokenExpiry,
     };
     const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);

@@ -40,7 +40,7 @@ describe('JwtService', () => {
     });
 
     it('should expose the configured token expiry', () => {
-      expect(service.expiresIn).toBe('7d');
+      expect(service.expiresIn).toBe('24h');
     });
 
     it('should throw UnauthorizedException for an invalid token', () => {
