@@ -413,11 +413,16 @@ export class StellarService {
   /**
    * Get the native XLM balance for an account.
    * Used for keeper health checks to ensure the keeper has sufficient funds.
+   * @param timeoutMs  Maximum time to wait in milliseconds (default 10s).
+   *                   Health checks (#338) pass a much shorter timeout so a
+   *                   slow Horizon response doesn't block a load balancer's
+   *                   health probe long enough to trigger a pod restart.
    */
-  async getAccountBalance(publicKey: string): Promise<string> {
+  async getAccountBalance(publicKey: string, timeoutMs?: number): Promise<string> {
     const account = await this.withTimeout(
       this.horizon.loadAccount(publicKey),
       "loadAccount",
+      timeoutMs,
     );
     const nativeBalance = account.balances.find(
       (b): b is Horizon.HorizonApi.BalanceLineNative =>

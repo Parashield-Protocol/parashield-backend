@@ -9,6 +9,11 @@ import { StellarService } from '../stellar/stellar.service';
 // KEEPER_MIN_BALANCE_XLM for deployments with different fee/volume profiles.
 const DEFAULT_KEEPER_MIN_BALANCE_XLM = 5;
 
+// #338 — health checks are polled by load balancers/orchestrators expecting
+// a response within 1-2s; the default 10s RPC timeout used elsewhere risked
+// premature pod restarts whenever Horizon was merely slow, not down.
+const HEALTH_CHECK_RPC_TIMEOUT_MS = 3000;
+
 @ApiTags('health')
 @Controller('health')
 export class HealthController {
@@ -47,7 +52,10 @@ export class HealthController {
     }
 
     try {
-      keeperBalanceXlm = await this.stellar.getAccountBalance(this.stellar.keeperKeypair.publicKey());
+      keeperBalanceXlm = await this.stellar.getAccountBalance(
+        this.stellar.keeperKeypair.publicKey(),
+        HEALTH_CHECK_RPC_TIMEOUT_MS,
+      );
 
       // #191 — RPC reachability alone isn't enough: a keeper account
       // drained of XLM would still answer this call successfully (with a
