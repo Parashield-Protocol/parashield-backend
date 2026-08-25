@@ -60,12 +60,11 @@ export class PolicyController {
     return { success: true, data: products };
   }
 
-  /** GET /api/v1/policies/me?wallet=<address>&page=&limit= — get paginated policies for a wallet */
+  /** GET /api/v1/policies/me?page=&limit= — get paginated policies for the authenticated wallet */
   @Get('policies/me')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get paginated policies for a wallet address' })
-  @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
+  @ApiOperation({ summary: 'Get paginated policies for the authenticated wallet' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiResponse({
@@ -83,22 +82,20 @@ export class PolicyController {
     },
   })
   async getMyPolicies(
-    @Query('wallet') wallet: string,
     @Query('page') page: string = '1',
     @Query('limit') limit: string = '20',
     @Req() req: AuthenticatedRequest,
   ) {
+    // #345 — wallet used to come from a client-supplied query param, checked
+    // only for authorization against the JWT wallet; the JWT wallet was
+    // always the one actually used, making the param redundant and confusing.
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
-      throw new BadRequestException('wallet query param required');
-    }
-    const targetWallet = wallet || authedWallet;
-    if (targetWallet !== authedWallet) {
-      throw new ForbiddenException('Cannot fetch policies for another wallet');
+      throw new BadRequestException('Not authenticated');
     }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
-    const result = await this.policy.getUserPolicies(targetWallet, pageNum, limitNum);
+    const result = await this.policy.getUserPolicies(authedWallet, pageNum, limitNum);
     return { success: true, ...result };
   }
 

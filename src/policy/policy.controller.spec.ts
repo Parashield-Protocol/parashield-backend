@@ -56,7 +56,7 @@ describe("PolicyController", () => {
     it("should accept valid page and limit parameters", async () => {
       mockPolicyService.getUserPolicies.mockResolvedValue(mockPoliciesResponse);
 
-      const result = await controller.getMyPolicies(wallet, "2", "50", mockReq);
+      const result = await controller.getMyPolicies("2", "50", mockReq);
 
       expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
         wallet,
@@ -72,7 +72,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "0", "20", mockReq);
+        await controller.getMyPolicies("0", "20", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -86,7 +86,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "-5", "20", mockReq);
+        await controller.getMyPolicies("-5", "20", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -100,7 +100,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "abc", "20", mockReq);
+        await controller.getMyPolicies("abc", "20", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -114,7 +114,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "2.7", "20", mockReq);
+        await controller.getMyPolicies("2.7", "20", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -131,7 +131,7 @@ describe("PolicyController", () => {
           limit: 1,
         });
 
-        await controller.getMyPolicies(wallet, "1", "-5", mockReq);
+        await controller.getMyPolicies("1", "-5", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -145,7 +145,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "1", "0", mockReq);
+        await controller.getMyPolicies("1", "0", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -160,7 +160,7 @@ describe("PolicyController", () => {
           limit: 100,
         });
 
-        await controller.getMyPolicies(wallet, "1", "999999", mockReq);
+        await controller.getMyPolicies("1", "999999", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -175,7 +175,7 @@ describe("PolicyController", () => {
           limit: 100,
         });
 
-        await controller.getMyPolicies(wallet, "1", "500", mockReq);
+        await controller.getMyPolicies("1", "500", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -189,7 +189,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "1", "xyz", mockReq);
+        await controller.getMyPolicies("1", "xyz", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -203,7 +203,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "1", "25.9", mockReq);
+        await controller.getMyPolicies("1", "25.9", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -220,7 +220,6 @@ describe("PolicyController", () => {
         );
 
         await controller.getMyPolicies(
-          wallet,
           undefined as any,
           undefined as any,
           mockReq,
@@ -238,7 +237,7 @@ describe("PolicyController", () => {
           mockPoliciesResponse,
         );
 
-        await controller.getMyPolicies(wallet, "", "", mockReq);
+        await controller.getMyPolicies("", "", mockReq);
 
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
           wallet,
@@ -249,15 +248,6 @@ describe("PolicyController", () => {
     });
 
     describe("wallet authorization", () => {
-      it("should throw ForbiddenException when trying to access another wallet policies", async () => {
-        const otherWallet =
-          "GBACDEFGHIJKLMNOPQRSTUVWXYZ1234567890ABCDEFGHIJKLMNOPQRSTUV";
-
-        await expect(
-          controller.getMyPolicies(otherWallet, "1", "20", mockReq),
-        ).rejects.toThrow(ForbiddenException);
-      });
-
       it("should throw BadRequestException when no wallet is available in request", async () => {
         const reqNoWallet = {
           user: { walletAddress: null },
@@ -265,7 +255,7 @@ describe("PolicyController", () => {
         } as AuthenticatedRequest;
 
         await expect(
-          controller.getMyPolicies(wallet, "1", "20", reqNoWallet),
+          controller.getMyPolicies("1", "20", reqNoWallet),
         ).rejects.toThrow(BadRequestException);
       });
     });
@@ -294,7 +284,6 @@ describe("PolicyController", () => {
         mockPolicyService.getUserPolicies.mockResolvedValue(response);
 
         const result = await controller.getMyPolicies(
-          wallet,
           "1",
           "20",
           mockReq,
@@ -315,7 +304,7 @@ describe("PolicyController", () => {
           page: 999999999,
         });
 
-        await controller.getMyPolicies(wallet, "999999999", "1", mockReq);
+        await controller.getMyPolicies("999999999", "1", mockReq);
 
         // Service should still receive the page number and handle it safely
         // (the service would return skip=(page-1)*limit which is safe)
@@ -332,7 +321,7 @@ describe("PolicyController", () => {
           limit: 100,
         });
 
-        await controller.getMyPolicies(wallet, "1", "99999999999999", mockReq);
+        await controller.getMyPolicies("1", "99999999999999", mockReq);
 
         // Should cap at 100
         expect(mockPolicyService.getUserPolicies).toHaveBeenCalledWith(
@@ -350,7 +339,6 @@ describe("PolicyController", () => {
         });
 
         await controller.getMyPolicies(
-          wallet,
           "-999999",
           "999999999999999",
           mockReq,
