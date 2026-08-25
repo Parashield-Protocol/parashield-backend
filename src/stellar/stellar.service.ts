@@ -29,6 +29,21 @@ export class SimulationFailedError extends Error {
 }
 
 /**
+ * #370 — Stellar RPC returns HTTP 429 when a caller exceeds its rate limit.
+ * That error was previously retried with the same short backoff as a
+ * transient network/timeout error, which just re-triggers the same 429
+ * almost immediately. Detect it (status code or message shape) so it can
+ * get a longer backoff instead.
+ */
+function isRateLimitError(err: unknown): boolean {
+  const status = (err as { response?: { status?: number }; status?: number })?.response?.status
+    ?? (err as { status?: number })?.status;
+  if (status === 429) return true;
+  const message = err instanceof Error ? err.message : String(err);
+  return /\b429\b|rate limit|too many requests/i.test(message);
+}
+
+/**
  * StellarService — thin wrapper over the Stellar SDK for Soroban contract calls.
  *
  * Responsibilities:
@@ -209,8 +224,11 @@ export class StellarService {
           throw err;
         }
         if (attempt < MAX_ATTEMPTS) {
-          // Exponential backoff: 2s, 4s, 8s...
-          const backoffMs = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+          // #370 — a 429 needs longer backoff than a plain timeout/network
+          // blip, or the immediate retry just hits the same rate limit again.
+          const backoffMs = isRateLimitError(err)
+            ? Math.min(5000 * Math.pow(2, attempt - 1), 30000) // 5s, 10s, 20s...
+            : Math.min(2000 * Math.pow(2, attempt - 1), 10000); // 2s, 4s, 8s...
           this.logger.warn(`Retrying in ${backoffMs}ms (attempt ${attempt}/${MAX_ATTEMPTS})`);
           await this.sleep(backoffMs);
         }

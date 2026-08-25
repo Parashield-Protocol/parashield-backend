@@ -124,6 +124,10 @@ export class OracleWorker {
       let reading: OracleReading | null = null;
 
       if (key.startsWith('rainfall:')) {
+        // #368 — validate the full key shape before parsing any numeric
+        // component; a malformed key (bad lat/lng or non-numeric
+        // year/month) fails the regex and is skipped here rather than
+        // reaching parseFloat/parseInt with an unvalidated substring.
         const match = key.match(/^rainfall:(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?):(\d{4})-(\d{2})$/);
         if (!match) {
           this.logger.warn(`Invalid rainfall key format: ${key} — skipping`);

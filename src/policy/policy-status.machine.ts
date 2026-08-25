@@ -14,14 +14,17 @@ import { BadRequestException } from '@nestjs/common';
  *   ACTIVE → PROCESSING     (#164 — atomic claims-processing gate acquired)
  *   PROCESSING → CLAIMED    (#166 — payout completed)
  *   PROCESSING → ACTIVE     (#165 — payout failed, gate released for retry)
+ *   ACTIVE → ERROR          (#369 — unrecoverable failure while ACTIVE)
+ *   PROCESSING → ERROR      (#369 — unrecoverable failure mid-processing)
  *   All terminal states → (no transitions allowed)
  */
 export const VALID_TRANSITIONS: Record<string, string[]> = {
-  ACTIVE:     ['EXPIRED', 'CANCELLED', 'CLAIMED', 'PROCESSING'],
-  PROCESSING: ['CLAIMED', 'ACTIVE'],
+  ACTIVE:     ['EXPIRED', 'CANCELLED', 'CLAIMED', 'PROCESSING', 'ERROR'],
+  PROCESSING: ['CLAIMED', 'ACTIVE', 'ERROR'],
   EXPIRED:    [],
   CANCELLED:  [],
   CLAIMED:    [],
+  ERROR:      [],
 };
 
 /**

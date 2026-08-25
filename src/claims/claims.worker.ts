@@ -95,9 +95,12 @@ export class ClaimsWorker {
           }
 
           if (result !== 'Paid' && result !== 'PendingFinalPeriod') {
-            // #260 — guard on the expected status so a concurrent status-writing
-            // path (a cancel endpoint, admin override, overlapping cron ticks)
-            // can't have this blindly overwrite whatever status is actually there.
+            // #260/#367 — guard on the expected status (captured at query time,
+            // above) so a concurrent status-writing path (a cancel endpoint,
+            // admin override, overlapping cron ticks, or ClaimsService's own
+            // PROCESSING gate) can't have this blindly overwrite whatever
+            // status is actually there. If it changed since the query,
+            // updateMany's WHERE matches nothing and count is 0 below.
             const { count } = await this.prisma.policy.updateMany({
               where: { id: policy.id, status: policy.status },
               data:  { status: transition(policy.status, 'EXPIRED') as PolicyStatus },
