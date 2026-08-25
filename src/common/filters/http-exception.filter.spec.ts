@@ -32,8 +32,9 @@ describe('GlobalExceptionFilter', () => {
 
     expect(res.status).toHaveBeenCalledWith(404);
     expect(json).toHaveBeenCalledWith({
+      success: false,
+      error: 'Not found',
       statusCode: 404,
-      message: 'Not found',
       path: '/resource',
       timestamp: expect.any(String),
     });
@@ -49,8 +50,9 @@ describe('GlobalExceptionFilter', () => {
 
     expect(res.status).toHaveBeenCalledWith(500);
     expect(json).toHaveBeenCalledWith({
+      success: false,
+      error: 'Internal server error',
       statusCode: 500,
-      message: 'Internal server error',
       path: '/api/data',
       timestamp: expect.any(String),
     });
@@ -65,8 +67,7 @@ describe('GlobalExceptionFilter', () => {
     const responseBody = json.mock.calls[0][0];
     expect(responseBody).not.toHaveProperty('stack');
     expect(responseBody).not.toHaveProperty('trace');
-    expect(responseBody).not.toHaveProperty('error');
-    expect(responseBody.message).toBe('Internal server error');
+    expect(responseBody.error).toBe('Internal server error');
   });
 
   it('logs error level with stack trace for 5xx errors', () => {
@@ -100,8 +101,9 @@ describe('GlobalExceptionFilter', () => {
 
     expect(res.status).toHaveBeenCalledWith(500);
     expect(json).toHaveBeenCalledWith({
+      success: false,
+      error: 'Internal server error',
       statusCode: 500,
-      message: 'Internal server error',
       path: '/crash',
       timestamp: expect.any(String),
     });
@@ -118,14 +120,15 @@ describe('GlobalExceptionFilter', () => {
 
     expect(res.status).toHaveBeenCalledWith(500);
     expect(json).toHaveBeenCalledWith({
+      success: false,
+      error: 'Internal server error',
       statusCode: 500,
-      message: 'Internal server error',
       path: '/null',
       timestamp: expect.any(String),
     });
   });
 
-  it('includes statusCode, message, path, and timestamp in the response body', () => {
+  it('includes success, error, statusCode, path, and timestamp in the response body', () => {
     const host = mockHost('PATCH', '/item');
     const error = new HttpException('Conflict', HttpStatus.CONFLICT);
 
@@ -133,8 +136,9 @@ describe('GlobalExceptionFilter', () => {
 
     const body = json.mock.calls[0][0];
     expect(body).toEqual({
+      success: false,
+      error: 'Conflict',
       statusCode: 409,
-      message: 'Conflict',
       path: '/item',
       timestamp: expect.any(String),
     });
