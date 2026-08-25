@@ -5,6 +5,7 @@ import { PrismaService } from "../prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
 import { ConflictException, GoneException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
+import { StatusEventsService } from "../common/events/status-events.service";
 import {
   TransactionBuilder,
   Keypair,
@@ -50,6 +51,11 @@ describe("PolicyService.calculatePremium", () => {
     }),
   };
 
+  const mockStatusEventsService = {
+    emitPolicyStatusChange: jest.fn(),
+    subscribeToPolicyStatus: jest.fn(),
+  };
+
   const MOCK_NOW = new Date("2026-06-15T12:00:00.000Z");
 
   beforeEach(async () => {
@@ -59,6 +65,7 @@ describe("PolicyService.calculatePremium", () => {
         { provide: StellarService, useValue: mockStellarService },
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: ConfigService, useValue: mockConfigService },
+        { provide: StatusEventsService, useValue: mockStatusEventsService },
       ],
     }).compile();
 
