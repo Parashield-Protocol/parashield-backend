@@ -1,5 +1,6 @@
 import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
+import { timingSafeEqual } from 'crypto';
 import { Keypair } from '@stellar/stellar-sdk';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -75,8 +76,16 @@ export class AuthMiddleware implements NestMiddleware {
       return;
     }
 
-    if (message !== challenge.nonce) {
-      this.logger.warn(`Header-auth rejected: message does not match nonce for ${address}`);
+    try {
+      const messageBuffer = Buffer.from(message, 'utf8');
+      const nonceBuffer = Buffer.from(challenge.nonce, 'utf8');
+      if (messageBuffer.length !== nonceBuffer.length || !timingSafeEqual(messageBuffer, nonceBuffer)) {
+        this.logger.warn(`Header-auth rejected: message does not match nonce for ${address}`);
+        res.status(401).json({ statusCode: 401, message: 'Invalid challenge message' });
+        return;
+      }
+    } catch (err) {
+      this.logger.warn(`Header-auth rejected: nonce comparison failed for ${address}`);
       res.status(401).json({ statusCode: 401, message: 'Invalid challenge message' });
       return;
     }

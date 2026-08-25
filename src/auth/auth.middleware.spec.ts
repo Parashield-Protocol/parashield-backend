@@ -1,4 +1,5 @@
 import { Keypair } from '@stellar/stellar-sdk';
+import * as crypto from 'crypto';
 import { AuthMiddleware } from './auth.middleware';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -164,5 +165,29 @@ describe('AuthMiddleware', () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  it('#365 — uses timingSafeEqual for constant-time nonce comparison', async () => {
+    const timingSafeEqualSpy = jest.spyOn(crypto, 'timingSafeEqual');
+
+    mockPrisma.authChallenge.findUnique.mockResolvedValue({
+      nonce,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const req = requestWith({
+      'x-wallet-address':   address,
+      'x-wallet-message':   nonce,
+      'x-wallet-signature': sign(nonce),
+    });
+    const res = mockResponse();
+    const next = jest.fn();
+
+    await middleware.use(req, res, next);
+
+    expect(timingSafeEqualSpy).toHaveBeenCalled();
+    expect(next).toHaveBeenCalled();
+
+    timingSafeEqualSpy.mockRestore();
   });
 });
