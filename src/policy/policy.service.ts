@@ -143,7 +143,13 @@ export class PolicyService {
    * We query the USDC token contract's `balance` entry-point for the
    * POLICY_ENGINE_CONTRACT account, which holds the pooled collateral.
    * Returns the balance as a number (in XLM-equivalent units, 7-decimal fixed point).
-   * Returns Infinity when the contract is not configured so tests are unaffected.
+   * Returns Infinity when the contract is not configured, or when simulation
+   * succeeds but yields no balance entry, so callers are unaffected.
+   * Throws when the Stellar RPC call itself fails (#326) rather than
+   * returning Infinity, since that previously bypassed liquidity validation
+   * entirely during an RPC outage -- any coverage amount would pass. Callers
+   * must fail closed (reject the quote) on this error, not treat it as
+   * unlimited liquidity.
    */
   async getPoolAvailableBalance(): Promise<number> {
     const usdcContract = this.config.get<string>('USDC_CONTRACT');
@@ -159,13 +165,13 @@ export class PolicyService {
       const simResult = await this.stellar.simulateInvoke(usdcContract, 'balance', [engineAddress]);
 
       if (StellarRpc.Api.isSimulationError(simResult)) {
-        this.logger.warn(`Pool balance simulation error: ${simResult.error}`);
-        return Infinity;
+        this.logger.error(`Pool balance simulation error: ${simResult.error}`);
+        throw new Error(`Pool balance simulation error: ${simResult.error}`);
       }
 
       const raw = (simResult as StellarRpc.Api.SimulateTransactionSuccessResponse).result?.retval;
       if (!raw) {
-        this.logger.warn('Pool balance simulation returned no result');
+        this.logger.warn('Pool balance simulation returned no result — skipping pool balance check');
         return Infinity;
       }
 
@@ -173,8 +179,11 @@ export class PolicyService {
       this.logger.log(`Pool available balance: ${balance} (7-decimal fixed point)`);
       return balance;
     } catch (err) {
-      this.logger.warn(`Failed to fetch pool balance: ${(err as Error).message}`);
-      return Infinity;
+      if (err instanceof Error && err.message.startsWith('Pool balance simulation')) {
+        throw err;
+      }
+      this.logger.error(`Failed to fetch pool balance: ${(err as Error).message}`);
+      throw new Error(`Failed to fetch pool balance: ${(err as Error).message}`);
     }
   }
 
@@ -207,8 +216,20 @@ export class PolicyService {
       };
     }
 
-    // #131 — Reject if coverage exceeds available pool liquidity
-    const poolBalance = await this.getPoolAvailableBalance();
+    // #131 — Reject if coverage exceeds available pool liquidity.
+    // #326 — getPoolAvailableBalance now throws (rather than returning
+    // Infinity) on an RPC failure, so this must fail closed here too instead
+    // of letting the exception bypass validation by crashing the request.
+    let poolBalance: number;
+    try {
+      poolBalance = await this.getPoolAvailableBalance();
+    } catch (err) {
+      this.logger.error(`Unable to verify pool liquidity: ${(err as Error).message}`);
+      return {
+        valid: false,
+        reason: 'Unable to verify pool liquidity right now. Please try again shortly.',
+      };
+    }
     if (coverageXlm > poolBalance) {
       return {
         valid: false,
