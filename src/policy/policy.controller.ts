@@ -249,4 +249,37 @@ export class PolicyController {
     const result = await this.policy.confirmAndCreatePolicy(dto, authedWallet);
     return { success: true, data: result };
   }
+
+  /** POST /api/v1/policies/:id/cancel — policyholder voluntarily cancels an ACTIVE policy */
+  @Post('policies/:id/cancel')
+  @UseGuards(JwtAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Cancel an active policy' })
+  @ApiParam({ name: 'id', description: 'Policy UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Policy cancelled',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { $ref: getSchemaPath(PolicyResponseDto) } } },
+      ],
+    },
+  })
+  @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
+  @ApiResponse({ status: 404, description: 'Policy not found' })
+  @ApiResponse({ status: 409, description: 'Policy is no longer ACTIVE and cannot be cancelled' })
+  async cancelPolicy(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+    const policyData = await this.policy.getPolicy(id);
+    if (!policyData) {
+      throw new NotFoundException(`Policy ${id} not found`);
+    }
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (policyData.policyholder !== authedWallet) {
+      throw new ForbiddenException('Policy belongs to a different wallet');
+    }
+    const result = await this.policy.cancelPolicy(id);
+    return { success: true, data: result };
+  }
 }

@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, GoneException, Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, ConflictException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, PolicyStatus } from '@prisma/client';
 import { TransactionBuilder, Transaction, Address, Operation, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -6,6 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { ConfigService } from '@nestjs/config';
+import { transition } from './policy-status.machine';
 
 export interface ProductSummary {
   id:           string;
@@ -634,5 +635,47 @@ export class PolicyService {
       status:       p.status,
     }));
     return { data, total, page, limit: clampedLimit };
+  }
+
+  /**
+   * Cancel an ACTIVE policy (#346). Policyholders had no way to voluntarily
+   * give up coverage even though ACTIVE → CANCELLED is a defined transition.
+   *
+   * The status check is enforced twice: once up front via transition() for a
+   * clear error message, and again as the WHERE clause of an atomic
+   * updateMany so a concurrent transition (e.g. a claim entering PROCESSING)
+   * can't race the cancellation -- mirrors the ACTIVE→PROCESSING gate in
+   * ClaimsService.
+   */
+  async cancelPolicy(policyId: string): Promise<PolicySummary> {
+    const existing = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    if (!existing) {
+      throw new NotFoundException(`Policy ${policyId} not found`);
+    }
+
+    transition(existing.status, PolicyStatus.CANCELLED);
+
+    const result = await this.prisma.policy.updateMany({
+      where: { id: policyId, status: PolicyStatus.ACTIVE },
+      data:  { status: PolicyStatus.CANCELLED },
+    });
+    if (result.count === 0) {
+      throw new ConflictException(
+        `Policy ${policyId} is no longer ACTIVE and cannot be cancelled`,
+      );
+    }
+
+    const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    return {
+      id:           updated!.id,
+      productId:    updated!.productId,
+      policyholder: updated!.policyholder,
+      coverage:     updated!.coverageXlm.toString(),
+      premiumPaid:  updated!.premiumPaid.toString(),
+      oracleKey:    updated!.oracleKey,
+      startTime:    Math.floor(updated!.startTime.getTime() / 1000),
+      endTime:      Math.floor(updated!.endTime.getTime() / 1000),
+      status:       updated!.status,
+    };
   }
 }
