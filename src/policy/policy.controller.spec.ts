@@ -2,7 +2,9 @@ import { Test, TestingModule } from "@nestjs/testing";
 import { PolicyController } from "./policy.controller";
 import { PolicyService } from "./policy.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
+import { OperatorAuthGuard } from "../auth/operator-auth.guard";
 import { AuthenticatedRequest } from "../auth/authenticated-request";
+import { StatusEventsService } from "../common/events/status-events.service";
 import { ForbiddenException, BadRequestException, NotFoundException, UnauthorizedException } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 
@@ -20,6 +22,11 @@ describe("PolicyController", () => {
     confirmAndCreatePolicy: jest.fn(),
   };
 
+  const mockStatusEventsService = {
+    emitPolicyStatusChange: jest.fn(),
+    subscribeToPolicyStatus: jest.fn(),
+  };
+
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
       controllers: [PolicyController],
@@ -28,9 +35,15 @@ describe("PolicyController", () => {
           provide: PolicyService,
           useValue: mockPolicyService,
         },
+        {
+          provide: StatusEventsService,
+          useValue: mockStatusEventsService,
+        },
       ],
     })
       .overrideGuard(JwtAuthGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(OperatorAuthGuard)
       .useValue({ canActivate: () => true })
       .compile();
 

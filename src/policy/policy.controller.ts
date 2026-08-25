@@ -2,6 +2,10 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
+  Delete,
+  Sse,
+  MessageEvent,
   Param,
   Query,
   Body,
@@ -14,6 +18,7 @@ import {
   Req,
   UnauthorizedException,
 } from '@nestjs/common';
+import { Observable } from 'rxjs';
 import {
   ApiTags,
   ApiOperation,
@@ -27,16 +32,22 @@ import {
 import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
+import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
 import { ProductResponseDto, PolicyResponseDto } from './dto/policy-response.dto';
 import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
+import { StatusEventsService } from '../common/events/status-events.service';
 
 @ApiTags('policy')
 @Controller()
 @ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto)
 export class PolicyController {
-  constructor(private readonly policy: PolicyService) {}
+  constructor(
+    private readonly policy: PolicyService,
+    private readonly statusEvents: StatusEventsService,
+  ) {}
 
   /** GET /api/v1/products — list all active insurance products */
   @Get('products')
@@ -278,5 +289,110 @@ export class PolicyController {
     }
     const result = await this.policy.cancelPolicy(id);
     return { success: true, data: result };
+  }
+
+  // #347 — admin-only product management. Gated by OperatorAuthGuard, the
+  // same admin-key-or-admin-JWT guard already used for oracle/claims admin
+  // routes, rather than a new auth mechanism.
+
+  /** POST /api/v1/admin/products — create a new insurance product */
+  @Post('admin/products')
+  @UseGuards(OperatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '[Admin] Create a new insurance product' })
+  @ApiResponse({
+    status: 201,
+    description: 'Product created',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { $ref: getSchemaPath(ProductResponseDto) } } },
+      ],
+    },
+  })
+  @HttpCode(HttpStatus.CREATED)
+  async createProduct(@Body() dto: CreateProductDto) {
+    const product = await this.policy.createProduct(dto);
+    return { success: true, data: product };
+  }
+
+  /** PATCH /api/v1/admin/products/:id — update an insurance product */
+  @Patch('admin/products/:id')
+  @UseGuards(OperatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '[Admin] Update an insurance product' })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Product updated',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { $ref: getSchemaPath(ProductResponseDto) } } },
+      ],
+    },
+  })
+  @ApiResponse({ status: 404, description: 'Product not found' })
+  async updateProduct(@Param('id') id: string, @Body() dto: UpdateProductDto) {
+    const product = await this.policy.updateProduct(id, dto);
+    return { success: true, data: product };
+  }
+
+  /** DELETE /api/v1/admin/products/:id — deactivate an insurance product */
+  @Delete('admin/products/:id')
+  @UseGuards(OperatorAuthGuard)
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: '[Admin] Deactivate an insurance product (soft delete)' })
+  @ApiParam({ name: 'id', description: 'Product UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Product deactivated',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { $ref: getSchemaPath(ProductResponseDto) } } },
+      ],
+    },
+  })
+  @ApiResponse({ status: 404, description: 'Product not found' })
+  async deactivateProduct(@Param('id') id: string) {
+    const product = await this.policy.deactivateProduct(id);
+    return { success: true, data: product };
+  }
+
+  /**
+   * GET /api/v1/policies/:id/events — Server-Sent Events stream of status
+   * changes for a policy (#349), so the frontend doesn't have to poll.
+   * Ownership-checked the same way as GET /policies/:id.
+   */
+  @Sse('policies/:id/events')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Server-Sent Events stream of status changes for a policy' })
+  @ApiParam({ name: 'id', description: 'Policy UUID' })
+  async policyStatusEvents(
+    @Param('id') id: string,
+    @Req() req: AuthenticatedRequest,
+  ): Promise<Observable<MessageEvent>> {
+    const policyData = await this.policy.getPolicy(id);
+    if (!policyData) {
+      throw new NotFoundException(`Policy ${id} not found`);
+    }
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (policyData.policyholder !== authedWallet) {
+      throw new ForbiddenException('Policy belongs to a different wallet');
+    }
+
+    return new Observable<MessageEvent>((subscriber) => {
+      // Emit the current status immediately so a client doesn't have to wait
+      // for the next transition just to know where things stand.
+      subscriber.next({ data: { policyId: id, status: policyData.status, timestamp: Date.now() } });
+
+      const unsubscribe = this.statusEvents.subscribeToPolicyStatus(id, (event) => {
+        subscriber.next({ data: event });
+      });
+      return () => unsubscribe();
+    });
   }
 }

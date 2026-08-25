@@ -1,5 +1,5 @@
 import { BadRequestException, ConflictException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { Prisma, PolicyStatus } from '@prisma/client';
+import { Prisma, PolicyStatus, ProductStatus, Product } from '@prisma/client';
 import { TransactionBuilder, Transaction, Address, Operation, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -7,6 +7,8 @@ import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { ConfigService } from '@nestjs/config';
 import { transition } from './policy-status.machine';
+import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
+import { StatusEventsService } from '../common/events/status-events.service';
 
 export interface ProductSummary {
   id:           string;
@@ -57,6 +59,7 @@ export class PolicyService {
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
     private readonly config: ConfigService,
+    private readonly statusEvents: StatusEventsService,
   ) {}
 
   /**
@@ -664,6 +667,19 @@ export class PolicyService {
         `Policy ${policyId} is no longer ACTIVE and cannot be cancelled`,
       );
     }
+    // #350 — best-effort audit write after the guarded update succeeds;
+    // not folded into the update itself so the cancellation can't be
+    // blocked by an audit-log write failure.
+    await this.prisma.auditLog.create({
+      data: {
+        entityType: 'Policy',
+        entityId:   policyId,
+        fromStatus: PolicyStatus.ACTIVE,
+        toStatus:   PolicyStatus.CANCELLED,
+        reason:     'Policyholder-initiated cancellation',
+      },
+    }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
+    this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CANCELLED);
 
     const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
     return {
@@ -676,6 +692,84 @@ export class PolicyService {
       startTime:    Math.floor(updated!.startTime.getTime() / 1000),
       endTime:      Math.floor(updated!.endTime.getTime() / 1000),
       status:       updated!.status,
+    };
+  }
+
+  // #347 — products could previously only be managed via the seed script or
+  // direct DB manipulation; these give admins (OperatorAuthGuard-gated in
+  // the controller) a way to create, update, and deactivate products
+  // through the API.
+
+  async createProduct(dto: CreateProductDto): Promise<ProductSummary> {
+    const product = await this.prisma.product.create({
+      data: {
+        name:         dto.name,
+        category:     dto.category,
+        triggerType:  dto.triggerType,
+        threshold:    dto.threshold,
+        comparison:   dto.comparison,
+        coverageMin:  dto.coverageMin,
+        coverageMax:  dto.coverageMax,
+        premiumRate:  dto.premiumRate,
+        maxDuration:  dto.maxDuration,
+        status:       (dto.status as ProductStatus) ?? ProductStatus.ACTIVE,
+      },
+    });
+    this.logger.log(`Admin created product ${product.id} (${product.name})`);
+    return this.mapProduct(product);
+  }
+
+  async updateProduct(id: string, dto: UpdateProductDto): Promise<ProductSummary> {
+    const existing = await this.prisma.product.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException(`Product ${id} not found`);
+    }
+    const product = await this.prisma.product.update({
+      where: { id },
+      data: {
+        ...(dto.name         !== undefined ? { name: dto.name } : {}),
+        ...(dto.category     !== undefined ? { category: dto.category } : {}),
+        ...(dto.triggerType  !== undefined ? { triggerType: dto.triggerType } : {}),
+        ...(dto.threshold    !== undefined ? { threshold: dto.threshold } : {}),
+        ...(dto.comparison   !== undefined ? { comparison: dto.comparison } : {}),
+        ...(dto.coverageMin  !== undefined ? { coverageMin: dto.coverageMin } : {}),
+        ...(dto.coverageMax  !== undefined ? { coverageMax: dto.coverageMax } : {}),
+        ...(dto.premiumRate  !== undefined ? { premiumRate: dto.premiumRate } : {}),
+        ...(dto.maxDuration  !== undefined ? { maxDuration: dto.maxDuration } : {}),
+        ...(dto.status       !== undefined ? { status: dto.status as ProductStatus } : {}),
+      },
+    });
+    this.logger.log(`Admin updated product ${product.id}`);
+    return this.mapProduct(product);
+  }
+
+  /** Deactivate a product (soft delete — existing policies still reference it). */
+  async deactivateProduct(id: string): Promise<ProductSummary> {
+    const existing = await this.prisma.product.findUnique({ where: { id } });
+    if (!existing) {
+      throw new NotFoundException(`Product ${id} not found`);
+    }
+    const product = await this.prisma.product.update({
+      where: { id },
+      data: { status: ProductStatus.INACTIVE },
+    });
+    this.logger.log(`Admin deactivated product ${product.id}`);
+    return this.mapProduct(product);
+  }
+
+  private mapProduct(product: Product): ProductSummary {
+    return {
+      id:          product.id,
+      name:        product.name,
+      category:    product.category,
+      triggerType: product.triggerType,
+      threshold:   product.threshold.toString(),
+      comparison:  product.comparison,
+      coverageMin: product.coverageMin.toString(),
+      coverageMax: product.coverageMax.toString(),
+      premiumRate: product.premiumRate,
+      maxDuration: product.maxDuration,
+      status:      product.status,
     };
   }
 }
