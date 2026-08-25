@@ -21,12 +21,17 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
   private cleanupInterval: NodeJS.Timeout;
 
   constructor() {
+    // #337 — entries are always re-inserted (delete+set) whenever their
+    // window resets, so Map iteration order (insertion order) doubles as
+    // oldest-window-first order. That lets cleanup stop at the first
+    // still-active entry instead of scanning the whole map every sweep.
     this.cleanupInterval = setInterval(() => {
       const now = Date.now();
       for (const [ip, window] of this.requests) {
-        if (now - window.windowStart > this.TIME_WINDOW_MS) {
-          this.requests.delete(ip);
+        if (now - window.windowStart <= this.TIME_WINDOW_MS) {
+          break;
         }
+        this.requests.delete(ip);
       }
     }, this.TIME_WINDOW_MS);
     this.cleanupInterval.unref();
@@ -46,6 +51,10 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     const window = this.requests.get(ip);
 
     if (!window || now - window.windowStart > this.TIME_WINDOW_MS) {
+      // Re-inserting (rather than updating in place) moves this IP to the
+      // end of Map iteration order, keeping entries ordered oldest-first
+      // for the cleanup sweep above.
+      this.requests.delete(ip);
       this.requests.set(ip, { count: 1, windowStart: now });
       return true;
     }
