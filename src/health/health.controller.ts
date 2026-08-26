@@ -61,6 +61,10 @@ export class HealthController {
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
+    // #441 — Direct Soroban RPC connectivity check fields
+    let stellarRpcStatus: 'ok' | 'error' = 'ok';
+    let stellarRpcLatencyMs: number | undefined;
+    let stellarRpcLedger: number | undefined;
     let queueStatus: 'ok' | 'error' = 'ok';
     let queueError: string | undefined;
 
@@ -96,6 +100,24 @@ export class HealthController {
       // Non-fatal: pg_stat_activity may be restricted on managed databases.
     }
 
+    // #441 — Direct Stellar RPC (Soroban) connectivity check.
+    // getLatestLedger is the lightest available probe: it requires no
+    // authentication, touches no account state, and always succeeds when
+    // the RPC node is reachable. We record latency so ops can distinguish
+    // a slow node from a fully unreachable one. A failure here is fatal
+    // (stellarStatus → 'error') because contract invocations — claims,
+    // policy submissions, oracle writes — all depend on the Soroban RPC.
+    try {
+      const rpcProbe = await this.stellar.checkRpcConnectivity(HEALTH_CHECK_RPC_TIMEOUT_MS);
+      stellarRpcLatencyMs = rpcProbe.latencyMs;
+      stellarRpcLedger    = rpcProbe.ledger;
+    } catch (err) {
+      stellarRpcStatus = 'error';
+      stellarStatus    = 'error';
+      stellarError     = `Stellar RPC unreachable: ${err instanceof Error ? err.message : String(err)}`;
+      this.logger.error(`Health check: ${stellarError}`);
+    }
+
     try {
       keeperBalanceXlm = await this.stellar.getAccountBalance(
         this.stellar.keeperKeypair.publicKey(),
@@ -117,7 +139,7 @@ export class HealthController {
       }
     } catch (err) {
       stellarStatus = 'error';
-      this.logger.error(`Health check Stellar RPC failed: ${err instanceof Error ? err.message : String(err)}`);
+      this.logger.error(`Health check Stellar keeper/Horizon failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // #403 — Redis/message queue connectivity check.
@@ -229,6 +251,9 @@ export class HealthController {
       },
       stellar: {
         status: stellarStatus,
+        rpcStatus: stellarRpcStatus,
+        ...(stellarRpcLatencyMs !== undefined ? { rpcLatencyMs: stellarRpcLatencyMs } : {}),
+        ...(stellarRpcLedger !== undefined ? { rpcLedger: stellarRpcLedger } : {}),
         ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
         ...(stellarError ? { error: stellarError } : {}),
       },

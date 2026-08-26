@@ -456,6 +456,29 @@ export class StellarService {
     return nativeBalance.balance;
   }
 
+  /**
+   * #441 — Verify Stellar RPC (Soroban) connectivity by calling getLatestLedger,
+   * the lightest available RPC probe (no auth, no on-chain state required).
+   * Returns the ledger sequence number and round-trip latency so the health
+   * endpoint can surface both reachability and basic responsiveness.
+   *
+   * @param timeoutMs  Maximum time to wait in milliseconds (default 10s).
+   *                   Health checks should pass HEALTH_CHECK_RPC_TIMEOUT_MS
+   *                   to keep probe latency bounded.
+   */
+  async checkRpcConnectivity(timeoutMs?: number): Promise<{ latencyMs: number; ledger: number }> {
+    const start = Date.now();
+    const result = await this.withTimeout(
+      this.rpc.getLatestLedger(),
+      'getLatestLedger',
+      timeoutMs,
+    );
+    return {
+      latencyMs: Date.now() - start,
+      ledger:    result.sequence,
+    };
+  }
+
   /** Return the current network passphrase. */
   get networkPassphrase(): string {
     return this.network;

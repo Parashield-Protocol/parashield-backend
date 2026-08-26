@@ -43,6 +43,15 @@ export class StellarCheckDto {
   @ApiProperty({ description: 'Keeper account native XLM balance (7-decimal fixed point)', required: false })
   keeperBalanceXlm?: string;
 
+  @ApiProperty({ description: 'Stellar RPC (Soroban) connectivity status', enum: ['ok', 'error'], required: false })
+  rpcStatus?: 'ok' | 'error';
+
+  @ApiProperty({ description: 'Stellar RPC round-trip latency in milliseconds', required: false })
+  rpcLatencyMs?: number;
+
+  @ApiProperty({ description: 'Latest ledger sequence number returned by Stellar RPC', required: false })
+  rpcLedger?: number;
+
   @ApiProperty({ description: 'Error message when status is "error"', required: false })
   error?: string;
 }
