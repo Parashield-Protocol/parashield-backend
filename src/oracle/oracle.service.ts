@@ -7,6 +7,88 @@ import { ConfigService } from "@nestjs/config";
 import axios from "axios";
 import { PrismaService } from "../prisma/prisma.service";
 
+/** Circuit breaker states. */
+enum CircuitState {
+  CLOSED = "CLOSED",
+  OPEN = "OPEN",
+  HALF_OPEN = "HALF_OPEN",
+}
+
+/**
+ * Lightweight circuit breaker for external API calls.
+ *
+ * After `failureThreshold` consecutive failures the circuit opens and
+ * subsequent calls fail fast without hitting the network.  After
+ * `resetTimeoutMs` the circuit moves to HALF_OPEN, allowing one probe
+ * request through.  A success closes the circuit; a failure reopens it.
+ */
+class CircuitBreaker {
+  private state: CircuitState = CircuitState.CLOSED;
+  private failureCount = 0;
+  private lastFailureTime = 0;
+  private readonly logger: Logger;
+
+  constructor(
+    private readonly name: string,
+    private readonly failureThreshold: number = 5,
+    private readonly resetTimeoutMs: number = 30_000,
+  ) {
+    this.logger = new Logger(`CircuitBreaker:${name}`);
+  }
+
+  getState(): CircuitState {
+    if (
+      this.state === CircuitState.OPEN &&
+      Date.now() - this.lastFailureTime >= this.resetTimeoutMs
+    ) {
+      this.state = CircuitState.HALF_OPEN;
+      this.logger.warn(`Circuit half-open — allowing probe request`);
+    }
+    return this.state;
+  }
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    const currentState = this.getState();
+
+    if (currentState === CircuitState.OPEN) {
+      this.logger.warn(
+        `Circuit open — failing fast (${this.failureCount} consecutive failures)`,
+      );
+      throw new ServiceUnavailableException(
+        `External service "${this.name}" is temporarily unavailable (circuit open)`,
+      );
+    }
+
+    try {
+      const result = await fn();
+      this.onSuccess();
+      return result;
+    } catch (error) {
+      this.onFailure();
+      throw error;
+    }
+  }
+
+  private onSuccess(): void {
+    if (this.state === CircuitState.HALF_OPEN) {
+      this.logger.log("Probe succeeded — circuit closed");
+    }
+    this.failureCount = 0;
+    this.state = CircuitState.CLOSED;
+  }
+
+  private onFailure(): void {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+    if (this.failureCount >= this.failureThreshold) {
+      this.state = CircuitState.OPEN;
+      this.logger.error(
+        `Circuit opened after ${this.failureCount} consecutive failures — will retry in ${this.resetTimeoutMs}ms`,
+      );
+    }
+  }
+}
+
 export interface OracleReading {
   dataType: string;
   key: string;
@@ -48,6 +130,8 @@ export const SANITY_BOUNDS = {
 @Injectable()
 export class OracleService {
   private readonly logger = new Logger(OracleService.name);
+  private readonly openMeteoBreaker = new CircuitBreaker("open-meteo", 5, 30_000);
+  private readonly aviationStackBreaker = new CircuitBreaker("aviationstack", 3, 60_000);
 
   constructor(
     private readonly config: ConfigService,
@@ -250,9 +334,11 @@ export class OracleService {
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
 
-    const res = await axios.get<{
-      daily: { precipitation_sum: (number | null)[]; time: string[] };
-    }>(url, { timeout: 10_000 });
+    const res = await this.openMeteoBreaker.execute(() =>
+      axios.get<{
+        daily: { precipitation_sum: (number | null)[]; time: string[] };
+      }>(url, { timeout: 10_000 }),
+    );
 
     // Filter to only observed days (date <= today) and exclude null values.
     // For past months from /archive endpoint, all data is observed.
@@ -345,9 +431,11 @@ export class OracleService {
     const url = isPastMonth
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
-    const res = await axios.get<{
-      daily: { temperature_2m_max: (number | null)[]; time: string[] };
-    }>(url, { timeout: 10_000 });
+    const res = await this.openMeteoBreaker.execute(() =>
+      axios.get<{
+        daily: { temperature_2m_max: (number | null)[]; time: string[] };
+      }>(url, { timeout: 10_000 }),
+    );
 
     const todayStr = today.toISOString().split("T")[0];
     const rawTemps = res.data.daily.temperature_2m_max;
@@ -421,14 +509,16 @@ export class OracleService {
       );
     }
     const url = `https://api.aviationstack.com/v1/flights?flight_iata=${flightNumber}&flight_date=${date}`;
-    const res = await axios.get<{
-      data?: Array<{ departure?: { delay?: number | null } | null } | null>;
-    }>(url, {
-      timeout: 10_000,
-      headers: {
-        'Authorization': `Bearer ${apiKey}`
-      }
-    });
+    const res = await this.aviationStackBreaker.execute(() =>
+      axios.get<{
+        data?: Array<{ departure?: { delay?: number | null } | null } | null>;
+      }>(url, {
+        timeout: 10_000,
+        headers: {
+          'Authorization': `Bearer ${apiKey}`
+        }
+      }),
+    );
     const key = `flight:${flightNumber}:${date}`;
     const flight = res.data.data?.[0];
     const delay = flight?.departure?.delay;
