@@ -1,10 +1,18 @@
-import { Controller, Post, Body, Get, Param } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
+import { Controller, Post, Body, Get } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiExtraModels, getSchemaPath } from '@nestjs/swagger';
 import { WebhooksService } from '../events/webhooks.service';
 import { PrismaService } from '../prisma/prisma.service';
+import {
+  RegisterWebhookDto,
+  WebhookRegistrationResponseDto,
+  WebhookListItemDto,
+  PolicyStatusChangePayloadDto,
+  ClaimStatusChangePayloadDto,
+} from './dto/webhook.dto';
 
 @Controller('webhooks')
 @ApiTags('webhooks')
+@ApiExtraModels(RegisterWebhookDto, WebhookRegistrationResponseDto, WebhookListItemDto, PolicyStatusChangePayloadDto, ClaimStatusChangePayloadDto)
 export class WebhooksController {
   constructor(
     private readonly webhooks: WebhooksService,
@@ -13,14 +21,32 @@ export class WebhooksController {
 
   /** POST /api/v1/webhooks/register — register a webhook endpoint */
   @Post('register')
-  @ApiOperation({ summary: 'Register a webhook for policy/claim status changes' })
+  @ApiOperation({
+    summary: 'Register a webhook for real-time event notifications',
+    description:
+      'Register a URL to receive POST requests when specific events occur. ' +
+      'Supported event types:\n\n' +
+      '| Event | Description | Payload |\n' +
+      '|-------|-------------|---------|\n' +
+      '| `policy.status.change` | A policy status transition (e.g. ACTIVE → CLAIMED) | `{ policyId, fromStatus, toStatus, timestamp }` |\n' +
+      '| `claim.status.change` | A claim status transition (e.g. PROCESSING → PAID) | `{ claimId, fromStatus, toStatus, timestamp }` |\n\n' +
+      '**Signature verification:** If a `secret` is provided, each delivery includes an `X-Webhook-Signature` header ' +
+      'containing an HMAC-SHA256 digest of the JSON payload, base64-encoded. Verify with:\n' +
+      '```\n' +
+      'crypto.createHmac("sha256", secret).update(rawBody).digest("base64")\n' +
+      '```',
+  })
   @ApiBearerAuth()
-  @ApiResponse({ status: 201, description: 'Webhook registered successfully' })
+  @ApiResponse({
+    status: 201,
+    description: 'Webhook registered successfully',
+    schema: { $ref: getSchemaPath(WebhookRegistrationResponseDto) },
+  })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
-  register(@Body() dto: { url: string; events: string[]; secret?: string }) {
+  register(@Body() dto: RegisterWebhookDto) {
     return this.webhooks.registerWebhook({
       url: dto.url,
-      events: dto.events as ('policy.status.change' | 'claim.status.change')[],
+      events: dto.events,
       secret: dto.secret,
     });
   }
@@ -29,7 +55,11 @@ export class WebhooksController {
   @Get()
   @ApiOperation({ summary: 'List all registered webhooks' })
   @ApiBearerAuth()
-  @ApiResponse({ status: 200, description: 'Returns list of registered webhooks' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns list of active webhook registrations',
+    schema: { type: 'array', items: { $ref: getSchemaPath(WebhookListItemDto) } },
+  })
   list() {
     return this.webhooks.getRegistrations();
   }

@@ -39,10 +39,11 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 import { StatusEventsService } from '../common/events/status-events.service';
+import { PolicyStatusEventDto } from '../common/events/dto/sse-event.dto';
 
 @ApiTags('policy')
 @Controller()
-@ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto)
+@ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto, PolicyStatusEventDto)
 export class PolicyController {
   constructor(
     private readonly policy: PolicyService,
@@ -376,8 +377,30 @@ export class PolicyController {
   @Sse('policies/:id/events')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Server-Sent Events stream of status changes for a policy' })
+  @ApiOperation({
+    summary: 'Server-Sent Events stream of status changes for a policy',
+    description:
+      'Opens an SSE connection that streams policy status transitions in real time. ' +
+      'The current status is emitted immediately on connection, followed by events whenever the status changes. ' +
+      'Possible status values: ACTIVE, PROCESSING, CLAIMED, CANCELLED, EXPIRED.\n\n' +
+      'Event data schema:\n' +
+      '```json\n' +
+      '{ "policyId": "uuid", "status": "ACTIVE", "timestamp": 1700000000000 }\n' +
+      '```\n\n' +
+      'Connect with `EventSource`:\n' +
+      '```js\n' +
+      'const es = new EventSource("/api/v1/policies/:id/events", { withCredentials: true });\n' +
+      "es.onmessage = (e) => console.log(JSON.parse(e.data));\n" +
+      '```',
+  })
   @ApiParam({ name: 'id', description: 'Policy UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'SSE stream of PolicyStatusEvent objects. Each message has a `data` field containing the event payload.',
+    schema: { $ref: getSchemaPath(PolicyStatusEventDto) },
+  })
+  @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
+  @ApiResponse({ status: 404, description: 'Policy not found' })
   async policyStatusEvents(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,

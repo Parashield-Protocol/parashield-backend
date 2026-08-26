@@ -138,6 +138,8 @@ async function bootstrap() {
     .addTag('oracle', 'Oracle data feeds and readings')
     .addTag('auth', 'Wallet-based authentication')
     .addTag('health', 'Service health monitoring')
+    .addTag('webhooks', 'Webhook registration and real-time event subscriptions')
+    .addTag('events', 'Server-Sent Events (SSE) for real-time policy status streaming')
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
   SwaggerModule.setup('docs', app, document);
