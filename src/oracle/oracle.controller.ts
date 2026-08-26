@@ -7,7 +7,9 @@ import {
   Post,
   Query,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
+import { StreamingInterceptor } from "../common/interceptors/streaming.interceptor";
 import {
   ApiTags,
   ApiOperation,
@@ -95,22 +97,38 @@ export class OracleController {
    * Oracle data is public and accessible to all users.
    *
    * Rate limited: 60 requests/minute per IP (global ThrottleGuard)
+   *
+   * #440 — supports NDJSON streaming to reduce peak memory for large result
+   * sets. Pass `?stream=true` or `Accept: application/x-ndjson` to activate.
    */
   @Get("readings")
   @Throttle({ default: { limit: 60, ttl: 60000 } })
+  @UseInterceptors(StreamingInterceptor)
   @ApiOperation({
     summary: "List all stored oracle readings",
     description:
-      "Public endpoint. Returns latest oracle readings ordered by submission time (most recent first). Rate limited to 60 requests/minute per IP.",
+      "Public endpoint. Returns latest oracle readings ordered by submission time (most recent first). " +
+      "Pass `?stream=true` or `Accept: application/x-ndjson` to receive the data array as NDJSON (one item per line), " +
+      "which reduces server memory usage for large result sets. " +
+      "Rate limited to 60 requests/minute per IP.",
   })
   @ApiQuery({
     name: "limit",
     required: false,
     description: "Max rows to return (default 100, max 500)",
   })
+  @ApiQuery({
+    name: "stream",
+    required: false,
+    description:
+      "Set to 'true' to receive the response as NDJSON (one JSON object per line). " +
+      "Alternatively send Accept: application/x-ndjson. " +
+      "Pagination metadata is returned in X-Total-Count, X-Page, X-Limit headers.",
+    example: "true",
+  })
   @ApiResponse({
     status: 200,
-    description: "Array of oracle readings",
+    description: "Array of oracle readings (JSON envelope) or NDJSON stream when ?stream=true",
     schema: {
       example: {
         success: true,

@@ -15,9 +15,11 @@ import {
   ForbiddenException,
   BadRequestException,
   UseGuards,
+  UseInterceptors,
   Req,
   UnauthorizedException,
 } from '@nestjs/common';
+import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import { Observable } from 'rxjs';
 import {
   ApiTags,
@@ -53,9 +55,16 @@ export class PolicyController {
 
   /** GET /api/v1/products — list all active insurance products with pagination */
   @Get('products')
+  @UseInterceptors(StreamingInterceptor)
   @ApiOperation({ summary: 'List all active insurance products with pagination' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
+  @ApiQuery({
+    name: 'stream',
+    required: false,
+    description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
+    example: 'true',
+  })
   @ApiResponse({
     status: 200,
     description: 'Returns paginated products — { success, data, total, page, limit }',
@@ -83,10 +92,17 @@ export class PolicyController {
   /** GET /api/v1/policies/me?page=&limit= — get paginated policies for the authenticated wallet */
   @Get('policies/me')
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(StreamingInterceptor)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get paginated policies for the authenticated wallet' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
+  @ApiQuery({
+    name: 'stream',
+    required: false,
+    description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
+    example: 'true',
+  })
   @ApiResponse({
     status: 200,
     description: 'Returns paginated policies — { success, data, total, page, limit }',

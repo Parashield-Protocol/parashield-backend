@@ -1,4 +1,5 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UnauthorizedException, NotFoundException, Throttle } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException, Throttle } from '@nestjs/common';
+import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import {
   ApiTags,
   ApiOperation,
@@ -55,11 +56,18 @@ export class ClaimsController {
   /** GET /api/v1/claims?wallet=... — get claim history for the authenticated wallet */
   @Get()
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(StreamingInterceptor)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get claim history for a wallet address (query param)' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number' })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
+  @ApiQuery({
+    name: 'stream',
+    required: false,
+    description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
+    example: 'true',
+  })
   @ApiResponse({
     status: 200,
     description: 'Returns paginated claim history — { success, data, total, page, limit }',
@@ -138,11 +146,18 @@ export class ClaimsController {
   /** GET /api/v1/claims/history/:wallet — get all claims for a wallet address */
   @Get('history/:wallet')
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(StreamingInterceptor)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get all claims for a wallet address' })
   @ApiParam({ name: 'wallet', description: 'Stellar wallet address' })
   @ApiQuery({ name: 'page', required: false, description: 'Page number' })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
+  @ApiQuery({
+    name: 'stream',
+    required: false,
+    description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
+    example: 'true',
+  })
   @ApiResponse({
     status: 200,
     description: 'Returns paginated claim history — { success, data, total, page, limit }',
