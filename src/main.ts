@@ -151,19 +151,29 @@ async function bootstrap() {
     .setDescription(
       'Decentralized parametric insurance protocol on Stellar Soroban\n\n' +
       '## Rate Limiting\n\n' +
-      'All endpoints are protected by a global rate limiter applied per client IP address.\n\n' +
+      'All endpoints are protected by a rate limiter applied per client IP address. Most ' +
+      'endpoints use the app-wide default below, but a few sensitive endpoints enforce a ' +
+      'tighter, endpoint-specific window — check that endpoint\'s own 429 response ' +
+      'description (below in this doc) for its exact limit and reset window.\n\n' +
       '| Parameter | Value |\n' +
       '|-----------|-------|\n' +
-      '| Window    | 60 seconds |\n' +
-      '| Limit     | 60 requests per window |\n' +
+      '| Window    | 60 seconds (default) |\n' +
+      '| Limit     | 60 requests per window (default) |\n' +
       '| Scope     | Per IP address (uses `X-Forwarded-For` when behind a proxy) |\n\n' +
+      '| Endpoint | Window | Limit |\n' +
+      '|----------|--------|-------|\n' +
+      '| `POST /auth/challenge`, `POST /auth/login` | 60 seconds | 10 requests |\n' +
+      '| `POST /claims` | 60 seconds | 5 requests |\n' +
+      '| All other endpoints | 60 seconds | 60 requests |\n\n' +
       '### Response headers\n\n' +
-      'Every response includes the following headers so clients can track their current usage:\n\n' +
+      'Every response includes the following headers so clients can track their current usage. ' +
+      '`X-RateLimit-Limit` and `X-RateLimit-Reset` reflect the window of the specific endpoint ' +
+      'called, not always the app-wide default:\n\n' +
       '| Header | Description |\n' +
       '|--------|-------------|\n' +
-      '| `X-RateLimit-Limit` | Maximum requests allowed in the current window (always `60`) |\n' +
+      '| `X-RateLimit-Limit` | Maximum requests allowed in the current window for this endpoint |\n' +
       '| `X-RateLimit-Remaining` | Requests remaining before the limit is hit |\n' +
-      '| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |\n\n' +
+      '| `X-RateLimit-Reset` | Unix timestamp (seconds) at which this endpoint\'s window resets |\n\n' +
       '### Exceeded limit — 429 Too Many Requests\n\n' +
       'When the limit is exceeded the API responds with HTTP **429** and an additional ' +
       '`Retry-After` header indicating how many seconds to wait before retrying.\n\n' +

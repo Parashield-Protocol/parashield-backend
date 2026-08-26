@@ -14,7 +14,11 @@ const RATE_LIMIT_HEADERS = {
     schema: { type: 'integer', example: 42 },
   },
   'X-RateLimit-Reset': {
-    description: 'Unix timestamp (seconds) at which the current rate limit window resets.',
+    description:
+      'Unix timestamp (seconds) at which the current rate limit window resets. The window ' +
+      'length is per-endpoint — see that operation\'s 429 response description for its ' +
+      'specific limit; most endpoints use the app-wide default of 60s/60 requests, but a few ' +
+      '(e.g. POST /claims, POST /auth/login) enforce a shorter window.',
     schema: { type: 'integer', example: 1735689600 },
   },
 };
@@ -66,8 +70,12 @@ const RATE_LIMIT_429_RESPONSE = {
  *      developers see a concrete example of the error envelope and Retry-After
  *      header for every endpoint — without reading the guard source.
  *
- * ThrottleGuard (src/common/guards/throttle.guard.ts) enforces 60 req / 60 s
- * per IP and sets these headers at runtime.
+ * The global ThrottlerGuard (@nestjs/throttler, wired up via APP_GUARD in
+ * app.module.ts) enforces 60 req / 60 s per IP by default and sets these
+ * headers at runtime; a handful of endpoints override it with a tighter,
+ * endpoint-specific window via @Throttle() (see auth.controller.ts and
+ * claims.controller.ts), which is why the generic 429 injected below is
+ * skipped for any operation that already documents its own.
  */
 export function applyRateLimitHeaders(document: OpenAPIObject): void {
   for (const pathItem of Object.values(document.paths)) {
