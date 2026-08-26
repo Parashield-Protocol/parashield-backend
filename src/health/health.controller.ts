@@ -197,6 +197,32 @@ export class HealthController {
       this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
     }
 
+    // AviationStack reachability check.
+    // Key-gated API: if no key is configured we still probe the endpoint
+    // (with an empty access_key) so a 401/403 response confirms the API
+    // itself is reachable, distinct from key misconfiguration which is
+    // surfaced separately via the `configured` flag. Any network error or
+    // 5xx/timeout is flagged as degraded — flight delay oracle reads will fail.
+    aviationStackConfigured = !!this.config.get<string>('AVIATIONSTACK_API_KEY');
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+      try {
+        const res = await fetch(AVIATIONSTACK_HEALTH_URL, { signal: controller.signal });
+        if (res.status >= 500) {
+          aviationStackStatus = 'error';
+          aviationStackError  = `AviationStack responded with HTTP ${res.status}`;
+          this.logger.error(`Health check: ${aviationStackError}`);
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (err) {
+      aviationStackStatus = 'error';
+      aviationStackError  = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Health check AviationStack failed: ${aviationStackError}`);
+    }
+
     // #466 — Redis memory usage monitoring
     // Track Redis memory consumption to detect memory exhaustion before it
     // causes failures. Redis INFO memory command returns current memory usage,
