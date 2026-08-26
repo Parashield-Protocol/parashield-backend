@@ -66,3 +66,12 @@ export class PolicyResponseDto {
   @ApiProperty({ description: 'Stellar transaction hash for policy creation', nullable: true })
   txHash: string | null;
 }
+
+export class CancellationResponseDto extends PolicyResponseDto {
+  @ApiProperty({
+    description:
+      'Pro-rated premium refund owed for the unused coverage period (7-decimal fixed point). ' +
+      'Calculation only -- no on-chain refund entrypoint exists yet, so this must be paid out manually/off-chain.',
+  })
+  refundAmountXlm: string;
+}

@@ -36,6 +36,11 @@ export interface PolicySummary {
   status:         string;
 }
 
+export interface CancellationResult extends PolicySummary {
+  /** Pro-rated premium refund owed for the unused coverage period (#351). */
+  refundAmountXlm: string;
+}
+
 export interface PremiumValidationResult {
   valid: boolean;
   reason?: string;
@@ -658,6 +663,29 @@ export class PolicyService {
   }
 
   /**
+   * Compute the pro-rated premium refund owed for cancelling before the
+   * policy's coverage period has fully elapsed (#351): premiumPaid scaled
+   * by the fraction of coverage days remaining, floored to 7-decimal fixed
+   * point so a rounding-up can't ever refund more than was actually paid.
+   *
+   * This is calculation only -- it does not execute a transfer. No refund
+   * entrypoint exists on the Policy Engine contract in this codebase
+   * (unlike buy_policy/process_claim/submit_claim, which are real, callable
+   * functions this service already invokes), so actually paying it out
+   * on-chain would mean inventing a contract interface with no way to
+   * verify it's correct. The computed amount is surfaced in the
+   * cancellation response for manual/off-chain processing until a real
+   * refund entrypoint exists.
+   */
+  calculateProRatedRefund(premiumPaidXlm: number, startTime: Date, endTime: Date, now: Date = new Date()): number {
+    const totalMs = endTime.getTime() - startTime.getTime();
+    if (totalMs <= 0) return 0;
+    const remainingMs = Math.max(0, endTime.getTime() - now.getTime());
+    const fraction = Math.min(1, remainingMs / totalMs);
+    return Math.floor(premiumPaidXlm * fraction * 1e7) / 1e7;
+  }
+
+  /**
    * Cancel an ACTIVE policy (#346). Policyholders had no way to voluntarily
    * give up coverage even though ACTIVE → CANCELLED is a defined transition.
    *
@@ -667,13 +695,19 @@ export class PolicyService {
    * can't race the cancellation -- mirrors the ACTIVE→PROCESSING gate in
    * ClaimsService.
    */
-  async cancelPolicy(policyId: string): Promise<PolicySummary> {
+  async cancelPolicy(policyId: string): Promise<CancellationResult> {
     const existing = await this.prisma.policy.findUnique({ where: { id: policyId } });
     if (!existing) {
       throw new NotFoundException(`Policy ${policyId} not found`);
     }
 
     transition(existing.status, PolicyStatus.CANCELLED);
+
+    const refundAmountXlm = this.calculateProRatedRefund(
+      existing.premiumPaid.toNumber(),
+      existing.startTime,
+      existing.endTime,
+    );
 
     const result = await this.prisma.policy.updateMany({
       where: { id: policyId, status: PolicyStatus.ACTIVE },
@@ -693,7 +727,7 @@ export class PolicyService {
         entityId:   policyId,
         fromStatus: PolicyStatus.ACTIVE,
         toStatus:   PolicyStatus.CANCELLED,
-        reason:     'Policyholder-initiated cancellation',
+        reason:     `Policyholder-initiated cancellation; refund owed: ${refundAmountXlm} XLM`,
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
     this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CANCELLED);
@@ -706,15 +740,16 @@ export class PolicyService {
 
     const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
     return {
-      id:           updated!.id,
-      productId:    updated!.productId,
-      policyholder: updated!.policyholder,
-      coverage:     updated!.coverageXlm.toString(),
-      premiumPaid:  updated!.premiumPaid.toString(),
-      oracleKey:    updated!.oracleKey,
-      startTime:    Math.floor(updated!.startTime.getTime() / 1000),
-      endTime:      Math.floor(updated!.endTime.getTime() / 1000),
-      status:       updated!.status,
+      id:              updated!.id,
+      productId:       updated!.productId,
+      policyholder:    updated!.policyholder,
+      coverage:        updated!.coverageXlm.toString(),
+      premiumPaid:     updated!.premiumPaid.toString(),
+      oracleKey:       updated!.oracleKey,
+      startTime:       Math.floor(updated!.startTime.getTime() / 1000),
+      endTime:         Math.floor(updated!.endTime.getTime() / 1000),
+      status:          updated!.status,
+      refundAmountXlm: refundAmountXlm.toFixed(7),
     };
   }
 

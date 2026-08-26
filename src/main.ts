@@ -6,6 +6,7 @@ import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { ThrottleGuard } from './common/guards/throttle.guard';
+import { JsonLogger } from './common/logging/json-logger.service';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
 import { UsdcPrecisionValidationMiddleware } from './common/middleware/usdc-precision-validation.middleware';
@@ -41,6 +42,9 @@ async function bootstrap() {
   await loadVaultSecrets();
   await initializeOpenTelemetry();
   const app = await NestFactory.create(AppModule);
+  // #352 — structured JSON logs instead of unstructured colored text, so a
+  // log aggregator (CloudWatch/Datadog/Loki/etc.) can actually parse them.
+  app.useLogger(new JsonLogger());
   const logger = new Logger('Bootstrap');
 
   const configService = app.get(ConfigService);

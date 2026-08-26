@@ -1,9 +1,10 @@
 import { Controller, Get, Inject, Logger, HttpException, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiExtraModels } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
+import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto } from './dto/health-response.dto';
 
 // #191 — default floor below which the keeper account is considered too low
 // to reliably keep paying transaction fees. Overridable via
@@ -28,6 +29,7 @@ const AVIATIONSTACK_HEALTH_URL =
 
 @ApiTags('health')
 @Controller('health')
+@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto)
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
@@ -50,9 +52,9 @@ export class HealthController {
    */
   @Get()
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
-  @ApiResponse({ status: 200, description: 'All systems healthy' })
-  @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)' })
-  async check() {
+  @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
+  @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
+  async check(): Promise<HealthResponseDto> {
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
     let dbPool: { active: number; idle: number; waiting: number } | undefined;
@@ -260,25 +262,17 @@ export class HealthController {
       openMeteoStatus === 'ok' &&
       aviationStackStatus === 'ok';
 
-    if (!healthy) {
-      throw new HttpException(
-        {
-          success:   false,
-          status:    'degraded',
-          timestamp: new Date().toISOString(),
-          service:   'parashield-api',
-          checks,
-        },
-        HttpStatus.SERVICE_UNAVAILABLE,
-      );
-    }
-
-    return {
-      success:   true,
-      status:    'ok',
+    const body: HealthResponseDto = {
+      status:    healthy ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       service:   'parashield-api',
-      checks,
+      checks: checks as any,
     };
+
+    if (!healthy) {
+      throw new HttpException(body, HttpStatus.SERVICE_UNAVAILABLE);
+    }
+
+    return body;
   }
 }
