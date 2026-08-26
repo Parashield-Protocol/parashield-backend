@@ -42,6 +42,7 @@ export class HealthController {
   async check() {
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
+    let dbPool: { active: number; idle: number; waiting: number } | undefined;
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
@@ -53,6 +54,24 @@ export class HealthController {
     } catch (err) {
       dbStatus = 'error';
       this.logger.error(`Health check DB query failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // #444 — connection pool health: query pg_stat_activity so load balancers
+    // can alert on pool exhaustion before queries start queuing or timing out.
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ state: string; count: bigint }>>`
+        SELECT state, COUNT(*)::int AS count
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+        GROUP BY state
+      `;
+      dbPool = {
+        active:  Number(rows.find(r => r.state === 'active')?.count  ?? 0),
+        idle:    Number(rows.find(r => r.state === 'idle')?.count    ?? 0),
+        waiting: Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0),
+      };
+    } catch {
+      // Non-fatal: pg_stat_activity may be restricted on managed databases.
     }
 
     try {
@@ -119,6 +138,7 @@ export class HealthController {
       checks: {
         database: {
           status: dbStatus,
+          ...(dbPool !== undefined ? { pool: dbPool } : {}),
           ...(dbError ? { error: dbError } : {}),
         },
         stellar: {
