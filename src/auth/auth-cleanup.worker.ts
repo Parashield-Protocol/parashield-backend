@@ -1,6 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import type Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
+import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 
 /**
  * AuthCleanupWorker — periodically prunes expired AuthChallenge rows.
@@ -16,7 +18,10 @@ import { PrismaService } from '../prisma/prisma.service';
 export class AuthCleanupWorker {
   private readonly logger = new Logger(AuthCleanupWorker.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
+  ) {}
 
   @Cron(CronExpression.EVERY_6_HOURS)
   async cleanupExpiredChallenges(): Promise<void> {
@@ -27,5 +32,9 @@ export class AuthCleanupWorker {
     if (count > 0) {
       this.logger.log(`Cleaned up ${count} expired auth challenge(s)`);
     }
+
+    await recordWorkerHeartbeat(this.redis, 'auth-cleanup').catch((err) =>
+      this.logger.warn(`Failed to record worker heartbeat: ${err instanceof Error ? err.message : String(err)}`),
+    );
   }
 }

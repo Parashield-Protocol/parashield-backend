@@ -5,6 +5,7 @@ import {
   IsInt,
   IsPositive,
   Min,
+  Max,
   IsIn,
   IsOptional,
 } from 'class-validator';
@@ -54,9 +55,10 @@ export class CreateProductDto {
   @Min(1)
   premiumRate: number;
 
-  @ApiProperty({ description: 'Maximum policy duration in days', example: 365 })
+  @ApiProperty({ description: 'Maximum policy duration in days', minimum: 1, maximum: 365, example: 365 })
   @IsInt()
   @Min(1)
+  @Max(365)
   maxDuration: number;
 
   @ApiProperty({ description: 'Product status', enum: STATUSES, required: false, default: 'ACTIVE' })

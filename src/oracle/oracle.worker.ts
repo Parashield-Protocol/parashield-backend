@@ -1,11 +1,13 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
+import type Redis from 'ioredis';
 import { OracleService, OracleReading } from './oracle.service';
 import { StellarService } from '../stellar/stellar.service';
 import { PolicyStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 
 // #307 — narrows an arbitrary fetchWithRetry<T> result for the success-path
 // log line without an `any` cast. Duck-typed rather than tied to a single
@@ -65,6 +67,7 @@ export class OracleWorker {
     private readonly config: ConfigService,
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
   @Cron(CronExpression.EVERY_HOUR)
@@ -100,6 +103,10 @@ export class OracleWorker {
     const metrics = this.getMetrics();
     this.logger.log(
       `Oracle poll cycle complete — submitted=${metrics.submitted} skipped=${metrics.skipped} duplicates=${metrics.duplicates} invalid=${metrics.invalid}`,
+    );
+
+    await recordWorkerHeartbeat(this.redis, 'oracle').catch((err) =>
+      this.logger.warn(`Failed to record worker heartbeat: ${err instanceof Error ? err.message : String(err)}`),
     );
   }
 

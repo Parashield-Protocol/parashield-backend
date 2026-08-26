@@ -70,6 +70,14 @@ export class RedisMemoryDto {
   usagePercent?: number;
 }
 
+export class WorkerHeartbeatDto {
+  @ApiProperty({ description: 'Whether the worker completed a run within its expected interval', enum: ['ok', 'stale'] })
+  status: 'ok' | 'stale';
+
+  @ApiProperty({ description: 'Timestamp of the worker\'s last completed run (ISO 8601)', required: false })
+  lastRunAt?: string;
+}
+
 export class QueueCheckDto {
   @ApiProperty({ description: 'Redis connectivity status', enum: ['ok', 'error'] })
   status: 'ok' | 'error';
@@ -79,6 +87,9 @@ export class QueueCheckDto {
 
   @ApiProperty({ description: 'Redis memory statistics', type: RedisMemoryDto, required: false })
   memory?: RedisMemoryDto;
+
+  @ApiProperty({ description: 'Background worker (cron consumer) liveness by worker name', type: WorkerHeartbeatDto, required: false })
+  workers?: Record<string, WorkerHeartbeatDto>;
 
   @ApiProperty({ description: 'Error message when status is "error"', required: false })
   error?: string;

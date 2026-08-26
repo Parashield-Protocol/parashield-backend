@@ -681,6 +681,23 @@ describe("PolicyService.calculatePremium", () => {
       expect(result.txHash).toBe("tx-hash-123");
     });
 
+    it("throws BadRequestException when signedXdr cannot be parsed for the configured network passphrase", async () => {
+      const dto = {
+        signedXdr: "not-a-valid-xdr-string",
+        productId: "prod-1",
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+      (service as any).stellar.networkPassphrase =
+        "Test SDF Network ; September 2015";
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(BadRequestException);
+    });
+
     it("throws GoneException (410) when XDR timeBounds.maxTime has already passed", async () => {
       const pastTime = Math.floor(Date.now() / 1000) - 600; // 10 minutes ago
       const expiredXdr = buildTestTxXdr({

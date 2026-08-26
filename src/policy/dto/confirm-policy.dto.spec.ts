@@ -2,9 +2,12 @@ import { validate } from 'class-validator';
 import { ConfirmPolicyDto } from './confirm-policy.dto';
 
 describe('ConfirmPolicyDto', () => {
+  const VALID_XDR =
+    'AAAAAgAAAACAGSzBPCxGRnuILDyZUUdQcaqeU1MD9IfaptE/vDuunQAAAGQAAAAAAAAAAgAAAAEAAAAAAAAAAAAAAAD0hlcAAAAAAAAAAAEAAAAAAAAACwAAAAAAAAACAAAAAAAAAAG8O66dAAAAQKsBUgVQ/bT36y2LHtnkA1i9de6DiGsvJnDx08nQ2Cp+Ic+9c++M7mtRarRCRjxBh0Y1E4FnntWcSm6J2bWEFQM=';
+
   function validDto(): ConfirmPolicyDto {
     const dto = new ConfirmPolicyDto();
-    dto.signedXdr = 'AAAAAgAAAAA...';
+    dto.signedXdr = VALID_XDR;
     dto.productId = '1';
     dto.coverageXlm = 500;
     dto.walletAddress = 'GMRFVCGKW6CSIEQIIIFFDKPQUXVBRNDFYKIPIOBAQPYXAL5QEGX2652T';
@@ -33,6 +36,29 @@ describe('ConfirmPolicyDto', () => {
       const errors = await validate(dto);
       expect(errors).toHaveLength(1);
       expect(errors[0].property).toBe('signedXdr');
+    });
+
+    it('fails when the string is not a parseable XDR envelope', async () => {
+      const dto = validDto();
+      dto.signedXdr = 'not-a-valid-xdr-string';
+      const errors = await validate(dto);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('signedXdr');
+    });
+
+    it('fails when the string is valid base64 but not an XDR envelope', async () => {
+      const dto = validDto();
+      dto.signedXdr = Buffer.from('just some random bytes, not xdr').toString('base64');
+      const errors = await validate(dto);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('signedXdr');
+    });
+
+    it('passes with a well-formed XDR envelope', async () => {
+      const dto = validDto();
+      dto.signedXdr = VALID_XDR;
+      const errors = await validate(dto);
+      expect(errors).toHaveLength(0);
     });
   });
 

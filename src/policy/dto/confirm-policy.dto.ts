@@ -10,11 +10,13 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { IsValidOracleKeyCoordinates } from './oracle-key-coordinates.validator';
+import { IsValidStellarXdr } from './stellar-xdr.validator';
 
 export class ConfirmPolicyDto {
   @ApiProperty({ description: 'Signed XDR transaction envelope from the wallet', example: 'AAAAAgAAAAA...' })
   @IsString()
   @IsNotEmpty()
+  @IsValidStellarXdr()
   signedXdr: string;
 
   @ApiProperty({ description: 'Insurance product ID', example: '1' })

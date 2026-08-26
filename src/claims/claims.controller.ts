@@ -27,6 +27,8 @@ export class ClaimsController {
   @Post()
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
+  // Manual claim submission gets a tighter limit than the app-wide default
+  // (60 req/60s) configured in app.module.ts, to slow down abuse of claim payouts.
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
   @ApiResponse({
@@ -41,6 +43,7 @@ export class ClaimsController {
   })
   @ApiResponse({ status: 403, description: 'Claimant does not match authenticated wallet' })
   @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
+  @ApiResponse({ status: 429, description: 'Too many requests — rate limit exceeded (5 req / 60 s)' })
   async submitClaim(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {

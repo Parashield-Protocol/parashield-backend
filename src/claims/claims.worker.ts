@@ -1,10 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PolicyStatus } from '@prisma/client';
+import type Redis from 'ioredis';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PolicyService } from '../policy/policy.service';
 import { transition } from '../policy/policy-status.machine';
+import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 
 const BATCH_SIZE = 10;
 
@@ -32,7 +34,14 @@ export class ClaimsWorker {
     private readonly claims: ClaimsService,
     private readonly prisma: PrismaService,
     private readonly policyService: PolicyService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
+
+  private async recordHeartbeat(): Promise<void> {
+    await recordWorkerHeartbeat(this.redis, 'claims').catch((err) =>
+      this.logger.warn(`Failed to record worker heartbeat: ${err instanceof Error ? err.message : String(err)}`),
+    );
+  }
 
   @Cron(CronExpression.EVERY_HOUR)
   async processActivePolicies(): Promise<void> {
@@ -52,6 +61,7 @@ export class ClaimsWorker {
 
     if (expiringPolicies.length === 0) {
       this.logger.log('No expiring policies found');
+      await this.recordHeartbeat();
       return;
     }
 
@@ -139,5 +149,6 @@ export class ClaimsWorker {
       `succeeded: ${totalSucceeded}, failed: ${totalFailed}, ` +
       `rpcErrors: ${totalRpcErrors}, elapsedMs: ${elapsedMs}`,
     );
+    await this.recordHeartbeat();
   }
 }
