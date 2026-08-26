@@ -6,12 +6,31 @@ import { GlobalExceptionFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { ThrottleGuard } from './common/guards/throttle.guard';
+import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
+
+// #382 — CORS defaults, kept identical to the previously hardcoded values.
+// Each can be overridden via env vars (see .env.example and README).
+const DEFAULT_CORS_METHODS = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
+const DEFAULT_CORS_ALLOWED_HEADERS = [
+  'Content-Type',
+  'Authorization',
+  'x-wallet-address',
+  'x-wallet-signature',
+  'x-wallet-message',
+  'x-api-key',
+  'x-admin-api-key',
+];
+
+function parseCsvEnv(value: string | undefined): string[] | undefined {
+  if (!value || !value.trim()) return undefined;
+  return value.split(',').map((entry) => entry.trim()).filter(Boolean);
+}
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
@@ -30,6 +49,12 @@ async function bootstrap() {
   // Explicit request body size limit (defaults are implicit and adapter-dependent)
   app.use(json({ limit: REQUEST_BODY_LIMIT }));
   app.use(urlencoded({ limit: REQUEST_BODY_LIMIT, extended: true }));
+
+  // #380 — sanitize user-provided strings in request bodies (trim + escape
+  // angle brackets) before validation and persistence. Runs on the Express
+  // adapter after the body parsers so every route is covered.
+  const sanitizer = new InputSanitizationMiddleware();
+  app.use((req, res, next) => sanitizer.use(req, res, next));
 
   // Global exception filter
   app.useGlobalFilters(new GlobalExceptionFilter());
@@ -63,11 +88,23 @@ async function bootstrap() {
     ? corsOrigin.split(',').map((o) => o.trim()).filter(Boolean)
     : corsOrigin.trim();
 
+  // #382 — CORS. CORS_ORIGIN is required and validated above (a single origin
+  // or a comma-separated list). Methods, allowed headers, and credentials can
+  // be tuned via env vars without code changes:
+  //   CORS_METHODS          comma-separated list   (default GET,POST,PUT,DELETE,OPTIONS)
+  //   CORS_ALLOWED_HEADERS  comma-separated list   (default: the headers below)
+  //   CORS_CREDENTIALS      "true" enables cookies/credentials (default false)
+  // Full documentation in README.md ("CORS configuration") and .env.example.
+  const corsMethods = parseCsvEnv(configService.get<string>('CORS_METHODS')) ?? DEFAULT_CORS_METHODS;
+  const corsAllowedHeaders = parseCsvEnv(configService.get<string>('CORS_ALLOWED_HEADERS')) ?? DEFAULT_CORS_ALLOWED_HEADERS;
+  const corsCredentials = configService.get<string>('CORS_CREDENTIALS')?.trim().toLowerCase() === 'true';
+
   // CORS
   app.enableCors({
     origin: parsedCorsOrigin,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'x-wallet-address', 'x-wallet-signature', 'x-wallet-message', 'x-api-key', 'x-admin-api-key'],
+    methods: corsMethods,
+    allowedHeaders: corsAllowedHeaders,
+    credentials: corsCredentials,
   });
 
   app.setGlobalPrefix('api/v1');

@@ -1,4 +1,4 @@
-import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, UnauthorizedException, HttpException, HttpStatus, Inject } from '@nestjs/common';
+import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, Logger, UnauthorizedException, HttpException, HttpStatus, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { timingSafeEqual } from 'crypto';
 import { JwtService } from './jwt.service';
@@ -13,9 +13,17 @@ interface FailureRecord {
 const RATE_LIMIT_WINDOW_MS = 60_000;  // 1 minute
 const RATE_LIMIT_MAX_FAILURES = 5;
 const REDIS_KEY_PREFIX = 'auth:operator:failures:';
+// #379 — how long a rotated-out key keeps working after the process starts
+// with the replacement key. Zero disables previous keys immediately.
+const DEFAULT_API_KEY_GRACE_MINUTES = 24 * 60;
 
 @Injectable()
 export class OperatorAuthGuard implements CanActivate {
+  private readonly logger = new Logger(OperatorAuthGuard.name);
+  // Rotation grace is measured from process start because env vars only change
+  // on a (re)start — that is exactly the moment a new key becomes active.
+  private readonly startedAtMs = Date.now();
+
   constructor(
     private readonly config: ConfigService,
     private readonly jwtService: JwtService,
@@ -123,7 +131,41 @@ export class OperatorAuthGuard implements CanActivate {
     const providedKey = this.getHeader(request, 'x-api-key') ?? this.getHeader(request, 'x-admin-api-key');
     if (!providedKey) return false;
 
-    return this.constantTimeEqual(providedKey, configuredKey);
+    // #379 — the current key always works; a rotated-out key keeps working
+    // for the grace window so clients can switch without downtime.
+    if (this.constantTimeEqual(providedKey, configuredKey)) return true;
+    return this.acceptsRotatedOutKey(providedKey);
+  }
+
+  /**
+   * #379 — API key rotation with grace period, zero downtime:
+   *   1. Move the old key into ORACLE_OPERATOR_API_KEY_PREVIOUS (and/or
+   *      ADMIN_API_KEY_PREVIOUS) and set the new value on the current variable,
+   *      then restart. Both keys authenticate during the grace window.
+   *   2. Clients migrate to the new key.
+   *   3. Remove the *_PREVIOUS variables (API_KEY_ROTATION_GRACE_MINUTES
+   *      bounds how long step 1's overlap lasts; default 24h).
+   */
+  private acceptsRotatedOutKey(providedKey: string): boolean {
+    const previousKeys = [
+      this.config.get<string>('ORACLE_OPERATOR_API_KEY_PREVIOUS'),
+      this.config.get<string>('ADMIN_API_KEY_PREVIOUS'),
+    ].filter((key): key is string => typeof key === 'string' && key.length > 0);
+
+    if (previousKeys.length === 0 || !this.isWithinGracePeriod()) return false;
+
+    const matched = previousKeys.some((key) => this.constantTimeEqual(providedKey, key));
+    if (matched) {
+      this.logger.warn('Authenticated with rotated-out API key during grace period');
+    }
+    return matched;
+  }
+
+  private isWithinGracePeriod(): boolean {
+    const raw = this.config.get<string>('API_KEY_ROTATION_GRACE_MINUTES');
+    const minutes = raw !== undefined && raw !== '' ? Number(raw) : DEFAULT_API_KEY_GRACE_MINUTES;
+    if (!Number.isFinite(minutes) || minutes <= 0) return false;
+    return Date.now() - this.startedAtMs < minutes * 60_000;
   }
 
   // #181 — a static, long-lived secret checked on every request is a prime

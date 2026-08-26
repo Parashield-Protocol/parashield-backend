@@ -1,9 +1,46 @@
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 
+// #381 — Prisma sizes its connection pool from DATABASE_URL parameters, not
+// from schema.prisma, so the defaults (num_cpus * 2 + 1 connections, 10s
+// pool timeout) are implicit and untuned. Apply explicit production-friendly
+// defaults here; operators can override each value via env vars or by setting
+// the parameter directly in DATABASE_URL (explicit URL params always win).
+const DEFAULT_CONNECTION_LIMIT = '10';
+const DEFAULT_POOL_TIMEOUT_SECONDS = '10';
+const DEFAULT_CONNECT_TIMEOUT_SECONDS = '5';
+
+/**
+ * Append Prisma connection-pool parameters to the datasource URL.
+ * Parameters already present in the URL are left untouched, and URLs that
+ * fail to parse are returned unchanged so startup never breaks on them.
+ */
+function withConnectionPoolParams(url: string | undefined): string | undefined {
+  if (!url) return url;
+  try {
+    const parsed = new URL(url);
+    if (!parsed.searchParams.has('connection_limit')) {
+      parsed.searchParams.set('connection_limit', process.env.DATABASE_CONNECTION_LIMIT || DEFAULT_CONNECTION_LIMIT);
+    }
+    if (!parsed.searchParams.has('pool_timeout')) {
+      parsed.searchParams.set('pool_timeout', process.env.DATABASE_POOL_TIMEOUT || DEFAULT_POOL_TIMEOUT_SECONDS);
+    }
+    if (!parsed.searchParams.has('connect_timeout')) {
+      parsed.searchParams.set('connect_timeout', process.env.DATABASE_CONNECT_TIMEOUT || DEFAULT_CONNECT_TIMEOUT_SECONDS);
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
 @Injectable()
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
+
+  constructor() {
+    super({ datasourceUrl: withConnectionPoolParams(process.env.DATABASE_URL) });
+  }
 
   async onModuleInit() {
     const maxRetries = 5;

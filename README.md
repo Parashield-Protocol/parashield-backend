@@ -34,6 +34,16 @@ ParaShield supports two authentication schemes:
 
 Operator-only oracle fetch endpoints require either `x-api-key: <ORACLE_OPERATOR_API_KEY>` or an admin JWT. Public endpoints such as `/api/v1/products`, `/api/v1/oracle/latest/:key`, `/api/v1/health`, and `/docs` do not run wallet-header middleware.
 
+### API key rotation
+
+Operator/admin API keys can be rotated without downtime:
+
+1. Set the new key on `ORACLE_OPERATOR_API_KEY` (or `ADMIN_API_KEY`) and move the outgoing key to `ORACLE_OPERATOR_API_KEY_PREVIOUS` (or `ADMIN_API_KEY_PREVIOUS`), then restart.
+2. Both keys authenticate during the grace window — requests using the old key are logged as warnings.
+3. Once all clients have migrated, remove the `*_PREVIOUS` variables.
+
+The overlap is bounded by `API_KEY_ROTATION_GRACE_MINUTES` (default 1440 = 24 hours, measured from process start). Setting it to `0` disables previous keys immediately.
+
 ---
 
 ## API Endpoints
@@ -111,6 +121,28 @@ Swagger docs at `http://localhost:3001/docs`.
 npm run build
 npm run start:prod
 ```
+
+---
+
+## CORS configuration
+
+CORS is enabled in `src/main.ts` and controlled entirely via environment variables (see `.env.example`):
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `CORS_ORIGIN` | Yes | — | Allowed origin(s). Single origin or comma-separated list, e.g. `https://app.example.com,https://staging.example.com`. The server refuses to start without it. |
+| `CORS_METHODS` | No | `GET,POST,PUT,DELETE,OPTIONS` | Comma-separated list of allowed HTTP methods. |
+| `CORS_ALLOWED_HEADERS` | No | `Content-Type,Authorization,x-wallet-address,x-wallet-signature,x-wallet-message,x-api-key,x-admin-api-key` | Comma-separated list of allowed request headers. |
+| `CORS_CREDENTIALS` | No | `false` | Set to `true` to send `Access-Control-Allow-Credentials` (needed only for cookie-based clients; the API itself authenticates via headers). |
+
+The defaults reproduce the previously hardcoded configuration, so no behavior changes unless the variables are set.
+
+---
+
+## Security & database configuration notes
+
+- **Input sanitization**: a global middleware (`InputSanitizationMiddleware`, registered in `src/main.ts`) trims every string in JSON/urlencoded request bodies and escapes `<`/`>` before validation and persistence, so markup cannot survive into stored values or reflected responses.
+- **Connection pooling**: Prisma pool sizing is applied at runtime to the datasource URL (`connection_limit=10`, `pool_timeout=10`, `connect_timeout=5`). Override each value with `DATABASE_CONNECTION_LIMIT`, `DATABASE_POOL_TIMEOUT`, `DATABASE_CONNECT_TIMEOUT`, or by putting the parameter directly in `DATABASE_URL`.
 
 ---
 

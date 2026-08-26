@@ -29,6 +29,21 @@ export interface EnvironmentVariables {
   USDC_CONTRACT?: string;
   POOL_CAPACITY_XLM?: string;
   KEEPER_MIN_BALANCE_XLM?: string;
+
+  // #379 — API key rotation (previous keys + grace window in minutes)
+  ORACLE_OPERATOR_API_KEY_PREVIOUS?: string;
+  ADMIN_API_KEY_PREVIOUS?: string;
+  API_KEY_ROTATION_GRACE_MINUTES?: string;
+
+  // #382 — CORS tuning (defaults in src/main.ts)
+  CORS_METHODS?: string;
+  CORS_ALLOWED_HEADERS?: string;
+  CORS_CREDENTIALS?: string;
+
+  // #381 — Prisma connection pool overrides (see src/prisma/prisma.service.ts)
+  DATABASE_CONNECTION_LIMIT?: string;
+  DATABASE_POOL_TIMEOUT?: string;
+  DATABASE_CONNECT_TIMEOUT?: string;
 }
 
 declare global {
