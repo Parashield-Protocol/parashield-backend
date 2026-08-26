@@ -10,6 +10,13 @@ export interface WebhookRegistration {
   isActive: boolean;
 }
 
+// #437 — Retry configuration for failed webhook deliveries.
+// Up to MAX_RETRY_ATTEMPTS additional attempts after the initial failure,
+// with exponential backoff starting at RETRY_BASE_DELAY_MS and doubling
+// each attempt (1 s → 2 s → 4 s by default).
+const MAX_RETRY_ATTEMPTS = 3;
+const RETRY_BASE_DELAY_MS = 1_000;
+
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
@@ -50,7 +57,6 @@ export class WebhooksService {
 
   async notifyPolicyStatusChange(event: { policyId: string; fromStatus: string; toStatus: string; timestamp: number }) {
     const registrations = this.getRegistrations();
-    const policyEventKey = `policy:${event.policyId}`;
 
     for (const registration of registrations) {
       if (!registration.events.includes('policy.status.change')) continue;
@@ -63,16 +69,17 @@ export class WebhooksService {
       };
 
       try {
-        await this.deliverWebhook(registration, payload);
+        await this.deliverWithRetry(registration, payload);
       } catch (err) {
-        this.logger.error(`Failed to deliver policy webhook to ${registration.url}: ${(err as Error).message}`);
+        this.logger.error(
+          `All delivery attempts failed for policy webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+        );
       }
     }
   }
 
   async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }) {
     const registrations = this.getRegistrations();
-    const claimEventKey = `claim:${event.claimId}`;
 
     for (const registration of registrations) {
       if (!registration.events.includes('claim.status.change')) continue;
@@ -85,14 +92,56 @@ export class WebhooksService {
       };
 
       try {
-        await this.deliverWebhook(registration, payload);
+        await this.deliverWithRetry(registration, payload);
       } catch (err) {
-        this.logger.error(`Failed to deliver claim webhook to ${registration.url}: ${(err as Error).message}`);
+        this.logger.error(
+          `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+        );
       }
     }
   }
 
-  private async deliverWebhook(registration: WebhookRegistration, payload: unknown) {
+  /**
+   * #437 — Deliver a webhook payload with exponential backoff retries.
+   *
+   * Attempt sequence (attempt numbers are 0-indexed):
+   *   - Attempt 0: immediate
+   *   - Attempt 1: wait RETRY_BASE_DELAY_MS  (1 s)
+   *   - Attempt 2: wait RETRY_BASE_DELAY_MS * 2  (2 s)
+   *   - Attempt 3: wait RETRY_BASE_DELAY_MS * 4  (4 s)
+   *
+   * Throws on the last attempt so callers can log the final failure.
+   */
+  private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
+    let lastError: Error | undefined;
+
+    for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        this.logger.warn(
+          `Retrying webhook ${registration.id} → ${registration.url} ` +
+          `(attempt ${attempt}/${MAX_RETRY_ATTEMPTS}, backoff ${delayMs} ms): ${lastError?.message}`,
+        );
+        await this.sleep(delayMs);
+      }
+
+      try {
+        await this.deliverWebhook(registration, payload);
+        if (attempt > 0) {
+          this.logger.log(
+            `Webhook ${registration.id} → ${registration.url} succeeded on attempt ${attempt}`,
+          );
+        }
+        return;
+      } catch (err) {
+        lastError = err as Error;
+      }
+    }
+
+    throw lastError!;
+  }
+
+  private async deliverWebhook(registration: WebhookRegistration, payload: unknown): Promise<void> {
     const secret = registration.secret;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -117,5 +166,9 @@ export class WebhooksService {
     const crypto = require('crypto');
     const payloadStr = JSON.stringify(payload);
     return crypto.createHmac('sha256', secret).update(payloadStr).digest('base64');
+  }
+
+  private sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 }
