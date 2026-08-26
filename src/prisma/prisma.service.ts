@@ -38,8 +38,33 @@ function withConnectionPoolParams(url: string | undefined): string | undefined {
 export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
 
+  // #439 — Read replica client. Instantiated only when DATABASE_REPLICA_URL
+  // is set; otherwise reader falls back to the primary so callers need no
+  // conditional logic and existing code paths are unchanged.
+  private readonly replicaClient: PrismaClient | null;
+
   constructor() {
     super({ datasourceUrl: withConnectionPoolParams(process.env.DATABASE_URL) });
+
+    const replicaUrl = withConnectionPoolParams(process.env.DATABASE_REPLICA_URL);
+    this.replicaClient = replicaUrl
+      ? new PrismaClient({ datasourceUrl: replicaUrl })
+      : null;
+  }
+
+  /**
+   * Returns the read-replica PrismaClient when DATABASE_REPLICA_URL is
+   * configured, otherwise returns the primary client.
+   *
+   * Use this for all read-only queries (findMany, findFirst, findUnique,
+   * count, aggregate) to offload traffic from the primary.
+   * Always use `this.prisma` (the primary) for writes and $transactions.
+   *
+   * @example
+   *   const items = await this.prisma.reader.policy.findMany({ ... });
+   */
+  get reader(): PrismaClient {
+    return this.replicaClient ?? this;
   }
 
   async onModuleInit() {
@@ -48,6 +73,10 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         await this.$connect();
+        if (this.replicaClient) {
+          await this.replicaClient.$connect();
+          this.logger.log('Read-replica connection established');
+        }
         this.logger.log('Database connection established');
         return;
       } catch (err) {
@@ -68,6 +97,9 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
 
   async onModuleDestroy() {
     await this.$disconnect();
+    if (this.replicaClient) {
+      await this.replicaClient.$disconnect();
+    }
     this.logger.log('Database connection closed');
   }
 }
