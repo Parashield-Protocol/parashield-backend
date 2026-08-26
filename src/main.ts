@@ -9,6 +9,7 @@ import { ThrottleGuard } from './common/guards/throttle.guard';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
 import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
+import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
@@ -153,6 +154,7 @@ async function bootstrap() {
     .addTag('events', 'Server-Sent Events (SSE) for real-time policy status streaming')
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
+  applyRateLimitHeaders(document);
   SwaggerModule.setup('docs', app, document);
 
   app.enableShutdownHooks();
