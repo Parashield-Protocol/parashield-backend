@@ -211,6 +211,32 @@ async function bootstrap() {
       '| `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `retryAfter` value |\n' +
       '| `INTERNAL_ERROR` | 500 | Unexpected server failure. Logged server-side; response omits internal details |\n' +
       '| `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC) |\n\n' +
+      '## Error Recovery\n\n' +
+      'Guidance for programmatically recovering from each error, keyed off `errorCode` ' +
+      '(not the human-readable `error` message, which may change between versions):\n\n' +
+      '| `errorCode` | Retryable | Recommended recovery |\n' +
+      '|-------------|-----------|----------------------|\n' +
+      '| `VALIDATION_ERROR` | No | Fix the request body per the validation details in `error`, then resend |\n' +
+      '| `BAD_REQUEST` | No | Correct the malformed field/value indicated in `error`, then resend |\n' +
+      '| `UNAUTHORIZED` | No | Re-authenticate (refresh the JWT or re-sign the wallet challenge), then resend |\n' +
+      '| `FORBIDDEN` | No | Not recoverable by retrying — the caller lacks permission for this resource/action |\n' +
+      '| `NOT_FOUND` | No | Verify the ID/path is correct; do not retry against the same path |\n' +
+      '| `CONFLICT` | No | Fetch current state first (e.g. existing claim) before deciding whether to resend |\n' +
+      '| `GONE` | No | Resource is permanently inaccessible; stop retrying |\n' +
+      '| `TOO_MANY_REQUESTS` | Yes | Wait `retryAfter` seconds (from the body) before retrying once |\n' +
+      '| `INTERNAL_ERROR` | Yes | Retry with exponential backoff; escalate if it persists across retries |\n' +
+      '| `SERVICE_UNAVAILABLE` | Yes | Retry with exponential backoff; check `/api/v1/health` to confirm dependency recovery |\n\n' +
+      '### Retry strategy\n\n' +
+      'For the retryable errors above (`TOO_MANY_REQUESTS`, `INTERNAL_ERROR`, `SERVICE_UNAVAILABLE`):\n\n' +
+      '1. Respect `retryAfter` / `Retry-After` when present instead of retrying immediately.\n' +
+      '2. Otherwise back off exponentially (e.g. 1s, 2s, 4s, 8s) with jitter, capped at a small number of attempts.\n' +
+      '3. For mutating requests (`POST`/`PUT`/`PATCH`), send the same `Idempotency-Key` header on every retry so a ' +
+      'request that actually succeeded server-side but timed out on the client is not re-executed — the API replays ' +
+      'the cached response (marked with `X-Idempotent-Replayed: true`) instead of processing it twice. Idempotency ' +
+      'keys are cached for 24 hours.\n' +
+      '4. Give up and surface the error to the caller once retries are exhausted; non-retryable errors ' +
+      '(`VALIDATION_ERROR`, `UNAUTHORIZED`, `FORBIDDEN`, `NOT_FOUND`, `CONFLICT`, `GONE`, `BAD_REQUEST`) should ' +
+      'never be retried unmodified — they will fail identically every time.\n\n' +
       '### Validation Errors (400)\n\n' +
       'When class-validator rejects a request body, the `error` field contains detailed constraint violations:\n\n' +
       '```json\n' +
