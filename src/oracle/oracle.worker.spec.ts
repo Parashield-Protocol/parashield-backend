@@ -1,3 +1,4 @@
+import type Redis from 'ioredis';
 import { OracleWorker } from './oracle.worker';
 import { OracleReading, OracleService } from './oracle.service';
 import { StellarService } from '../stellar/stellar.service';
@@ -29,6 +30,7 @@ describe('OracleWorker', () => {
   let configService: jest.Mocked<Pick<ConfigService, 'get'>>;
   let stellarService: jest.Mocked<Pick<StellarService, 'invokeContract'>>;
   let prismaService: jest.Mocked<any>;
+  let redisClient: jest.Mocked<Pick<Redis, 'set' | 'mget'>>;
 
   beforeEach(() => {
     jest.useFakeTimers();
@@ -53,6 +55,10 @@ describe('OracleWorker', () => {
         findMany: jest.fn().mockResolvedValue([]),
       },
     };
+    redisClient = {
+      set: jest.fn().mockResolvedValue('OK'),
+      mget: jest.fn().mockResolvedValue([]),
+    } as unknown as jest.Mocked<Pick<Redis, 'set' | 'mget'>>;
   });
 
   afterEach(() => {
@@ -69,6 +75,7 @@ describe('OracleWorker', () => {
       configService as unknown as ConfigService,
       stellarService as unknown as StellarService,
       prismaService as unknown as PrismaService,
+      redisClient as unknown as Redis,
     );
 
     const poll = worker.pollAndSubmit();
@@ -130,6 +137,7 @@ describe('OracleWorker', () => {
       configService as unknown as ConfigService,
       stellarService as unknown as StellarService,
       prismaService as unknown as PrismaService,
+      redisClient as unknown as Redis,
     );
 
     await worker.pollAndSubmit();
@@ -159,6 +167,7 @@ describe('OracleWorker', () => {
         configService as unknown as ConfigService,
         stellarService as unknown as StellarService,
         prismaService as unknown as PrismaService,
+        redisClient as unknown as Redis,
       );
     }
 
@@ -330,6 +339,7 @@ describe('OracleWorker', () => {
         configService as unknown as ConfigService,
         stellarService as unknown as StellarService,
         prismaService as unknown as PrismaService,
+        redisClient as unknown as Redis,
       );
     }
 

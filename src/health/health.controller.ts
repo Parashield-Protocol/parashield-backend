@@ -4,7 +4,8 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
-import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto } from './dto/health-response.dto';
+import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto } from './dto/health-response.dto';
+import { WORKER_HEARTBEATS } from '../common/worker-heartbeat';
 
 // #191 — default floor below which the keeper account is considered too low
 // to reliably keep paying transaction fees. Overridable via
@@ -29,7 +30,7 @@ const AVIATIONSTACK_HEALTH_URL =
 
 @ApiTags('health')
 @Controller('health')
-@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto)
+@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto)
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
@@ -48,7 +49,7 @@ export class HealthController {
    * Status codes:
    * - 200: All systems healthy
    * - 503: One or more dependencies are unavailable (DB, Stellar RPC, keeper,
-   *        Redis, Open-Meteo, or AviationStack)
+   *        Redis, a stale background worker heartbeat, Open-Meteo, or AviationStack)
    */
   @Get()
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
@@ -173,6 +174,35 @@ export class HealthController {
       this.logger.error(`Health check Redis failed: ${queueError}`);
     }
 
+    // Background worker (cron consumer) heartbeat check.
+    // This repo's "consumers" are @Cron jobs (ClaimsWorker, OracleWorker,
+    // AuthCleanupWorker), not a real Bull/BullMQ queue — the queueDepths
+    // probe above reads `bull:*:wait` lists that nothing in this codebase
+    // ever writes to, so it can't detect a stuck or crashed worker. Each
+    // worker instead writes a heartbeat to Redis at the end of every
+    // successful tick (see WORKER_HEARTBEATS); a missing key means the
+    // worker hasn't completed a run within ~2x its expected interval.
+    let workerHeartbeats: Record<string, { status: 'ok' | 'stale'; lastRunAt?: string }> | undefined;
+    try {
+      const workerNames = Object.keys(WORKER_HEARTBEATS) as Array<keyof typeof WORKER_HEARTBEATS>;
+      const values = await this.redis.mget(...workerNames.map((name) => WORKER_HEARTBEATS[name].key));
+      workerHeartbeats = Object.fromEntries(
+        workerNames.map((name, i) => {
+          const lastRunAt = values[i] ?? undefined;
+          return [name, lastRunAt ? { status: 'ok' as const, lastRunAt } : { status: 'stale' as const }];
+        }),
+      );
+      const staleWorkers = workerNames.filter((name) => workerHeartbeats![name].status === 'stale');
+      if (staleWorkers.length > 0) {
+        queueStatus = 'error';
+        const staleMsg = `Stale worker heartbeat(s): ${staleWorkers.join(', ')}`;
+        queueError  = queueError ? `${queueError}; ${staleMsg}` : staleMsg;
+        this.logger.error(`Health check: ${staleMsg}`);
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to fetch worker heartbeats: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
     // #426 — Open-Meteo reachability check.
     // Open-Meteo is a free API with no authentication requirement. A minimal
     // forecast request (1-day window at lat/lng 0,0) confirms HTTP reachability
@@ -261,6 +291,7 @@ export class HealthController {
         status: queueStatus,
         ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
         ...(redisMemory !== undefined ? { memory: redisMemory } : {}),
+        ...(workerHeartbeats !== undefined ? { workers: workerHeartbeats } : {}),
         ...(queueError ? { error: queueError } : {}),
       },
       externalApis: {

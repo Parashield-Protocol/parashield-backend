@@ -1,3 +1,4 @@
+import type Redis from 'ioredis';
 import { ClaimsWorker } from './claims.worker';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -10,6 +11,7 @@ describe('ClaimsWorker', () => {
     policy: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
   };
   let mockPolicyService: { getActiveProducts: jest.Mock };
+  let mockRedis: { set: jest.Mock; mget: jest.Mock };
 
   function policy(id: string, overrides: Partial<{ status: string }> = {}) {
     return {
@@ -30,10 +32,12 @@ describe('ClaimsWorker', () => {
       },
     };
     mockPolicyService = { getActiveProducts: jest.fn().mockResolvedValue([]) };
+    mockRedis = { set: jest.fn().mockResolvedValue('OK'), mget: jest.fn().mockResolvedValue([]) };
     worker = new ClaimsWorker(
       mockClaims as unknown as ClaimsService,
       mockPrisma as unknown as PrismaService,
       mockPolicyService as unknown as PolicyService,
+      mockRedis as unknown as Redis,
     );
   });
 
