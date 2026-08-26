@@ -10,12 +10,14 @@ import { JsonLogger } from './common/logging/json-logger.service';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
 import { UsdcPrecisionValidationMiddleware } from './common/middleware/usdc-precision-validation.middleware';
+import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
 import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
 import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
+import Redis from 'ioredis';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
@@ -31,6 +33,7 @@ const DEFAULT_CORS_ALLOWED_HEADERS = [
   'x-wallet-message',
   'x-api-key',
   'x-admin-api-key',
+  'Idempotency-Key',
 ];
 
 function parseCsvEnv(value: string | undefined): string[] | undefined {
@@ -78,6 +81,13 @@ async function bootstrap() {
   // excessive precision that don't match Stellar asset constraints.
   const usdcValidator = new UsdcPrecisionValidationMiddleware();
   app.use((req, res, next) => usdcValidator.use(req, res, next));
+
+  // #438 — idempotency key deduplication for mutating requests (POST/PUT/PATCH).
+  // Clients include an `Idempotency-Key` header; replayed requests with the
+  // same key get the cached response instead of re-executing the handler.
+  const redisClient = app.get<Redis>('REDIS_CLIENT');
+  const idempotency = new IdempotencyMiddleware(redisClient);
+  app.use((req, res, next) => idempotency.use(req, res, next));
 
   // Global exception filter
   app.useGlobalFilters(new GlobalExceptionFilter());
