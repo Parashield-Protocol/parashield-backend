@@ -156,7 +156,7 @@ async function bootstrap() {
       '|-----------|-------|\n' +
       '| Window    | 60 seconds |\n' +
       '| Limit     | 60 requests per window |\n' +
-      '| Scope     | Per IP address (uses `X-Forwarded-For` when behind a proxy) |\n\n' +
+      '| Scope     | Per authenticated user (wallet address) when the request carries valid auth; per IP address otherwise |\n\n' +
       '### Response headers\n\n' +
       'Every response includes the following headers so clients can track their current usage:\n\n' +
       '| Header | Description |\n' +
