@@ -8,6 +8,8 @@ import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serial
 import { ThrottleGuard } from './common/guards/throttle.guard';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
+import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
+import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
@@ -34,6 +36,8 @@ function parseCsvEnv(value: string | undefined): string[] | undefined {
 }
 
 async function bootstrap() {
+  await loadVaultSecrets();
+  await initializeOpenTelemetry();
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
 
