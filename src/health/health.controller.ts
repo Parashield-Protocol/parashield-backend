@@ -55,6 +55,7 @@ export class HealthController {
   async check() {
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
+    let dbPool: { active: number; idle: number; waiting: number } | undefined;
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
@@ -73,6 +74,24 @@ export class HealthController {
     } catch (err) {
       dbStatus = 'error';
       this.logger.error(`Health check DB query failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // #444 — connection pool health: query pg_stat_activity so load balancers
+    // can alert on pool exhaustion before queries start queuing or timing out.
+    try {
+      const rows = await this.prisma.$queryRaw<Array<{ state: string; count: bigint }>>`
+        SELECT state, COUNT(*)::int AS count
+        FROM pg_stat_activity
+        WHERE datname = current_database()
+        GROUP BY state
+      `;
+      dbPool = {
+        active:  Number(rows.find(r => r.state === 'active')?.count  ?? 0),
+        idle:    Number(rows.find(r => r.state === 'idle')?.count    ?? 0),
+        waiting: Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0),
+      };
+    } catch {
+      // Non-fatal: pg_stat_activity may be restricted on managed databases.
     }
 
     try {
@@ -154,75 +173,26 @@ export class HealthController {
       this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
     }
 
-    // #426 — AviationStack reachability check.
-    // The AviationStack API requires an API key. We check two things:
-    //   1. Configuration — is AVIATIONSTACK_API_KEY set?
-    //   2. Reachability — does the API endpoint respond (any HTTP status,
-    //      including 401/403, confirms the host is up)?
-    // A missing key is reported as degraded because flight delay oracle
-    // queries will fail at runtime even if the host itself is reachable.
-    const aviationStackApiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
-    aviationStackConfigured = !!aviationStackApiKey;
-
-    if (!aviationStackConfigured) {
-      aviationStackStatus = 'error';
-      aviationStackError  = 'AVIATIONSTACK_API_KEY is not configured';
-      this.logger.error(`Health check: ${aviationStackError}`);
-    } else {
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
-        try {
-          // Any HTTP response (including 4xx auth errors) means the host is up.
-          // A network-level failure or timeout means it is unreachable.
-          await fetch(`${AVIATIONSTACK_HEALTH_URL}${aviationStackApiKey}`, {
-            signal: controller.signal,
-          });
-        } finally {
-          clearTimeout(timeout);
-        }
-      } catch (err) {
-        aviationStackStatus = 'error';
-        aviationStackError  = err instanceof Error ? err.message : String(err);
-        this.logger.error(`Health check AviationStack failed: ${aviationStackError}`);
-      }
-    }
-
-    const healthy =
-      dbStatus        === 'ok' &&
-      stellarStatus   === 'ok' &&
-      queueStatus     === 'ok' &&
-      openMeteoStatus === 'ok' &&
-      aviationStackStatus === 'ok';
-
-    // #425 — health responses carry `success` so they match the standard
-    // envelope. On 503 we throw HttpException with the checks body as the
-    // exception message; GlobalExceptionFilter will serialize it under `error`
-    // as a JSON string via extractMessage(). We embed `success: false` inside
-    // the thrown body so both the raw body and the filter output are consistent.
-    const checks = {
-      database: {
-        status: dbStatus,
-        ...(dbError ? { error: dbError } : {}),
-      },
-      stellar: {
-        status: stellarStatus,
-        ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
-        ...(stellarError ? { error: stellarError } : {}),
-      },
-      queue: {
-        status: queueStatus,
-        ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
-        ...(queueError ? { error: queueError } : {}),
-      },
-      openMeteo: {
-        status: openMeteoStatus,
-        ...(openMeteoError ? { error: openMeteoError } : {}),
-      },
-      aviationStack: {
-        status: aviationStackStatus,
-        configured: aviationStackConfigured,
-        ...(aviationStackError ? { error: aviationStackError } : {}),
+    const body = {
+      status:    healthy ? 'ok' : 'degraded',
+      timestamp: new Date().toISOString(),
+      service:   'parashield-api',
+      checks: {
+        database: {
+          status: dbStatus,
+          ...(dbPool !== undefined ? { pool: dbPool } : {}),
+          ...(dbError ? { error: dbError } : {}),
+        },
+        stellar: {
+          status: stellarStatus,
+          ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
+          ...(stellarError ? { error: stellarError } : {}),
+        },
+        queue: {
+          status: queueStatus,
+          ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
+          ...(queueError ? { error: queueError } : {}),
+        },
       },
     };
 

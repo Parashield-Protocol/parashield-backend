@@ -75,7 +75,10 @@ async function bootstrap() {
   app.useGlobalInterceptors(new LoggingInterceptor(), new BigIntSerializerInterceptor());
 
   // Global guards
-  app.useGlobalGuards(new ThrottleGuard());
+  // REMOVED: app.useGlobalGuards(new ThrottleGuard());
+  // Issue #325: Duplicate rate limiting removed. ThrottlerGuard (Redis-backed) is already
+  // registered globally in app.module.ts via APP_GUARD provider. The custom ThrottleGuard
+  // (in-memory Map) was causing conflicting counts in multi-instance deployments.
 
   // Global validation pipe
   app.useGlobalPipes(
