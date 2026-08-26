@@ -6,7 +6,7 @@ import {
   HttpStatus,
   OnModuleDestroy,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 
 interface RequestWindow {
   count: number;
@@ -44,7 +44,9 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
   }
 
   canActivate(context: ExecutionContext): boolean {
-    const request = context.switchToHttp().getRequest<Request>();
+    const http = context.switchToHttp();
+    const request = http.getRequest<Request>();
+    const response = http.getResponse<Response>();
     const ip = this.extractIP(request);
     const now = Date.now();
 
@@ -56,6 +58,7 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
       // for the cleanup sweep above.
       this.requests.delete(ip);
       this.requests.set(ip, { count: 1, windowStart: now });
+      this.setRateLimitHeaders(response, 1, now);
       return true;
     }
 
@@ -63,6 +66,11 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
       const retryAfter = Math.ceil(
         (window.windowStart + this.TIME_WINDOW_MS - now) / 1000,
       );
+      const resetAt = Math.ceil((window.windowStart + this.TIME_WINDOW_MS) / 1000);
+      response.setHeader('X-RateLimit-Limit', this.MAX_REQUESTS);
+      response.setHeader('X-RateLimit-Remaining', 0);
+      response.setHeader('X-RateLimit-Reset', resetAt);
+      response.setHeader('Retry-After', retryAfter);
       throw new HttpException(
         {
           statusCode: HttpStatus.TOO_MANY_REQUESTS,
@@ -77,7 +85,19 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     }
 
     window.count++;
+    this.setRateLimitHeaders(response, window.count, window.windowStart);
     return true;
+  }
+
+  private setRateLimitHeaders(
+    response: Response,
+    used: number,
+    windowStart: number,
+  ): void {
+    const resetAt = Math.ceil((windowStart + this.TIME_WINDOW_MS) / 1000);
+    response.setHeader('X-RateLimit-Limit', this.MAX_REQUESTS);
+    response.setHeader('X-RateLimit-Remaining', Math.max(0, this.MAX_REQUESTS - used));
+    response.setHeader('X-RateLimit-Reset', resetAt);
   }
 
   private extractIP(request: Request): string {
