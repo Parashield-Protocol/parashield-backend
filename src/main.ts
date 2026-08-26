@@ -124,7 +124,35 @@ async function bootstrap() {
   // Swagger docs at /docs
   const swaggerConfig = new DocumentBuilder()
     .setTitle('ParaShield API')
-    .setDescription('Decentralized parametric insurance protocol on Stellar Soroban')
+    .setDescription(
+      'Decentralized parametric insurance protocol on Stellar Soroban\n\n' +
+      '## Rate Limiting\n\n' +
+      'All endpoints are protected by a global rate limiter applied per client IP address.\n\n' +
+      '| Parameter | Value |\n' +
+      '|-----------|-------|\n' +
+      '| Window    | 60 seconds |\n' +
+      '| Limit     | 60 requests per window |\n' +
+      '| Scope     | Per IP address (uses `X-Forwarded-For` when behind a proxy) |\n\n' +
+      '### Response headers\n\n' +
+      'Every response includes the following headers so clients can track their current usage:\n\n' +
+      '| Header | Description |\n' +
+      '|--------|-------------|\n' +
+      '| `X-RateLimit-Limit` | Maximum requests allowed in the current window (always `60`) |\n' +
+      '| `X-RateLimit-Remaining` | Requests remaining before the limit is hit |\n' +
+      '| `X-RateLimit-Reset` | Unix timestamp (seconds) when the window resets |\n\n' +
+      '### Exceeded limit — 429 Too Many Requests\n\n' +
+      'When the limit is exceeded the API responds with HTTP **429** and an additional ' +
+      '`Retry-After` header indicating how many seconds to wait before retrying.\n\n' +
+      '```json\n' +
+      '{\n' +
+      '  "success": false,\n' +
+      '  "errorCode": "TOO_MANY_REQUESTS",\n' +
+      '  "error": "Too many requests. Please try again later.",\n' +
+      '  "statusCode": 429,\n' +
+      '  "retryAfter": 42\n' +
+      '}\n' +
+      '```',
+    )
     .setVersion('1.0')
     .addApiKey(
       {
