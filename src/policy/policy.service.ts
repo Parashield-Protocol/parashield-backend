@@ -350,7 +350,14 @@ export class PolicyService {
    * Returns the on-chain policyId and txHash on success.
    */
   async confirmAndCreatePolicy(dto: ConfirmPolicyDto, authenticatedWallet: string): Promise<{ policyId: string; txHash: string }> {
-    const tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
+    let tx: Transaction;
+    try {
+      tx = TransactionBuilder.fromXDR(dto.signedXdr, this.stellar.networkPassphrase) as Transaction;
+    } catch (err) {
+      throw new BadRequestException(
+        `signedXdr could not be parsed for network passphrase "${this.stellar.networkPassphrase}": ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
 
     // Reject XDRs with no timeBounds or an expired maxTime (#102)
     const nowSeconds = Math.floor(Date.now() / 1000);
