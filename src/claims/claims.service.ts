@@ -132,12 +132,6 @@ export class ClaimsService {
     await this.auditOp('Policy', policyId, PolicyStatus.ACTIVE, PolicyStatus.PROCESSING, 'autoProcess claim evaluation started')
       .catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} PROCESSING gate`, err));
     this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.PROCESSING);
-    this.webhooks.notifyClaimStatusChange({
-      claimId: claim.id,
-      fromStatus: PolicyStatus.ACTIVE,
-      toStatus: PolicyStatus.PROCESSING,
-      timestamp: Date.now(),
-    });
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
@@ -192,12 +186,12 @@ export class ClaimsService {
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: product not found'),
       ]);
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
-    this.webhooks.notifyClaimStatusChange({
-      claimId: claim.id,
-      fromStatus: ClaimStatus.PROCESSING,
-      toStatus: PolicyStatus.ACTIVE,
-      timestamp: Date.now(),
-    });
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.FAILED,
+        timestamp: Date.now(),
+      });
       return 'Rejected';
     }
     // #245 — Guard against non-numeric threshold values. Product.threshold is a
@@ -224,13 +218,13 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: non-numeric product threshold'),
       ]);
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
-    this.webhooks.notifyClaimStatusChange({
-      claimId: claim.id,
-      fromStatus: ClaimStatus.PROCESSING,
-      toStatus: PolicyStatus.ACTIVE,
-      timestamp: Date.now(),
-    });
-    return 'Rejected';
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.FAILED,
+        timestamp: Date.now(),
+      });
+      return 'Rejected';
     }
     const threshold  = BigInt(Math.round(rawThreshold * 1e7));
     const comparison = product.comparison;
@@ -288,13 +282,13 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: on-chain payout failed'),
       ]);
 this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
-    this.webhooks.notifyClaimStatusChange({
-      claimId: claim.id,
-      fromStatus: ClaimStatus.PROCESSING,
-      toStatus: PolicyStatus.ACTIVE,
-      timestamp: Date.now(),
-    });
-    return 'Rejected';
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.FAILED,
+        timestamp: Date.now(),
+      });
+      return 'Rejected';
     }
 
     // #166 — Wrap both DB writes in a single transaction so a crash between them can't
@@ -333,12 +327,12 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         data: { entityType: 'Policy', entityId: policyId, fromStatus: PolicyStatus.PROCESSING, toStatus: PolicyStatus.CLAIMED, reason: `Payout confirmed, txHash=${txHash}` },
       }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} CLAIMED transition`, err));
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CLAIMED);
-    this.webhooks.notifyClaimStatusChange({
-      claimId: claim.id,
-      fromStatus: ClaimStatus.PROCESSING,
-      toStatus: PolicyStatus.CLAIMED,
-      timestamp: Date.now(),
-    });
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.PAID,
+        timestamp: Date.now(),
+      });
     }
 
     return 'Paid';
@@ -348,21 +342,11 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
   async submitClaim(claimant: string, policyId: string): Promise<string> {
     this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant}`);
 
-    // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
-    const existingClaim = await this.prisma.claim.findFirst({
-      where: {
-        policyId,
-        status: { in: [ClaimStatus.PAID, ClaimStatus.PROCESSING, ClaimStatus.PENDING] },
-      },
-    });
-
-    if (existingClaim) {
-      this.logger.warn(
-        `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
-      );
-      throw new ConflictException('Claim already exists for this policy');
-    }
-
+    // #371 — Resolve policy and validate ownership FIRST, before any status
+    // or duplicate-claim probes. Running the duplicate guard with only a
+    // policyId before ownership checks would let an authenticated stranger
+    // enumerate whether any active/processing claim exists on someone else's
+    // policy by watching for ConflictException vs ForbiddenException.
     const policy = await this.prisma.policy.findUnique({ where: { id: policyId } });
     if (!policy) {
       throw new NotFoundException(`Policy ${policyId} not found`);
@@ -381,6 +365,21 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     // lazily-updated status column (the EXPIRED cron runs at best once an hour).
     if (new Date() > policy.endTime) {
       throw new ConflictException(`Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`);
+    }
+
+    // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
+    const existingClaim = await this.prisma.claim.findFirst({
+      where: {
+        policyId,
+        status: { in: [ClaimStatus.PAID, ClaimStatus.PROCESSING, ClaimStatus.PENDING] },
+      },
+    });
+
+    if (existingClaim) {
+      this.logger.warn(
+        `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
+      );
+      throw new ConflictException('Claim already exists for this policy');
     }
 
     const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
