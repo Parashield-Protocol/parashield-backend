@@ -7,6 +7,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { ThrottleGuard } from './common/guards/throttle.guard';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
+import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
@@ -49,6 +50,12 @@ async function bootstrap() {
   // Explicit request body size limit (defaults are implicit and adapter-dependent)
   app.use(json({ limit: REQUEST_BODY_LIMIT }));
   app.use(urlencoded({ limit: REQUEST_BODY_LIMIT, extended: true }));
+
+  // #409 — per-request application-level timeout. Responds with 408 and
+  // destroys the socket if a handler does not complete within SERVER_TIMEOUT_MS.
+  // This is distinct from server.timeout (set later), which is a TCP idle timeout.
+  const requestTimeout = new RequestTimeoutMiddleware(SERVER_TIMEOUT_MS);
+  app.use((req, res, next) => requestTimeout.use(req, res, next));
 
   // #380 — sanitize user-provided strings in request bodies (trim + escape
   // angle brackets) before validation and persistence. Runs on the Express
