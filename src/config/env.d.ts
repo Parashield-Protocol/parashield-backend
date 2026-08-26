@@ -40,6 +40,15 @@ export interface EnvironmentVariables {
   CORS_ALLOWED_HEADERS?: string;
   CORS_CREDENTIALS?: string;
 
+  // Optional secrets management / tracing / testing
+  VAULT_ADDR?: string;
+  VAULT_TOKEN?: string;
+  VAULT_KV_PATH?: string;
+  OTEL_SERVICE_NAME?: string;
+  OTEL_EXPORTER_OTLP_ENDPOINT?: string;
+  OTEL_EXPORTER_OTLP_HEADERS?: string;
+  OTEL_SDK_DISABLED?: string;
+
   // #381 — Prisma connection pool overrides (see src/prisma/prisma.service.ts)
   DATABASE_CONNECTION_LIMIT?: string;
   DATABASE_POOL_TIMEOUT?: string;
