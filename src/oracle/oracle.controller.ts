@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  NotFoundException,
   Param,
   Post,
   Query,
@@ -68,14 +69,8 @@ export class OracleController {
     },
   })
   @ApiResponse({
-    status: 200,
-    description: "No reading found for key",
-    schema: {
-      example: {
-        success: false,
-        error: "No reading found for key: rainfall:-0.0917,34.7679:2026-06",
-      },
-    },
+    status: 404,
+    description: "No reading found for the given key",
   })
   @ApiResponse({
     status: 429,
@@ -85,7 +80,7 @@ export class OracleController {
     const decoded = decodeURIComponent(key ?? "");
     const reading = await this.oracle.getLatestReading(decoded);
     if (!reading) {
-      return { success: false, error: `No reading found for key: ${decoded}` };
+      throw new NotFoundException(`No reading found for key: ${decoded}`);
     }
     return {
       success: true,
@@ -184,14 +179,8 @@ export class OracleController {
     },
   })
   @ApiResponse({
-    status: 200,
-    description: "No reading found for key",
-    schema: {
-      example: {
-        success: false,
-        error: "No reading found for key: rainfall:-0.0917,34.7679:2026-06",
-      },
-    },
+    status: 404,
+    description: "No reading found for the given key",
   })
   @ApiResponse({
     status: 429,
@@ -200,7 +189,7 @@ export class OracleController {
   async getLatestReading(@Param("key") key: string) {
     const reading = await this.oracle.getLatestReading(key);
     if (!reading) {
-      return { success: false, error: `No reading found for key: ${key}` };
+      throw new NotFoundException(`No reading found for key: ${key}`);
     }
     return {
       success: true,

@@ -34,7 +34,9 @@ export class WebhooksController {
       'containing an HMAC-SHA256 digest of the JSON payload, base64-encoded. Verify with:\n' +
       '```\n' +
       'crypto.createHmac("sha256", secret).update(rawBody).digest("base64")\n' +
-      '```',
+      '```\n\n' +
+      '**Retry behaviour:** Failed deliveries are automatically retried up to 3 times using exponential backoff ' +
+      '(delays: 1 s → 2 s → 4 s). If all attempts fail the error is logged and the event is dropped.',
   })
   @ApiBearerAuth()
   @ApiResponse({
@@ -44,11 +46,12 @@ export class WebhooksController {
   })
   @ApiResponse({ status: 400, description: 'Invalid request body' })
   register(@Body() dto: RegisterWebhookDto) {
-    return this.webhooks.registerWebhook({
+    const result = this.webhooks.registerWebhook({
       url: dto.url,
       events: dto.events,
       secret: dto.secret,
     });
+    return { success: true, data: result };
   }
 
   /** GET /api/v1/webhooks — list all registered webhooks */
@@ -58,9 +61,18 @@ export class WebhooksController {
   @ApiResponse({
     status: 200,
     description: 'Returns list of active webhook registrations',
-    schema: { type: 'array', items: { $ref: getSchemaPath(WebhookListItemDto) } },
+    schema: {
+      allOf: [
+        {
+          properties: {
+            success: { type: 'boolean', example: true },
+            data: { type: 'array', items: { $ref: getSchemaPath(WebhookListItemDto) } },
+          },
+        },
+      ],
+    },
   })
   list() {
-    return this.webhooks.getRegistrations();
+    return { success: true, data: this.webhooks.getRegistrations() };
   }
 }

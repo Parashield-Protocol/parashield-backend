@@ -15,6 +15,17 @@ const DEFAULT_KEEPER_MIN_BALANCE_XLM = 5;
 // premature pod restarts whenever Horizon was merely slow, not down.
 const HEALTH_CHECK_RPC_TIMEOUT_MS = 3000;
 
+// #426 — Lightweight probe URLs for external data providers.
+// Open-Meteo: free API, no key — a minimal forecast request with a 1-day
+//   window for the equator verifies HTTP reachability without side effects.
+// AviationStack: key-gated — we send a minimal flights request; a 401/403
+//   response still confirms the API endpoint itself is reachable (key
+//   misconfiguration is surfaced separately via the `configured` flag).
+const OPEN_METEO_HEALTH_URL =
+  'https://api.open-meteo.com/v1/forecast?latitude=0&longitude=0&daily=precipitation_sum&forecast_days=1&timezone=UTC';
+const AVIATIONSTACK_HEALTH_URL =
+  'https://api.aviationstack.com/v1/flights?flight_iata=AA1&access_key=';
+
 @ApiTags('health')
 @Controller('health')
 export class HealthController {
@@ -29,11 +40,13 @@ export class HealthController {
 
   /**
    * GET /api/v1/health
-   * Returns service health status including DB and Stellar connectivity checks.
+   * Returns service health status including DB, Stellar, queue, and external
+   * API dependency connectivity checks.
    *
    * Status codes:
    * - 200: All systems healthy
-   * - 503: One or more dependencies are unavailable (DB, Stellar RPC, or keeper)
+   * - 503: One or more dependencies are unavailable (DB, Stellar RPC, keeper,
+   *        Redis, Open-Meteo, or AviationStack)
    */
   @Get()
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
@@ -47,6 +60,13 @@ export class HealthController {
     let keeperBalanceXlm: string | undefined;
     let queueStatus: 'ok' | 'error' = 'ok';
     let queueError: string | undefined;
+
+    // #426 — external API dependency statuses
+    let openMeteoStatus: 'ok' | 'error' = 'ok';
+    let openMeteoError: string | undefined;
+    let aviationStackStatus: 'ok' | 'error' = 'ok';
+    let aviationStackError: string | undefined;
+    let aviationStackConfigured: boolean | undefined;
 
     try {
       await this.prisma.$queryRaw`SELECT 1`;
@@ -110,34 +130,121 @@ export class HealthController {
       this.logger.error(`Health check Redis failed: ${queueError}`);
     }
 
-    const healthy = dbStatus === 'ok' && stellarStatus === 'ok' && queueStatus === 'ok';
+    // #426 — Open-Meteo reachability check.
+    // Open-Meteo is a free API with no authentication requirement. A minimal
+    // forecast request (1-day window at lat/lng 0,0) confirms HTTP reachability
+    // without consuming any quota. Any non-2xx response or network error is
+    // flagged as degraded — oracle rainfall and temperature feeds will fail.
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+      try {
+        const res = await fetch(OPEN_METEO_HEALTH_URL, { signal: controller.signal });
+        if (!res.ok) {
+          openMeteoStatus = 'error';
+          openMeteoError  = `Open-Meteo responded with HTTP ${res.status}`;
+          this.logger.error(`Health check: ${openMeteoError}`);
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (err) {
+      openMeteoStatus = 'error';
+      openMeteoError  = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
+    }
 
-    const body = {
-      status:    healthy ? 'ok' : 'degraded',
-      timestamp: new Date().toISOString(),
-      service:   'parashield-api',
-      checks: {
-        database: {
-          status: dbStatus,
-          ...(dbError ? { error: dbError } : {}),
-        },
-        stellar: {
-          status: stellarStatus,
-          ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
-          ...(stellarError ? { error: stellarError } : {}),
-        },
-        queue: {
-          status: queueStatus,
-          ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
-          ...(queueError ? { error: queueError } : {}),
-        },
+    // #426 — AviationStack reachability check.
+    // The AviationStack API requires an API key. We check two things:
+    //   1. Configuration — is AVIATIONSTACK_API_KEY set?
+    //   2. Reachability — does the API endpoint respond (any HTTP status,
+    //      including 401/403, confirms the host is up)?
+    // A missing key is reported as degraded because flight delay oracle
+    // queries will fail at runtime even if the host itself is reachable.
+    const aviationStackApiKey = this.config.get<string>('AVIATIONSTACK_API_KEY');
+    aviationStackConfigured = !!aviationStackApiKey;
+
+    if (!aviationStackConfigured) {
+      aviationStackStatus = 'error';
+      aviationStackError  = 'AVIATIONSTACK_API_KEY is not configured';
+      this.logger.error(`Health check: ${aviationStackError}`);
+    } else {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+        try {
+          // Any HTTP response (including 4xx auth errors) means the host is up.
+          // A network-level failure or timeout means it is unreachable.
+          await fetch(`${AVIATIONSTACK_HEALTH_URL}${aviationStackApiKey}`, {
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeout);
+        }
+      } catch (err) {
+        aviationStackStatus = 'error';
+        aviationStackError  = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Health check AviationStack failed: ${aviationStackError}`);
+      }
+    }
+
+    const healthy =
+      dbStatus        === 'ok' &&
+      stellarStatus   === 'ok' &&
+      queueStatus     === 'ok' &&
+      openMeteoStatus === 'ok' &&
+      aviationStackStatus === 'ok';
+
+    // #425 — health responses carry `success` so they match the standard
+    // envelope. On 503 we throw HttpException with the checks body as the
+    // exception message; GlobalExceptionFilter will serialize it under `error`
+    // as a JSON string via extractMessage(). We embed `success: false` inside
+    // the thrown body so both the raw body and the filter output are consistent.
+    const checks = {
+      database: {
+        status: dbStatus,
+        ...(dbError ? { error: dbError } : {}),
+      },
+      stellar: {
+        status: stellarStatus,
+        ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
+        ...(stellarError ? { error: stellarError } : {}),
+      },
+      queue: {
+        status: queueStatus,
+        ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
+        ...(queueError ? { error: queueError } : {}),
+      },
+      openMeteo: {
+        status: openMeteoStatus,
+        ...(openMeteoError ? { error: openMeteoError } : {}),
+      },
+      aviationStack: {
+        status: aviationStackStatus,
+        configured: aviationStackConfigured,
+        ...(aviationStackError ? { error: aviationStackError } : {}),
       },
     };
 
     if (!healthy) {
-      throw new HttpException(body, HttpStatus.SERVICE_UNAVAILABLE);
+      throw new HttpException(
+        {
+          success:   false,
+          status:    'degraded',
+          timestamp: new Date().toISOString(),
+          service:   'parashield-api',
+          checks,
+        },
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
     }
 
-    return body;
+    return {
+      success:   true,
+      status:    'ok',
+      timestamp: new Date().toISOString(),
+      service:   'parashield-api',
+      checks,
+    };
   }
 }
