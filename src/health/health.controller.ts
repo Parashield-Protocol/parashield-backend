@@ -173,28 +173,92 @@ export class HealthController {
       this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
     }
 
-    const body = {
-      status:    healthy ? 'ok' : 'degraded',
-      timestamp: new Date().toISOString(),
-      service:   'parashield-api',
-      checks: {
-        database: {
-          status: dbStatus,
-          ...(dbPool !== undefined ? { pool: dbPool } : {}),
-          ...(dbError ? { error: dbError } : {}),
+    // #466 — Redis memory usage monitoring
+    // Track Redis memory consumption to detect memory exhaustion before it
+    // causes failures. Redis INFO memory command returns current memory usage,
+    // peak usage, and configured max memory. Alert on high utilization.
+    let redisMemory: { used: string; peak: string; maxmemory: string; usagePercent?: number } | undefined;
+    try {
+      const memInfo = await this.redis.info('memory');
+      const lines = memInfo.split('\r\n');
+      const used = lines.find(l => l.startsWith('used_memory_human:'))?.split(':')[1] || 'unknown';
+      const peak = lines.find(l => l.startsWith('used_memory_peak_human:'))?.split(':')[1] || 'unknown';
+      const maxmemory = lines.find(l => l.startsWith('maxmemory_human:'))?.split(':')[1] || 'unknown';
+      const usedBytes = parseInt(lines.find(l => l.startsWith('used_memory:'))?.split(':')[1] || '0');
+      const maxBytes = parseInt(lines.find(l => l.startsWith('maxmemory:'))?.split(':')[1] || '0');
+      
+      redisMemory = { used, peak, maxmemory };
+      if (maxBytes > 0) {
+        redisMemory.usagePercent = Math.round((usedBytes / maxBytes) * 100);
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to fetch Redis memory info: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    // #463 — Database transaction throughput monitoring
+    // Track database transaction rate to detect performance degradation.
+    // pg_stat_database provides commit/rollback counters; delta between
+    // health checks gives throughput. Performance issues surface as
+    // declining commit rates or rising rollback ratios.
+    let dbThroughput: { commits: number; rollbacks: number; conflicts: number } | undefined;
+    try {
+      const [stats] = await this.prisma.$queryRaw<Array<{ xact_commit: bigint; xact_rollback: bigint; conflicts: bigint }>>`
+        SELECT xact_commit, xact_rollback, conflicts
+        FROM pg_stat_database
+        WHERE datname = current_database()
+      `;
+      if (stats) {
+        dbThroughput = {
+          commits: Number(stats.xact_commit),
+          rollbacks: Number(stats.xact_rollback),
+          conflicts: Number(stats.conflicts),
+        };
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to fetch database throughput stats: ${err instanceof Error ? err.message : String(err)}`);
+    }
+
+    const checks = {
+      database: {
+        status: dbStatus,
+        ...(dbPool !== undefined ? { pool: dbPool } : {}),
+        ...(dbThroughput !== undefined ? { throughput: dbThroughput } : {}),
+        ...(dbError ? { error: dbError } : {}),
+      },
+      stellar: {
+        status: stellarStatus,
+        ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
+        ...(stellarError ? { error: stellarError } : {}),
+      },
+      queue: {
+        status: queueStatus,
+        ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
+        ...(redisMemory !== undefined ? { memory: redisMemory } : {}),
+        ...(queueError ? { error: queueError } : {}),
+      },
+      externalApis: {
+        openMeteo: {
+          status: openMeteoStatus,
+          ...(openMeteoError ? { error: openMeteoError } : {}),
         },
-        stellar: {
-          status: stellarStatus,
-          ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
-          ...(stellarError ? { error: stellarError } : {}),
-        },
-        queue: {
-          status: queueStatus,
-          ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
-          ...(queueError ? { error: queueError } : {}),
-        },
+        ...(aviationStackConfigured !== undefined
+          ? {
+              aviationStack: {
+                status: aviationStackStatus,
+                configured: aviationStackConfigured,
+                ...(aviationStackError ? { error: aviationStackError } : {}),
+              },
+            }
+          : {}),
       },
     };
+
+    const healthy = 
+      dbStatus === 'ok' && 
+      stellarStatus === 'ok' && 
+      queueStatus === 'ok' &&
+      openMeteoStatus === 'ok' &&
+      aviationStackStatus === 'ok';
 
     if (!healthy) {
       throw new HttpException(

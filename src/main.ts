@@ -8,6 +8,7 @@ import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serial
 import { ThrottleGuard } from './common/guards/throttle.guard';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
+import { UsdcPrecisionValidationMiddleware } from './common/middleware/usdc-precision-validation.middleware';
 import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
 import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
@@ -67,6 +68,12 @@ async function bootstrap() {
   // adapter after the body parsers so every route is covered.
   const sanitizer = new InputSanitizationMiddleware();
   app.use((req, res, next) => sanitizer.use(req, res, next));
+
+  // #465 — validate USDC amount precision (7 decimal places max) before
+  // validation and persistence. Prevents contract errors from amounts with
+  // excessive precision that don't match Stellar asset constraints.
+  const usdcValidator = new UsdcPrecisionValidationMiddleware();
+  app.use((req, res, next) => usdcValidator.use(req, res, next));
 
   // Global exception filter
   app.useGlobalFilters(new GlobalExceptionFilter());
@@ -153,6 +160,70 @@ async function bootstrap() {
       '  "error": "Too many requests. Please try again later.",\n' +
       '  "statusCode": 429,\n' +
       '  "retryAfter": 42\n' +
+      '}\n' +
+      '```\n\n' +
+      '## Error Response Structure\n\n' +
+      'All error responses follow a consistent envelope format for reliable parsing:\n\n' +
+      '```json\n' +
+      '{\n' +
+      '  "success": false,\n' +
+      '  "errorCode": "NOT_FOUND",\n' +
+      '  "error": "Policy not found",\n' +
+      '  "statusCode": 404,\n' +
+      '  "path": "/api/v1/policies/abc123",\n' +
+      '  "timestamp": "2024-01-15T10:30:00.000Z"\n' +
+      '}\n' +
+      '```\n\n' +
+      '### Error Response Fields\n\n' +
+      '| Field | Type | Description |\n' +
+      '|-------|------|-------------|\n' +
+      '| `success` | `boolean` | Always `false` for errors |\n' +
+      '| `errorCode` | `string` | Stable machine-readable code (see table below) - key off this, not `error` |\n' +
+      '| `error` | `string` or `object` | Human-readable message, or validation error details for 400s. May change between versions |\n' +
+      '| `statusCode` | `number` | HTTP status code |\n' +
+      '| `path` | `string` | The request path that produced the error |\n' +
+      '| `timestamp` | `string` | ISO-8601 UTC timestamp |\n' +
+      '| `retryAfter` | `number` | (Optional) Seconds to wait before retrying - present only on 429 responses |\n\n' +
+      '### Error Codes Reference\n\n' +
+      '| `errorCode` | HTTP Status | When It Occurs |\n' +
+      '|-------------|-------------|----------------|\n' +
+      '| `VALIDATION_ERROR` | 400 | Request body fails validation rules (missing/invalid fields, wrong types). The `error` field contains validation details |\n' +
+      '| `BAD_REQUEST` | 400 | Generic bad request not covered by validation (malformed path param, unsupported value, USDC precision errors) |\n' +
+      '| `UNAUTHORIZED` | 401 | Missing or invalid JWT / wallet signature. Include `Authorization: Bearer <token>` or valid wallet headers |\n' +
+      '| `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. accessing another wallet\'s policy, calling operator-only endpoint without API key) |\n' +
+      '| `NOT_FOUND` | 404 | Resource does not exist (policy ID, claim ID, oracle key, etc.) |\n' +
+      '| `CONFLICT` | 409 | Duplicate resource (e.g. submitting a claim when one is already active for the same policy) |\n' +
+      '| `GONE` | 410 | Resource existed but is no longer accessible (e.g. expired policy) |\n' +
+      '| `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `retryAfter` value |\n' +
+      '| `INTERNAL_ERROR` | 500 | Unexpected server failure. Logged server-side; response omits internal details |\n' +
+      '| `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC) |\n\n' +
+      '### Validation Errors (400)\n\n' +
+      'When class-validator rejects a request body, the `error` field contains detailed constraint violations:\n\n' +
+      '```json\n' +
+      '{\n' +
+      '  "success": false,\n' +
+      '  "errorCode": "VALIDATION_ERROR",\n' +
+      '  "error": {\n' +
+      '    "message": ["wallet must be a string", "productId should not be empty"],\n' +
+      '    "error": "Bad Request",\n' +
+      '    "statusCode": 400\n' +
+      '  },\n' +
+      '  "statusCode": 400,\n' +
+      '  "path": "/api/v1/policies/buy",\n' +
+      '  "timestamp": "2024-01-15T10:30:00.000Z"\n' +
+      '}\n' +
+      '```\n\n' +
+      '### USDC Precision Validation\n\n' +
+      'All monetary amounts must conform to Stellar USDC precision (7 decimal places maximum). ' +
+      'Requests with excessive precision are rejected with `BAD_REQUEST`:\n\n' +
+      '```json\n' +
+      '{\n' +
+      '  "success": false,\n' +
+      '  "errorCode": "BAD_REQUEST",\n' +
+      '  "error": "Amount precision at amount exceeds Stellar USDC limit. Maximum 7 decimal places allowed, found 8. Value: \\"10.12345678\\"",\n' +
+      '  "statusCode": 400,\n' +
+      '  "path": "/api/v1/policies/buy",\n' +
+      '  "timestamp": "2024-01-15T10:30:00.000Z"\n' +
       '}\n' +
       '```',
     )
