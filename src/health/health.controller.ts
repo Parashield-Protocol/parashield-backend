@@ -1,6 +1,7 @@
-import { Controller, Get, Logger, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Inject, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
+import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 
@@ -23,6 +24,7 @@ export class HealthController {
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
     private readonly config: ConfigService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
   /**
@@ -43,6 +45,8 @@ export class HealthController {
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
+    let queueStatus: 'ok' | 'error' = 'ok';
+    let queueError: string | undefined;
 
     try {
       await this.prisma.$queryRaw`SELECT 1`;
@@ -75,7 +79,26 @@ export class HealthController {
       this.logger.error(`Health check Stellar RPC failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    const healthy = dbStatus === 'ok' && stellarStatus === 'ok';
+    // #403 — Redis/message queue connectivity check.
+    // Background workers (claims, oracle) rely on Redis for job queuing and
+    // distributed throttle storage; a silent Redis failure means those jobs
+    // stop processing without any observable API-layer error. A PING here
+    // surfaces the failure in the health endpoint so load balancers and
+    // on-call alerts can react before users notice stuck claims or policies.
+    try {
+      const pong = await this.redis.ping();
+      if (pong !== 'PONG') {
+        queueStatus = 'error';
+        queueError  = `Redis PING returned unexpected response: ${pong}`;
+        this.logger.error(`Health check: ${queueError}`);
+      }
+    } catch (err) {
+      queueStatus = 'error';
+      queueError  = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Health check Redis failed: ${queueError}`);
+    }
+
+    const healthy = dbStatus === 'ok' && stellarStatus === 'ok' && queueStatus === 'ok';
 
     const body = {
       status:    healthy ? 'ok' : 'degraded',
@@ -90,6 +113,10 @@ export class HealthController {
           status: stellarStatus,
           ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
           ...(stellarError ? { error: stellarError } : {}),
+        },
+        queue: {
+          status: queueStatus,
+          ...(queueError ? { error: queueError } : {}),
         },
       },
     };
