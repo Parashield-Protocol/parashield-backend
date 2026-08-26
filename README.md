@@ -130,12 +130,100 @@ CORS is enabled in `src/main.ts` and controlled entirely via environment variabl
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `CORS_ORIGIN` | Yes | — | Allowed origin(s). Single origin or comma-separated list, e.g. `https://app.example.com,https://staging.example.com`. The server refuses to start without it. |
+| `CORS_ORIGIN` | Yes | — | Allowed origin(s). Single origin or comma-separated list, e.g. `https://app.example.com,https://staging.example.com`. The server **refuses to start** without it. Wildcards (`*`) are not accepted — production must name explicit domains. |
 | `CORS_METHODS` | No | `GET,POST,PUT,DELETE,OPTIONS` | Comma-separated list of allowed HTTP methods. |
 | `CORS_ALLOWED_HEADERS` | No | `Content-Type,Authorization,x-wallet-address,x-wallet-signature,x-wallet-message,x-api-key,x-admin-api-key` | Comma-separated list of allowed request headers. |
 | `CORS_CREDENTIALS` | No | `false` | Set to `true` to send `Access-Control-Allow-Credentials` (needed only for cookie-based clients; the API itself authenticates via headers). |
 
 The defaults reproduce the previously hardcoded configuration, so no behavior changes unless the variables are set.
+
+### Production CORS example
+
+```dotenv
+# .env (production)
+CORS_ORIGIN=https://app.parashield.io,https://staging.parashield.io
+```
+
+Multiple origins are comma-separated. The server logs the active origin list at startup so you can confirm the value was parsed correctly.
+
+---
+
+## Error handling
+
+All error responses follow the same envelope shape regardless of endpoint:
+
+```json
+{
+  "success": false,
+  "errorCode": "NOT_FOUND",
+  "error": "Policy not found",
+  "statusCode": 404,
+  "path": "/api/v1/policies/abc123",
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `success` | `boolean` | Always `false` for errors. |
+| `errorCode` | `string` | Stable machine-readable code (see table below). Key off this, not `error`. |
+| `error` | `string` \| `object` | Human-readable message, or NestJS validation error details for 400s. May change between versions. |
+| `statusCode` | `number` | Mirrors the HTTP status code. |
+| `path` | `string` | The request path that produced the error. |
+| `timestamp` | `string` | ISO-8601 UTC timestamp. |
+
+### Error codes
+
+| `errorCode` | HTTP status | When it occurs |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 | Request body fails class-validator rules (missing/invalid fields, wrong types). The `error` field contains an array of violation objects. |
+| `UNAUTHORIZED` | 401 | Missing or invalid JWT / wallet signature. Include `Authorization: Bearer <token>` or valid wallet headers. |
+| `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. accessing another wallet's policy, calling an operator-only endpoint without an API key). |
+| `NOT_FOUND` | 404 | Resource does not exist (policy ID, claim ID, oracle key, etc.). |
+| `CONFLICT` | 409 | Duplicate resource (e.g. submitting a claim when one is already active for the same policy). |
+| `GONE` | 410 | Resource existed but is no longer accessible (e.g. an expired policy). |
+| `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `Retry-After` header value. |
+| `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC). |
+| `BAD_REQUEST` | 400 | Generic bad request not covered by validation (malformed path param, unsupported value, etc.). |
+| `INTERNAL_ERROR` | 500 | Unexpected server-side failure. The error is logged server-side; the response body intentionally omits internal details. |
+
+### Handling validation errors (400)
+
+When class-validator rejects a request body the `error` field is an array of NestJS constraint objects:
+
+```json
+{
+  "success": false,
+  "errorCode": "VALIDATION_ERROR",
+  "error": {
+    "message": ["wallet must be a string", "productId should not be empty"],
+    "error": "Bad Request",
+    "statusCode": 400
+  },
+  "statusCode": 400,
+  "path": "/api/v1/policies/buy",
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+Check each entry in `error.message` for the field name and violated constraint.
+
+### Rate limiting (429)
+
+The global throttle allows **60 requests per minute per IP**. When exceeded the response includes a `Retry-After` header with the number of seconds until the window resets. Clients should respect this header rather than retrying immediately.
+
+### Success response shape
+
+For reference, successful responses use the complementary envelope:
+
+```json
+{
+  "success": true,
+  "data": { ... }
+}
+```
+
+Monetary values are returned as strings in 7-decimal fixed-point format matching Stellar asset precision (e.g. `"10.0000000"`).
 
 ---
 
