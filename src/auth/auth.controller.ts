@@ -34,9 +34,16 @@ export class AuthController {
    */
   @Get('challenge')
   @Throttle(AUTH_THROTTLE)
-  @ApiOperation({ summary: 'Obtain a server-issued nonce before login' })
+  @ApiOperation({
+    summary: 'Obtain a server-issued nonce before login',
+    description:
+      'Step 1 of 2 in the wallet-based auth flow. Returns a cryptographically random ' +
+      'nonce tied to the given wallet address. The nonce expires in 5 minutes and must ' +
+      'be signed by the wallet private key, then submitted to POST /auth/login.',
+  })
   @ApiResponse({ status: 200, description: 'Returns the challenge nonce' })
   @ApiResponse({ status: 400, description: 'Invalid wallet address' })
+  @ApiResponse({ status: 429, description: 'Too many requests — rate limit exceeded (10 req / 60 s)' })
   async getChallenge(@Query('wallet') wallet: string) {
     if (!wallet || !/^G[A-Z2-7]{55}$/.test(wallet)) {
       throw new UnauthorizedException('Invalid or missing Stellar wallet address');
@@ -73,10 +80,18 @@ export class AuthController {
   @Post('login')
   @HttpCode(HttpStatus.OK)
   @Throttle(AUTH_THROTTLE)
-  @ApiOperation({ summary: 'Authenticate with a Stellar wallet signature and receive a JWT' })
+  @ApiOperation({
+    summary: 'Authenticate with a Stellar wallet signature and receive a JWT',
+    description:
+      'Step 2 of 2 in the wallet-based auth flow. Sign the nonce obtained from ' +
+      'GET /auth/challenge with your Stellar private key (Ed25519), base64-encode the ' +
+      'signature, and submit it here. On success, returns a signed JWT to use as ' +
+      'Bearer token in subsequent authenticated requests.',
+  })
   @ApiBody({ type: WalletLoginDto })
   @ApiResponse({ status: 200, description: 'Returns a JWT token for the authenticated wallet' })
   @ApiResponse({ status: 401, description: 'Invalid or missing wallet signature' })
+  @ApiResponse({ status: 429, description: 'Too many requests — rate limit exceeded (10 req / 60 s)' })
   async login(@Body() dto: WalletLoginDto) {
     const { walletAddress, signature, message } = dto;
 

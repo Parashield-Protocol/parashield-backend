@@ -85,12 +85,24 @@ export class HealthController {
     // stop processing without any observable API-layer error. A PING here
     // surfaces the failure in the health endpoint so load balancers and
     // on-call alerts can react before users notice stuck claims or policies.
+    let queueDepths: Record<string, number> | undefined;
     try {
       const pong = await this.redis.ping();
       if (pong !== 'PONG') {
         queueStatus = 'error';
         queueError  = `Redis PING returned unexpected response: ${pong}`;
         this.logger.error(`Health check: ${queueError}`);
+      } else {
+        // #421 — Report waiting job counts for known Bull queues so ops can
+        // detect build-up before processing latency becomes user-visible.
+        const queueNames = (this.config.get<string>('HEALTH_QUEUE_NAMES') ?? 'claims,oracle')
+          .split(',')
+          .map(n => n.trim())
+          .filter(Boolean);
+        const depths = await Promise.all(
+          queueNames.map(async (name) => [name, await this.redis.llen(`bull:${name}:wait`)] as [string, number]),
+        );
+        queueDepths = Object.fromEntries(depths);
       }
     } catch (err) {
       queueStatus = 'error';
@@ -116,6 +128,7 @@ export class HealthController {
         },
         queue: {
           status: queueStatus,
+          ...(queueDepths !== undefined ? { depth: queueDepths } : {}),
           ...(queueError ? { error: queueError } : {}),
         },
       },

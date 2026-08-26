@@ -13,6 +13,7 @@ import { AuthModule }    from './auth/auth.module';
 import { HealthModule }  from './health/health.module';
 import { RedisModule }   from './redis/redis.module';
 import { VersioningInterceptor } from './common/interceptors/versioning.interceptor';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { WebhooksModule } from './common/webhooks/webhooks.module';
 
 /**
@@ -99,6 +100,10 @@ function validateConfig(config: Record<string, unknown>) {
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: LoggingInterceptor,
     },
     {
       provide: APP_INTERCEPTOR,
