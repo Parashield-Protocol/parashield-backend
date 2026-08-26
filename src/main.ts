@@ -8,6 +8,9 @@ import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serial
 import { ThrottleGuard } from './common/guards/throttle.guard';
 import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
 import { RequestTimeoutMiddleware } from './common/middleware/request-timeout.middleware';
+import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
+import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
+import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
@@ -34,6 +37,8 @@ function parseCsvEnv(value: string | undefined): string[] | undefined {
 }
 
 async function bootstrap() {
+  await loadVaultSecrets();
+  await initializeOpenTelemetry();
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
 
@@ -70,7 +75,10 @@ async function bootstrap() {
   app.useGlobalInterceptors(new LoggingInterceptor(), new BigIntSerializerInterceptor());
 
   // Global guards
-  app.useGlobalGuards(new ThrottleGuard());
+  // REMOVED: app.useGlobalGuards(new ThrottleGuard());
+  // Issue #325: Duplicate rate limiting removed. ThrottlerGuard (Redis-backed) is already
+  // registered globally in app.module.ts via APP_GUARD provider. The custom ThrottleGuard
+  // (in-memory Map) was causing conflicting counts in multi-instance deployments.
 
   // Global validation pipe
   app.useGlobalPipes(
@@ -149,6 +157,7 @@ async function bootstrap() {
     .addTag('events', 'Server-Sent Events (SSE) for real-time policy status streaming')
     .build();
   const document = SwaggerModule.createDocument(app, swaggerConfig);
+  applyRateLimitHeaders(document);
   SwaggerModule.setup('docs', app, document);
 
   app.enableShutdownHooks();

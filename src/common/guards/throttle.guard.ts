@@ -96,7 +96,10 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
   ): void {
     const resetAt = Math.ceil((windowStart + this.TIME_WINDOW_MS) / 1000);
     response.setHeader('X-RateLimit-Limit', this.MAX_REQUESTS);
-    response.setHeader('X-RateLimit-Remaining', Math.max(0, this.MAX_REQUESTS - used));
+    response.setHeader(
+      'X-RateLimit-Remaining',
+      Math.max(0, this.MAX_REQUESTS - used),
+    );
     response.setHeader('X-RateLimit-Reset', resetAt);
   }
 

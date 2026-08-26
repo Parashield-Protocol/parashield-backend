@@ -22,6 +22,8 @@ Supporting infrastructure:
 - **AuthModule** — Stellar wallet signature verification + JWT issuance
 - **LoggingInterceptor** — Request/response duration logging
 - **ThrottleGuard** — IP-based rate limiting (60 req/min)
+- **Vault bootstrap** — optional HashiCorp Vault KV loading before Nest validates env vars
+- **OpenTelemetry** — optional distributed tracing when OTEL packages are installed/configured
 
 ---
 
@@ -211,6 +213,47 @@ Check each entry in `error.message` for the field name and violated constraint.
 ### Rate limiting (429)
 
 The global throttle allows **60 requests per minute per IP**. When exceeded the response includes a `Retry-After` header with the number of seconds until the window resets. Clients should respect this header rather than retrying immediately.
+Successful responses from guarded routes also include:
+
+- `X-RateLimit-Limit`
+- `X-RateLimit-Remaining`
+- `X-RateLimit-Reset`
+
+Those values let clients and gateways track quota without waiting for a 429.
+
+### Secrets management
+
+If you want to source secrets from HashiCorp Vault instead of environment variables, set:
+
+- `VAULT_ADDR`
+- `VAULT_TOKEN`
+- `VAULT_KV_PATH`
+
+When all three are present, the server fetches the KV secret before Nest bootstraps and merges the returned key/value pairs into `process.env`. The Vault payload should use the standard KV v2 shape (`data.data`).
+
+### OpenTelemetry tracing
+
+Tracing is enabled when the OpenTelemetry packages are installed and the following variables are set:
+
+- `OTEL_SERVICE_NAME`
+- `OTEL_EXPORTER_OTLP_ENDPOINT`
+- `OTEL_EXPORTER_OTLP_HEADERS` if your collector requires auth headers
+
+Set `OTEL_SDK_DISABLED=true` to turn tracing off without changing code.
+
+### Load testing
+
+A basic k6 scenario lives at [`loadtest/k6/smoke.js`](/Users/wisdom/projects/stellar/parashield-backend/loadtest/k6/smoke.js). Run it with:
+
+```bash
+npm run test:load
+```
+
+Override the target with:
+
+```bash
+BASE_URL=http://localhost:3001/api/v1 npm run test:load
+```
 
 ### Success response shape
 
