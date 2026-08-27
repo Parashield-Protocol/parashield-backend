@@ -1,3 +1,4 @@
+import { BadRequestException } from "@nestjs/common";
 import { Reflector } from "@nestjs/core";
 import { OracleController } from "./oracle.controller";
 import { OracleService } from "./oracle.service";
@@ -44,10 +45,9 @@ describe("OracleController — Access Control & Rate Limiting", () => {
     it("GET /oracle/latest/:key should return error when key not found", async () => {
       mockOracleService.getLatestReading.mockResolvedValue(null);
 
-      const result = await controller.getLatestReading("nonexistent-key");
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("No reading found");
+      await expect(controller.getLatestReading("nonexistent-key")).rejects.toThrow(
+        "No reading found",
+      );
     });
 
     it("GET /oracle/reading?key should handle URL-encoded parameters", async () => {
@@ -80,10 +80,7 @@ describe("OracleController — Access Control & Rate Limiting", () => {
     it("GET /oracle/reading should return not found when key is empty", async () => {
       mockOracleService.getLatestReading.mockResolvedValue(null);
 
-      const result = await controller.getReadingByKey("");
-
-      expect(result.success).toBe(false);
-      expect(result.error).toContain("No reading found");
+      await expect(controller.getReadingByKey("")).rejects.toThrow("No reading found");
     });
   });
 
@@ -133,6 +130,35 @@ describe("OracleController — Access Control & Rate Limiting", () => {
       const result = await controller.getFlight("KQ100", "2026-06-27");
 
       expect(result.success).toBe(true);
+    });
+  });
+
+  // #473 — GET /oracle/rainfall and GET /oracle/flight take raw query
+  // params with no DTO, so they previously had no validation at all: an
+  // unparsable lat/lng/year/month silently became NaN.
+  describe("Query-param input validation (#473)", () => {
+    it.each([
+      ["lat out of range", "91", "34.7679", "2026", "6"],
+      ["lat not a number", "abc", "34.7679", "2026", "6"],
+      ["lng out of range", "-0.0917", "181", "2026", "6"],
+      ["year out of range", "-0.0917", "34.7679", "1999", "6"],
+      ["month out of range", "-0.0917", "34.7679", "2026", "13"],
+      ["month not an integer", "-0.0917", "34.7679", "2026", "6.5"],
+    ])("GET /oracle/rainfall rejects %s", async (_label, lat, lng, year, month) => {
+      await expect(controller.getRainfall(lat, lng, year, month)).rejects.toThrow(
+        BadRequestException,
+      );
+      expect(mockOracleService.fetchRainfall).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["lowercase flight code", "kq100", "2026-06-27"],
+      ["flight code with spaces", "KQ 100", "2026-06-27"],
+      ["malformed date", "KQ100", "27-06-2026"],
+      ["empty date", "KQ100", ""],
+    ])("GET /oracle/flight rejects %s", async (_label, flight, date) => {
+      await expect(controller.getFlight(flight, date)).rejects.toThrow(BadRequestException);
+      expect(mockOracleService.fetchFlightDelay).not.toHaveBeenCalled();
     });
   });
 
@@ -196,10 +222,14 @@ describe("OracleController — Access Control & Rate Limiting", () => {
     it("should not expose system internals in error messages", async () => {
       mockOracleService.getLatestReading.mockResolvedValue(null);
 
-      const result = await controller.getLatestReading("unknown-key");
-
-      expect(result.error).not.toMatch(/database|config|path|stack/i);
-      expect(result.error).toContain("No reading found");
+      await expect(controller.getLatestReading("unknown-key")).rejects.toThrow(
+        "No reading found",
+      );
+      try {
+        await controller.getLatestReading("unknown-key");
+      } catch (err) {
+        expect((err as Error).message).not.toMatch(/database|config|path|stack/i);
+      }
     });
   });
 

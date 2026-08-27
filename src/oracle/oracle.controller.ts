@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -72,6 +73,7 @@ export class OracleController {
     },
   })
   @ApiResponse({ status: 404, description: "No reading found for the given key" })
+  @ApiErrorResponse(400, 'The key does not match a recognized oracle key format.', undefined, 'Invalid oracle key format: "garbage". Expected rainfall:<lat>,<lng>:YYYY-MM, temperature:<lat>,<lng>:YYYY-MM, or flight:<code>:YYYY-MM-DD.')
   @ApiErrorResponse(404, 'No oracle reading found for the requested key.', undefined, 'No reading found for key: rainfall:-0.0917,34.7679:2026-06')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getReadingByKey(@Query("key") key: string) {
@@ -172,6 +174,7 @@ export class OracleController {
     },
   })
   @ApiResponse({ status: 404, description: "No reading found for the given key", })
+  @ApiErrorResponse(400, 'The key does not match a recognized oracle key format.', undefined, 'Invalid oracle key format: "garbage". Expected rainfall:<lat>,<lng>:YYYY-MM, temperature:<lat>,<lng>:YYYY-MM, or flight:<code>:YYYY-MM-DD.')
   @ApiErrorResponse(404, 'No oracle reading found for the given key (path param).', undefined, 'No reading found for key: rainfall:-0.0917,34.7679:2026-06')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getLatestReading(@Param("key") key: string) {
@@ -266,11 +269,12 @@ export class OracleController {
     description:
       "Operator-only endpoint. Fetches rainfall data and persists to database. Requires x-api-key header with operator API key or Bearer JWT with admin role. Rate limited to 60 requests/minute per IP.",
   })
-  @ApiQuery({ name: "lat", required: true, description: "Latitude" })
-  @ApiQuery({ name: "lng", required: true, description: "Longitude" })
-  @ApiQuery({ name: "year", required: true, description: "Year (YYYY)" })
-  @ApiQuery({ name: "month", required: true, description: "Month (1-12)" })
+  @ApiQuery({ name: "lat", required: true, description: "Latitude, -90 to 90" })
+  @ApiQuery({ name: "lng", required: true, description: "Longitude, -180 to 180" })
+  @ApiQuery({ name: "year", required: true, description: "Year, 2000-2100" })
+  @ApiQuery({ name: "month", required: true, description: "Month, 1-12" })
   @ApiResponse({ status: 200, description: "Rainfall reading" })
+  @ApiErrorResponse(400, 'lat/lng/year/month failed validation.', undefined, 'lat must be a number between -90 and 90')
   @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getRainfall(
@@ -279,12 +283,33 @@ export class OracleController {
     @Query("year") year: string,
     @Query("month") month: string,
   ) {
-    const reading = await this.oracle.fetchRainfall(
-      parseFloat(lat),
-      parseFloat(lng),
-      parseInt(year),
-      parseInt(month),
-    );
+    // #473 — these query params feed straight into the oracle key
+    // (`rainfall:<lat>,<lng>:YYYY-MM`) and the upstream Open-Meteo request.
+    // Unlike POST /oracle/fetch/rainfall (validated via OracleFeedRequestDto),
+    // this query-param endpoint had no validation at all: an unparsable value
+    // silently became NaN and produced a garbage key/request instead of a
+    // clear 400.
+    const latNum = parseFloat(lat);
+    const lngNum = parseFloat(lng);
+    // Number(), not parseInt(): parseInt("6.5", 10) truncates to 6 and would
+    // silently accept a fractional year/month as valid.
+    const yearNum = Number(year);
+    const monthNum = Number(month);
+
+    if (!Number.isFinite(latNum) || latNum < -90 || latNum > 90) {
+      throw new BadRequestException('lat must be a number between -90 and 90');
+    }
+    if (!Number.isFinite(lngNum) || lngNum < -180 || lngNum > 180) {
+      throw new BadRequestException('lng must be a number between -180 and 180');
+    }
+    if (!Number.isInteger(yearNum) || yearNum < 2000 || yearNum > 2100) {
+      throw new BadRequestException('year must be an integer between 2000 and 2100');
+    }
+    if (!Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12) {
+      throw new BadRequestException('month must be an integer between 1 and 12');
+    }
+
+    const reading = await this.oracle.fetchRainfall(latNum, lngNum, yearNum, monthNum);
     return {
       success: true,
       data: { ...reading, value: reading.value.toString() },
@@ -320,12 +345,22 @@ export class OracleController {
     description: "Flight date (YYYY-MM-DD)",
   })
   @ApiResponse({ status: 200, description: "Flight delay reading" })
+  @ApiErrorResponse(400, 'flight/date failed validation.', undefined, 'date must be in YYYY-MM-DD format')
   @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getFlight(
     @Query("flight") flight: string,
     @Query("date") date: string,
   ) {
+    // #473 — these feed straight into the oracle key (`flight:<flight>:<date>`)
+    // and the upstream AviationStack request; previously unvalidated.
+    if (!flight || !/^[A-Z0-9]+$/.test(flight)) {
+      throw new BadRequestException('flight must be an IATA flight number matching ^[A-Z0-9]+$');
+    }
+    if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      throw new BadRequestException('date must be in YYYY-MM-DD format');
+    }
+
     const reading = await this.oracle.fetchFlightDelay(flight, date);
     return {
       success: true,
