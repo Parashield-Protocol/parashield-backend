@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { transition } from './policy-status.machine';
 import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
 import { WebhooksService } from '../common/events/webhooks.service';
+import { StatusEventsService } from '../common/events/status-events.service';
 
 export interface ProductSummary {
   id:           string;

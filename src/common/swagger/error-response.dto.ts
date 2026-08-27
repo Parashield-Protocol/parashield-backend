@@ -102,7 +102,7 @@ function errorExample(
 
 export const ERROR_EXAMPLES = {
   400: errorExample(ErrorCode.VALIDATION_ERROR, 400, 'wallet must be a string; productId should not be empty'),
-  400_bad: errorExample(ErrorCode.BAD_REQUEST, 400, 'Malformed request parameter'),
+  '400_bad': errorExample(ErrorCode.BAD_REQUEST, 400, 'Malformed request parameter'),
   401: errorExample(ErrorCode.UNAUTHORIZED, 401, 'Missing or invalid JWT — include Authorization: Bearer <token>'),
   403: errorExample(ErrorCode.FORBIDDEN, 403, 'Policy belongs to a different wallet'),
   404: errorExample(ErrorCode.NOT_FOUND, 404, 'Resource not found'),

@@ -2,7 +2,7 @@ import { Controller, Post, Body, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiExtraModels, getSchemaPath } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../swagger/api-error-responses';
 import { WebhooksService } from '../events/webhooks.service';
-import { PrismaService } from '../prisma/prisma.service';
+import { PrismaService } from '../../prisma/prisma.service';
 import {
   RegisterWebhookDto,
   WebhookRegistrationResponseDto,
