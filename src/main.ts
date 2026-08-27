@@ -17,6 +17,7 @@ import { REALTIME_DOCS } from './common/swagger/realtime-docs';
 import { ErrorResponseDto } from './common/swagger/error-response.dto';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
+import compression from 'compression';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 import Redis from 'ioredis';
@@ -61,6 +62,30 @@ async function bootstrap() {
 
   // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
   app.use(helmet());
+
+  // Response compression — gzip/deflate for text-based responses (JSON, HTML,
+  // SSE streams). Runs before route handlers so every response is eligible.
+  // Threshold of 1 KB avoids compressing tiny payloads where the overhead
+  // outweighs the savings. Clients that do not send Accept-Encoding are served
+  // uncompressed transparently. Overridable via COMPRESSION_LEVEL (0-9, default 6)
+  // and COMPRESSION_THRESHOLD_BYTES (default 1024) without code changes.
+  const compressionLevel = parseInt(configService.get<string>('COMPRESSION_LEVEL') ?? '6', 10);
+  const compressionThreshold = parseInt(configService.get<string>('COMPRESSION_THRESHOLD_BYTES') ?? '1024', 10);
+  app.use(
+    compression({
+      level: compressionLevel,
+      threshold: compressionThreshold,
+      // Compress all compressible content types (JSON, text, SSE, etc.)
+      filter: (req, res) => {
+        // Honour the caller's explicit opt-out via Cache-Control: no-transform
+        const cacheControl = res.getHeader('Cache-Control');
+        if (typeof cacheControl === 'string' && cacheControl.includes('no-transform')) {
+          return false;
+        }
+        return compression.filter(req, res);
+      },
+    }),
+  );
 
   // Explicit request body size limit (defaults are implicit and adapter-dependent)
   app.use(json({ limit: REQUEST_BODY_LIMIT }));
