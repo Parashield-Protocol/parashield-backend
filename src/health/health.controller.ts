@@ -23,6 +23,15 @@ const HEALTH_CHECK_RPC_TIMEOUT_MS = 3000;
 // DB_REPLICATION_LAG_WARN_BYTES env var (bytes, integer).
 const DEFAULT_REPLICATION_LAG_WARN_BYTES = 50 * 1024 * 1024; // 50 MB
 
+// #471 — connection pool exhaustion monitoring. The max pool size mirrors
+// PrismaService's own DATABASE_CONNECTION_LIMIT default (see
+// src/prisma/prisma.service.ts) so the two stay in sync without duplicating
+// config; operators overriding one should override the other identically.
+// At >=90% of the pool's active connections, new queries are likely to start
+// queuing for a free connection, so we flag it before requests actually fail.
+const DEFAULT_DB_POOL_MAX_CONNECTIONS = 10;
+const DEFAULT_DB_POOL_EXHAUSTION_WARN_PERCENT = 90;
+
 // #426 — Lightweight probe URLs for external data providers.
 // Open-Meteo: free API, no key — a minimal forecast request with a 1-day
 //   window for the equator verifies HTTP reachability without side effects.
@@ -64,7 +73,7 @@ export class HealthController {
   async check(): Promise<HealthResponseDto> {
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
-    let dbPool: { active: number; idle: number; waiting: number } | undefined;
+    let dbPool: { active: number; idle: number; waiting: number; max: number; utilizationPercent: number; exhausted: boolean } | undefined;
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
@@ -89,8 +98,13 @@ export class HealthController {
       this.logger.error(`Health check DB query failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // #444 — connection pool health: query pg_stat_activity so load balancers
-    // can alert on pool exhaustion before queries start queuing or timing out.
+    // #444/#471 — connection pool health: query pg_stat_activity so load
+    // balancers can alert on pool exhaustion before queries start queuing or
+    // timing out. `active` is compared against the pool's configured max size
+    // to compute a utilization percentage; crossing the warning threshold
+    // marks the database check degraded so it surfaces the same way other
+    // dependency failures do, instead of only being visible as raw counts an
+    // operator has to interpret themselves.
     try {
       const rows = await this.prisma.$queryRaw<Array<{ state: string; count: bigint }>>`
         SELECT state, COUNT(*)::int AS count
@@ -98,11 +112,27 @@ export class HealthController {
         WHERE datname = current_database()
         GROUP BY state
       `;
-      dbPool = {
-        active:  Number(rows.find(r => r.state === 'active')?.count  ?? 0),
-        idle:    Number(rows.find(r => r.state === 'idle')?.count    ?? 0),
-        waiting: Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0),
-      };
+      const active  = Number(rows.find(r => r.state === 'active')?.count  ?? 0);
+      const idle    = Number(rows.find(r => r.state === 'idle')?.count    ?? 0);
+      const waiting = Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0);
+
+      const maxConnections = Number(
+        this.config.get<string>('DATABASE_CONNECTION_LIMIT') ?? DEFAULT_DB_POOL_MAX_CONNECTIONS,
+      );
+      const warnPercent = Number(
+        this.config.get<string>('DB_POOL_EXHAUSTION_WARN_PERCENT') ?? DEFAULT_DB_POOL_EXHAUSTION_WARN_PERCENT,
+      );
+      const utilizationPercent = maxConnections > 0 ? Math.round((active / maxConnections) * 100) : 0;
+      const exhausted = utilizationPercent >= warnPercent;
+
+      dbPool = { active, idle, waiting, max: maxConnections, utilizationPercent, exhausted };
+
+      if (exhausted) {
+        dbStatus = 'error';
+        const poolMsg = `Connection pool utilization ${utilizationPercent}% (${active}/${maxConnections} active) meets or exceeds the exhaustion warning threshold of ${warnPercent}%`;
+        dbError = dbError ? `${dbError}; ${poolMsg}` : poolMsg;
+        this.logger.error(`Health check: ${poolMsg}`);
+      }
     } catch {
       // Non-fatal: pg_stat_activity may be restricted on managed databases.
     }

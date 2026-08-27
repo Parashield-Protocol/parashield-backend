@@ -53,6 +53,9 @@ export interface EnvironmentVariables {
   DATABASE_CONNECTION_LIMIT?: string;
   DATABASE_POOL_TIMEOUT?: string;
   DATABASE_CONNECT_TIMEOUT?: string;
+
+  // #471 — connection pool exhaustion warning threshold (see src/health/health.controller.ts)
+  DB_POOL_EXHAUSTION_WARN_PERCENT?: string;
 }
 
 declare global {

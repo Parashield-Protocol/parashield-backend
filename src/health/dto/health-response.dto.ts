@@ -9,6 +9,18 @@ export class DatabasePoolDto {
 
   @ApiProperty({ description: 'Number of waiting connections' })
   waiting: number;
+
+  @ApiProperty({ description: 'Configured maximum pool size (DATABASE_CONNECTION_LIMIT, default 10)', example: 10 })
+  max: number;
+
+  @ApiProperty({ description: 'Active connections as a percentage of the configured max pool size', example: 30 })
+  utilizationPercent: number;
+
+  @ApiProperty({
+    description: 'Whether utilization has met or exceeded the exhaustion warning threshold (DB_POOL_EXHAUSTION_WARN_PERCENT, default 90%)',
+    example: false,
+  })
+  exhausted: boolean;
 }
 
 export class DatabaseThroughputDto {
