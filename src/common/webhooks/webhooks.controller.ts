@@ -1,5 +1,6 @@
 import { Controller, Post, Body, Get } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiExtraModels, getSchemaPath } from '@nestjs/swagger';
+import { ApiErrorResponse } from '../swagger/api-error-responses';
 import { WebhooksService } from '../events/webhooks.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -39,12 +40,8 @@ export class WebhooksController {
       '(delays: 1 s → 2 s → 4 s). If all attempts fail the error is logged and the event is dropped.',
   })
   @ApiBearerAuth()
-  @ApiResponse({
-    status: 201,
-    description: 'Webhook registered successfully',
-    schema: { $ref: getSchemaPath(WebhookRegistrationResponseDto) },
-  })
-  @ApiResponse({ status: 400, description: 'Invalid request body' })
+  @ApiResponse({ status: 201, description: 'Webhook registered successfully', schema: { $ref: getSchemaPath(WebhookRegistrationResponseDto) } })
+  @ApiErrorResponse(400, 'Request body failed validation (missing url, unsupported event type, etc.).', undefined, 'url must be a URL address; events must contain only supported event types')
   register(@Body() dto: RegisterWebhookDto) {
     const result = this.webhooks.registerWebhook({
       url: dto.url,

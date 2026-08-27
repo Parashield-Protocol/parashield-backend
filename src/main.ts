@@ -14,6 +14,7 @@ import { IdempotencyMiddleware } from './common/middleware/idempotency.middlewar
 import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
 import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
 import { REALTIME_DOCS } from './common/swagger/realtime-docs';
+import { ErrorResponseDto } from './common/swagger/error-response.dto';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
@@ -307,7 +308,9 @@ async function bootstrap() {
     .addTag('webhooks', 'Webhook registration and real-time event subscriptions')
     .addTag('events', 'Server-Sent Events (SSE) for real-time policy status streaming')
     .build();
-  const document = SwaggerModule.createDocument(app, swaggerConfig);
+  const document = SwaggerModule.createDocument(app, swaggerConfig, {
+    extraModels: [ErrorResponseDto],
+  });
   applyRateLimitHeaders(document);
   SwaggerModule.setup('docs', app, document);
 

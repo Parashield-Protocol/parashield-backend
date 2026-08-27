@@ -20,6 +20,7 @@ import {
   ApiSecurity,
   ApiExtraModels,
 } from "@nestjs/swagger";
+import { ApiErrorResponse } from "../common/swagger/api-error-responses";
 import { Throttle } from "@nestjs/throttler";
 import { OracleService } from "./oracle.service";
 import { OracleFeedRequestDto } from "./dto/oracle-reading.dto";
@@ -70,14 +71,9 @@ export class OracleController {
       },
     },
   })
-  @ApiResponse({
-    status: 404,
-    description: "No reading found for the given key",
-  })
-  @ApiResponse({
-    status: 429,
-    description: "Rate limit exceeded (60 requests/minute per IP)",
-  })
+  @ApiResponse({ status: 404, description: "No reading found for the given key" })
+  @ApiErrorResponse(404, 'No oracle reading found for the requested key.', undefined, 'No reading found for key: rainfall:-0.0917,34.7679:2026-06')
+  @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getReadingByKey(@Query("key") key: string) {
     const decoded = decodeURIComponent(key ?? "");
     const reading = await this.oracle.getLatestReading(decoded);
@@ -126,29 +122,8 @@ export class OracleController {
       "Pagination metadata is returned in X-Total-Count, X-Page, X-Limit headers.",
     example: "true",
   })
-  @ApiResponse({
-    status: 200,
-    description: "Array of oracle readings (JSON envelope) or NDJSON stream when ?stream=true",
-    schema: {
-      example: {
-        success: true,
-        data: [
-          {
-            dataType: "weather",
-            key: "rainfall:-0.0917,34.7679:2026-06",
-            value: "324000000",
-            confidence: 95,
-            timestamp: 1719576600,
-            source: "open-meteo",
-          },
-        ],
-      },
-    },
-  })
-  @ApiResponse({
-    status: 429,
-    description: "Rate limit exceeded (60 requests/minute per IP)",
-  })
+  @ApiResponse({ status: 200, description: "Array of oracle readings (JSON envelope) or NDJSON stream when ?stream=true", schema: { example: { success: true, data: [ { dataType: "weather", key: "rainfall:-0.0917,34.7679:2026-06", value: "324000000", confidence: 95, timestamp: 1719576600, source: "open-meteo" } ] } } })
+  @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getAllReadings(@Query("limit") limit?: string) {
     const cap = limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100;
     const readings = await this.oracle.getAllReadings(cap);
@@ -196,14 +171,9 @@ export class OracleController {
       },
     },
   })
-  @ApiResponse({
-    status: 404,
-    description: "No reading found for the given key",
-  })
-  @ApiResponse({
-    status: 429,
-    description: "Rate limit exceeded (60 requests/minute per IP)",
-  })
+  @ApiResponse({ status: 404, description: "No reading found for the given key", })
+  @ApiErrorResponse(404, 'No oracle reading found for the given key (path param).', undefined, 'No reading found for key: rainfall:-0.0917,34.7679:2026-06')
+  @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getLatestReading(@Param("key") key: string) {
     const reading = await this.oracle.getLatestReading(key);
     if (!reading) {
@@ -231,14 +201,8 @@ export class OracleController {
     description:
       "Protected endpoint. Requires x-api-key header with operator API key or Bearer JWT with admin role. Fetches rainfall data for specified coordinates and month from Open-Meteo and persists to database.",
   })
-  @ApiResponse({
-    status: 201,
-    description: "Returns the fetched oracle reading",
-  })
-  @ApiResponse({
-    status: 401,
-    description: "Operator API key or admin bearer token required",
-  })
+  @ApiResponse({ status: 201, description: "Returns the fetched oracle reading" })
+  @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
   async fetchRainfall(@Body() dto: OracleFeedRequestDto) {
     const reading = await this.oracle.fetchRainfall(
       dto.lat,
@@ -268,14 +232,8 @@ export class OracleController {
     description:
       "Protected endpoint. Requires x-api-key header with operator API key or Bearer JWT with admin role. Fetches temperature data for specified coordinates and month from Open-Meteo and persists to database.",
   })
-  @ApiResponse({
-    status: 201,
-    description: "Returns the fetched oracle reading",
-  })
-  @ApiResponse({
-    status: 401,
-    description: "Operator API key or admin bearer token required",
-  })
+  @ApiResponse({ status: 201, description: "Returns the fetched oracle reading" })
+  @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
   async fetchTemperature(@Body() dto: OracleFeedRequestDto) {
     const reading = await this.oracle.fetchTemperature(
       dto.lat,
@@ -312,18 +270,9 @@ export class OracleController {
   @ApiQuery({ name: "lng", required: true, description: "Longitude" })
   @ApiQuery({ name: "year", required: true, description: "Year (YYYY)" })
   @ApiQuery({ name: "month", required: true, description: "Month (1-12)" })
-  @ApiResponse({
-    status: 200,
-    description: "Rainfall reading",
-  })
-  @ApiResponse({
-    status: 401,
-    description: "Operator API key or admin bearer token required",
-  })
-  @ApiResponse({
-    status: 429,
-    description: "Rate limit exceeded (60 requests/minute per IP)",
-  })
+  @ApiResponse({ status: 200, description: "Rainfall reading" })
+  @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
+  @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getRainfall(
     @Query("lat") lat: string,
     @Query("lng") lng: string,
@@ -370,18 +319,9 @@ export class OracleController {
     required: true,
     description: "Flight date (YYYY-MM-DD)",
   })
-  @ApiResponse({
-    status: 200,
-    description: "Flight delay reading",
-  })
-  @ApiResponse({
-    status: 401,
-    description: "Operator API key or admin bearer token required",
-  })
-  @ApiResponse({
-    status: 429,
-    description: "Rate limit exceeded (60 requests/minute per IP)",
-  })
+  @ApiResponse({ status: 200, description: "Flight delay reading" })
+  @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
+  @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getFlight(
     @Query("flight") flight: string,
     @Query("date") date: string,

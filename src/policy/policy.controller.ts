@@ -31,6 +31,7 @@ import {
   ApiExtraModels,
   getSchemaPath,
 } from '@nestjs/swagger';
+import { ApiErrorResponse } from '../common/swagger/api-error-responses';
 import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
@@ -151,8 +152,8 @@ export class PolicyController {
       ],
     },
   })
-  @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
-  @ApiResponse({ status: 404, description: 'Policy not found' })
+  @ApiErrorResponse(403, 'Policy belongs to a different wallet.', undefined, 'Policy belongs to a different wallet')
+  @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')
   async getPolicy(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const policyData = await this.policy.getPolicy(id);
     if (!policyData) {
@@ -200,7 +201,7 @@ export class PolicyController {
       ],
     },
   })
-  @ApiResponse({ status: 400, description: 'Invalid request body, pool capacity exceeded, or malformed oracleKey' })
+  @ApiErrorResponse(400, 'Invalid request body, pool capacity exceeded, or malformed oracleKey.', undefined, 'Pool capacity exceeded for this product')
   async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (dto.walletAddress !== authedWallet) {
@@ -268,9 +269,9 @@ export class PolicyController {
       ],
     },
   })
-  @ApiResponse({ status: 400, description: 'Invalid request body or on-chain submission failed' })
-  @ApiResponse({ status: 409, description: 'Policy already exists for this wallet, product, and oracle key' })
-  @ApiResponse({ status: 410, description: 'Signed XDR has expired' })
+  @ApiErrorResponse(400, 'Invalid request body or on-chain XDR submission failed.', undefined, 'On-chain submission failed')
+  @ApiErrorResponse(409, 'A policy already exists for this wallet, product, and oracle key combination.', undefined, 'Policy already exists for this wallet and product')
+  @ApiErrorResponse(410, 'The signed XDR has expired — request a new one.', undefined, 'Signed XDR has expired')
   async confirmPolicy(@Body() dto: ConfirmPolicyDto, @Req() req: AuthenticatedRequest) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
@@ -300,9 +301,9 @@ export class PolicyController {
       ],
     },
   })
-  @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
-  @ApiResponse({ status: 404, description: 'Policy not found' })
-  @ApiResponse({ status: 409, description: 'Policy is no longer ACTIVE and cannot be cancelled' })
+  @ApiErrorResponse(403, 'Policy belongs to a different wallet.', undefined, 'Policy belongs to a different wallet')
+  @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')
+  @ApiErrorResponse(409, 'Policy is not in ACTIVE status and cannot be cancelled.', undefined, 'Policy is no longer ACTIVE and cannot be cancelled')
   async cancelPolicy(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const policyData = await this.policy.getPolicy(id);
     if (!policyData) {
@@ -357,7 +358,7 @@ export class PolicyController {
       ],
     },
   })
-  @ApiResponse({ status: 404, description: 'Product not found' })
+  @ApiErrorResponse(404, 'No product found for the given ID.', undefined, 'Product not found')
   async updateProduct(@Param('id') id: string, @Body() dto: UpdateProductDto) {
     const product = await this.policy.updateProduct(id, dto);
     return { success: true, data: product };
@@ -380,7 +381,7 @@ export class PolicyController {
       ],
     },
   })
-  @ApiResponse({ status: 404, description: 'Product not found' })
+  @ApiErrorResponse(404, 'No product found for the given ID.', undefined, 'Product not found')
   async deactivateProduct(@Param('id') id: string) {
     const product = await this.policy.deactivateProduct(id);
     return { success: true, data: product };
@@ -416,8 +417,8 @@ export class PolicyController {
     description: 'SSE stream of PolicyStatusEvent objects. Each message has a `data` field containing the event payload.',
     schema: { $ref: getSchemaPath(PolicyStatusEventDto) },
   })
-  @ApiResponse({ status: 403, description: 'Policy belongs to a different wallet' })
-  @ApiResponse({ status: 404, description: 'Policy not found' })
+  @ApiErrorResponse(403, 'Policy belongs to a different wallet.', undefined, 'Policy belongs to a different wallet')
+  @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')
   async policyStatusEvents(
     @Param('id') id: string,
     @Req() req: AuthenticatedRequest,

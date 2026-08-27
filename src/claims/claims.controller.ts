@@ -10,6 +10,7 @@ import {
   ApiExtraModels,
   getSchemaPath,
 } from '@nestjs/swagger';
+import { ApiErrorResponse } from '../common/swagger/api-error-responses';
 import { ClaimsService } from './claims.service';
 import { SubmitClaimDto } from './dto/submit-claim.dto';
 import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
@@ -31,19 +32,10 @@ export class ClaimsController {
   // (60 req/60s) configured in app.module.ts, to slow down abuse of claim payouts.
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
-  @ApiResponse({
-    status: 201,
-    description: 'Claim submitted successfully',
-    schema: {
-      allOf: [
-        { $ref: getSchemaPath(ResponseDto) },
-        { properties: { data: { type: 'object', properties: { claimId: { type: 'string' } } } } },
-      ],
-    },
-  })
-  @ApiResponse({ status: 403, description: 'Claimant does not match authenticated wallet' })
-  @ApiResponse({ status: 409, description: 'Claim already exists for this policy' })
-  @ApiResponse({ status: 429, description: 'Too many requests — rate limit exceeded (5 req / 60 s)' })
+  @ApiResponse({ status: 201, description: 'Claim submitted successfully', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { claimId: { type: 'string' } } } } }, ], }, })
+  @ApiErrorResponse(403, 'Claimant field does not match the authenticated wallet address.', undefined, 'Claimant does not match authenticated wallet')
+  @ApiErrorResponse(409, 'An active claim already exists for this policy.', undefined, 'An active claim already exists for this policy')
+  @ApiErrorResponse(429, 'Rate limit exceeded — claim submission allows 5 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async submitClaim(@Body() dto: SubmitClaimDto, @Req() req: AuthenticatedRequest) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
@@ -71,12 +63,8 @@ export class ClaimsController {
     description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
     example: 'true',
   })
-  @ApiResponse({
-    status: 200,
-    description: 'Returns paginated claim history — { success, data, total, page, limit }',
-    schema: { $ref: getSchemaPath(PaginatedResponseDto) },
-  })
-  @ApiResponse({ status: 403, description: 'Wallet does not match authenticated user' })
+  @ApiResponse({ status: 200, description: 'Returns paginated claim history — { success, data, total, page, limit }', schema: { $ref: getSchemaPath(PaginatedResponseDto) } })
+  @ApiErrorResponse(403, 'Wallet query parameter does not match the authenticated wallet.', undefined, 'Wallet address does not match authenticated user')
   async getClaimsByWalletQuery(
     @Query('wallet') wallet: string,
     @Query('page') page: string,
@@ -105,17 +93,8 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Trigger automatic claim evaluation for a policy (operator only)' })
   @ApiParam({ name: 'policyId', description: 'Policy UUID to evaluate' })
-  @ApiResponse({
-    status: 201,
-    description: 'Claim evaluation triggered',
-    schema: {
-      allOf: [
-        { $ref: getSchemaPath(ResponseDto) },
-        { properties: { data: { type: 'object', properties: { result: { type: 'string' } } } } },
-      ],
-    },
-  })
-  @ApiResponse({ status: 401, description: 'Operator API key or admin bearer token required' })
+  @ApiResponse({ status: 201, description: 'Claim evaluation triggered', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { result: { type: 'string' } } } } } ] } })
+  @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
   async autoProcess(@Param('policyId') policyId: string) {
     const result = await this.claims.autoProcess(policyId);
     return { success: true, data: { result } };
@@ -127,13 +106,9 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get claim details by ID' })
   @ApiParam({ name: 'id', description: 'Claim UUID' })
-  @ApiResponse({
-    status: 200,
-    description: 'Returns claim details',
-    schema: { $ref: getSchemaPath(ResponseDto) },
-  })
-  @ApiResponse({ status: 403, description: 'Claim belongs to a different wallet' })
-  @ApiResponse({ status: 404, description: 'Claim not found' })
+  @ApiResponse({ status: 200, description: 'Returns claim details', schema: { $ref: getSchemaPath(ResponseDto) } })
+  @ApiErrorResponse(403, 'Claim belongs to a different wallet.', undefined, 'Claim belongs to a different wallet')
+  @ApiErrorResponse(404, 'No claim found for the given ID.', undefined, 'Claim not found')
   async getClaim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const claim = await this.claims.getClaim(id);
     if (!claim) {

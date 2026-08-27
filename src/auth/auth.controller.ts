@@ -1,5 +1,6 @@
 import { Controller, Post, Body, UnauthorizedException, Logger, HttpCode, HttpStatus, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
+import { ApiErrorResponse } from '../common/swagger/api-error-responses';
 import { Throttle } from '@nestjs/throttler';
 import { Keypair } from '@stellar/stellar-sdk';
 import { JwtService } from './jwt.service';
@@ -42,8 +43,8 @@ export class AuthController {
       'be signed by the wallet private key, then submitted to POST /auth/login.',
   })
   @ApiResponse({ status: 200, description: 'Returns the challenge nonce' })
-  @ApiResponse({ status: 400, description: 'Invalid wallet address' })
-  @ApiResponse({ status: 429, description: 'Too many requests — rate limit exceeded (10 req / 60 s)' })
+  @ApiErrorResponse(400, 'Invalid or missing Stellar wallet address (must match /^G[A-Z2-7]{55}$/).', undefined, 'Invalid or missing Stellar wallet address')
+  @ApiErrorResponse(429, 'Rate limit exceeded — auth endpoints allow 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async getChallenge(@Query('wallet') wallet: string) {
     if (!wallet || !/^G[A-Z2-7]{55}$/.test(wallet)) {
       throw new UnauthorizedException('Invalid or missing Stellar wallet address');
@@ -90,8 +91,8 @@ export class AuthController {
   })
   @ApiBody({ type: WalletLoginDto })
   @ApiResponse({ status: 200, description: 'Returns a JWT token for the authenticated wallet' })
-  @ApiResponse({ status: 401, description: 'Invalid or missing wallet signature' })
-  @ApiResponse({ status: 429, description: 'Too many requests — rate limit exceeded (10 req / 60 s)' })
+  @ApiErrorResponse(401, 'Invalid, expired, or missing wallet signature / challenge.', undefined, 'No auth challenge found. Please request a challenge first.')
+  @ApiErrorResponse(429, 'Rate limit exceeded — auth endpoints allow 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async login(@Body() dto: WalletLoginDto) {
     const { walletAddress, signature, message } = dto;
 
