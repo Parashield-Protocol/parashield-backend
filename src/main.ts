@@ -13,6 +13,7 @@ import { UsdcPrecisionValidationMiddleware } from './common/middleware/usdc-prec
 import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
 import { loadVaultSecrets } from './common/secrets/vault-secrets.loader';
 import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
+import { REALTIME_DOCS } from './common/swagger/realtime-docs';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import helmet from 'helmet';
 import { ConfigService } from '@nestjs/config';
@@ -275,7 +276,8 @@ async function bootstrap() {
       '  "path": "/api/v1/policies/buy",\n' +
       '  "timestamp": "2024-01-15T10:30:00.000Z"\n' +
       '}\n' +
-      '```',
+      '```' +
+      REALTIME_DOCS,
     )
     .setVersion('1.0')
     .addApiKey(
