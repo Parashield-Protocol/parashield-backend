@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
-import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto } from './dto/health-response.dto';
+import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto } from './dto/health-response.dto';
 import { WORKER_HEARTBEATS } from '../common/worker-heartbeat';
 
 // #191 — default floor below which the keeper account is considered too low
@@ -16,6 +16,12 @@ const DEFAULT_KEEPER_MIN_BALANCE_XLM = 5;
 // a response within 1-2s; the default 10s RPC timeout used elsewhere risked
 // premature pod restarts whenever Horizon was merely slow, not down.
 const HEALTH_CHECK_RPC_TIMEOUT_MS = 3000;
+
+// Default replication lag threshold above which the database check is flagged
+// as degraded. 50 MB is a reasonable ceiling for a parametric insurance backend
+// where stale reads on claim/policy state must be bounded. Override via
+// DB_REPLICATION_LAG_WARN_BYTES env var (bytes, integer).
+const DEFAULT_REPLICATION_LAG_WARN_BYTES = 50 * 1024 * 1024; // 50 MB
 
 // #426 — Lightweight probe URLs for external data providers.
 // Open-Meteo: free API, no key — a minimal forecast request with a 1-day
@@ -30,7 +36,7 @@ const AVIATIONSTACK_HEALTH_URL =
 
 @ApiTags('health')
 @Controller('health')
-@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto)
+@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto)
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
@@ -298,11 +304,120 @@ export class HealthController {
       this.logger.warn(`Failed to fetch database throughput stats: ${err instanceof Error ? err.message : String(err)}`);
     }
 
+    // Replication lag monitoring — detect stale reads before they affect
+    // claim/policy decisions. We query pg_stat_replication (primary-side view)
+    // for streaming standbys' write/replay lag. On standby nodes we fall back
+    // to pg_last_wal_receive_lsn vs pg_last_wal_replay_lsn. On a non-replicated
+    // primary with no connected standbys both queries succeed but return no rows,
+    // which we surface as lagBytes=0, standbyCount=0 (healthy — no replication
+    // means no lag, but the operator should be aware). The check is non-fatal
+    // (pg_stat_replication may be restricted on managed databases) but will
+    // mark dbStatus='error' when lag exceeds DB_REPLICATION_LAG_WARN_BYTES.
+    let dbReplication: DatabaseReplicationDto | undefined;
+    try {
+      const lagWarnBytes = Number(
+        this.config.get<string>('DB_REPLICATION_LAG_WARN_BYTES') ?? DEFAULT_REPLICATION_LAG_WARN_BYTES,
+      );
+
+      // pg_stat_replication is only populated on the primary and only when at
+      // least one standby is streaming. write_lag / replay_lag are INTERVAL
+      // values (PostgreSQL ≥ 10); we extract epoch seconds via EXTRACT.
+      const replicationRows = await this.prisma.$queryRaw<
+        Array<{
+          write_lag_seconds: number | null;
+          replay_lag_seconds: number | null;
+          sent_lsn: string;
+          write_lsn: string;
+          replay_lsn: string;
+          lag_bytes: bigint;
+        }>
+      >`
+        SELECT
+          EXTRACT(EPOCH FROM write_lag)::float   AS write_lag_seconds,
+          EXTRACT(EPOCH FROM replay_lag)::float  AS replay_lag_seconds,
+          sent_lsn::text,
+          write_lsn::text,
+          replay_lsn::text,
+          (pg_wal_lsn_diff(sent_lsn, replay_lsn))::bigint AS lag_bytes
+        FROM pg_stat_replication
+      `;
+
+      if (replicationRows.length > 0) {
+        // Aggregate across all standbys: take the worst (max) lag.
+        const maxLagBytes = replicationRows.reduce(
+          (max, row) => Math.max(max, Number(row.lag_bytes ?? 0)),
+          0,
+        );
+        const maxLagSeconds = replicationRows.reduce(
+          (max, row) => Math.max(max, Number(row.replay_lag_seconds ?? row.write_lag_seconds ?? 0)),
+          0,
+        );
+        const lagExceedsThreshold = maxLagBytes > lagWarnBytes;
+
+        dbReplication = {
+          lagBytes:            maxLagBytes,
+          lagSeconds:          maxLagSeconds,
+          standbyCount:        replicationRows.length,
+          lagExceedsThreshold,
+        };
+
+        if (lagExceedsThreshold) {
+          dbStatus = 'error';
+          const lagMB = (maxLagBytes / (1024 * 1024)).toFixed(1);
+          dbError = dbError
+            ? `${dbError}; Replication lag ${lagMB} MB exceeds threshold of ${(lagWarnBytes / (1024 * 1024)).toFixed(1)} MB`
+            : `Replication lag ${lagMB} MB exceeds threshold of ${(lagWarnBytes / (1024 * 1024)).toFixed(1)} MB`;
+          this.logger.error(`Health check: ${dbError}`);
+        }
+      } else {
+        // No streaming standbys connected — either a standalone primary or a
+        // standby where pg_stat_replication is empty. Try the standby-side view.
+        const standbyRows = await this.prisma.$queryRaw<
+          Array<{ receive_lsn: string | null; replay_lsn: string | null; lag_bytes: bigint | null }>
+        >`
+          SELECT
+            pg_last_wal_receive_lsn()::text  AS receive_lsn,
+            pg_last_wal_replay_lsn()::text   AS replay_lsn,
+            pg_wal_lsn_diff(
+              COALESCE(pg_last_wal_receive_lsn(), '0/0'),
+              COALESCE(pg_last_wal_replay_lsn(),  '0/0')
+            )::bigint AS lag_bytes
+        `;
+
+        const standbyLagBytes = Number(standbyRows[0]?.lag_bytes ?? 0);
+        const lagExceedsThreshold = standbyLagBytes > lagWarnBytes;
+
+        dbReplication = {
+          lagBytes:            standbyLagBytes,
+          lagSeconds:          null,
+          standbyCount:        0,
+          lagExceedsThreshold,
+        };
+
+        if (lagExceedsThreshold) {
+          dbStatus = 'error';
+          const lagMB = (standbyLagBytes / (1024 * 1024)).toFixed(1);
+          dbError = dbError
+            ? `${dbError}; Standby replication lag ${lagMB} MB exceeds threshold`
+            : `Standby replication lag ${lagMB} MB exceeds threshold`;
+          this.logger.error(`Health check: ${dbError}`);
+        }
+      }
+    } catch (err) {
+      // Non-fatal: pg_stat_replication and pg_last_wal_receive_lsn may be
+      // restricted on managed databases (RDS, Cloud SQL, etc.) or not
+      // applicable (SQLite/test environments). Log and continue.
+      this.logger.warn(
+        `Failed to fetch database replication stats: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     const checks = {
       database: {
         status: dbStatus,
         ...(dbPool !== undefined ? { pool: dbPool } : {}),
         ...(dbThroughput !== undefined ? { throughput: dbThroughput } : {}),
+        ...(dbReplication !== undefined ? { replication: dbReplication } : {}),
         ...(dbError ? { error: dbError } : {}),
       },
       stellar: {

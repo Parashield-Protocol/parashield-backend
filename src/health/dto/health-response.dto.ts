@@ -22,6 +22,28 @@ export class DatabaseThroughputDto {
   conflicts: number;
 }
 
+export class DatabaseReplicationDto {
+  @ApiProperty({ description: 'Replication lag in bytes (WAL bytes not yet applied on standby); 0 on primary-only setups or when no standby is connected', example: 0 })
+  lagBytes: number;
+
+  @ApiProperty({
+    description: 'Replication lag in seconds derived from pg_last_wal_receive_lsn vs pg_last_wal_replay_lsn on the standby, or from write_lag/replay_lag on the primary pg_stat_replication view. null when not measurable (e.g. primary with no streaming standbys)',
+    example: 0,
+    nullable: true,
+    required: false,
+  })
+  lagSeconds?: number | null;
+
+  @ApiProperty({ description: 'Number of connected streaming standbys', example: 1 })
+  standbyCount: number;
+
+  @ApiProperty({
+    description: 'Whether lag exceeds the configured threshold (DB_REPLICATION_LAG_WARN_BYTES, default 50 MB)',
+    example: false,
+  })
+  lagExceedsThreshold: boolean;
+}
+
 export class DatabaseCheckDto {
   @ApiProperty({ description: 'Database connectivity status', enum: ['ok', 'error'] })
   status: 'ok' | 'error';
@@ -31,6 +53,9 @@ export class DatabaseCheckDto {
 
   @ApiProperty({ description: 'Transaction throughput statistics', type: DatabaseThroughputDto, required: false })
   throughput?: DatabaseThroughputDto;
+
+  @ApiProperty({ description: 'Replication lag statistics (absent on non-replicated or restricted setups)', type: DatabaseReplicationDto, required: false })
+  replication?: DatabaseReplicationDto;
 
   @ApiProperty({ description: 'Error message when status is "error"', required: false })
   error?: string;
