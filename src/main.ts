@@ -213,6 +213,59 @@ async function bootstrap() {
       '  "retryAfter": 42\n' +
       '}\n' +
       '```\n\n' +
+      '## Request Timeouts\n\n' +
+      'Every request is subject to a fixed processing timeout, enforced at two layers that share ' +
+      'the same 30-second value:\n\n' +
+      '| Layer | Behavior |\n' +
+      '|-------|----------|\n' +
+      '| Application middleware | Starts a timer when the request enters the handler chain. If no response has been sent after 30 seconds, it responds **408 Request Timeout** and closes the underlying connection so the server slot is freed immediately. |\n' +
+      '| HTTP server socket | A 30-second idle timeout on the underlying Node HTTP server, as a fallback in case the application-level timer is bypassed. |\n\n' +
+      'The timeout window is currently a fixed 30 seconds — it is not configurable via an environment ' +
+      'variable — and applies uniformly to every route; there is no per-endpoint override.\n\n' +
+      '### 408 response body\n\n' +
+      'The 408 response is written directly by the timeout middleware before the request reaches ' +
+      'route handling, so — unlike every other error response documented here — it does **not** use ' +
+      'the standard error envelope (no `success`, `errorCode`, `path`, or `timestamp` fields):\n\n' +
+      '```json\n' +
+      '{\n' +
+      '  "statusCode": 408,\n' +
+      '  "error": "Request Timeout",\n' +
+      '  "message": "The request exceeded the maximum allowed processing time."\n' +
+      '}\n' +
+      '```\n\n' +
+      '### Handling 408s\n\n' +
+      'A 408 means the handler was still running past the 30-second window, not that the request was ' +
+      'necessarily rejected before doing any work. Treat it as retryable following the same guidance as ' +
+      '`SERVICE_UNAVAILABLE` above (exponential backoff; for mutating `POST`/`PUT`/`PATCH` requests, ' +
+      'resend the same `Idempotency-Key` so a request that actually completed server-side is not ' +
+      're-executed).\n\n' +
+      '## Pagination\n\n' +
+      'List endpoints that return more than a handful of rows accept `page` and `limit` query ' +
+      'parameters and return a paginated envelope instead of a bare array:\n\n' +
+      '| Parameter | Type | Default | Notes |\n' +
+      '|-----------|------|---------|-------|\n' +
+      '| `page`    | integer | `1`  | 1-based. Values below 1 are clamped up to 1. |\n' +
+      '| `limit`   | integer | `20` | Clamped to the range `1`-`100`; values outside that range are clamped, not rejected. |\n\n' +
+      '```json\n' +
+      '{\n' +
+      '  "success": true,\n' +
+      '  "data": [ /* items for this page */ ],\n' +
+      '  "total": 42,\n' +
+      '  "page": 1,\n' +
+      '  "limit": 20\n' +
+      '}\n' +
+      '```\n\n' +
+      '| Field   | Description |\n' +
+      '|---------|-------------|\n' +
+      '| `data`  | Array of items for the requested page |\n' +
+      '| `total` | Total number of items across all pages |\n' +
+      '| `page`  | The page number this response corresponds to |\n' +
+      '| `limit` | The page size this response used |\n\n' +
+      'Paginated endpoints: `GET /products`, `GET /policies/me`, `GET /claims`, `GET /claims/history/{wallet}`. ' +
+      'Some of these also support `?stream=true` (NDJSON, one item per line) as an alternative to the ' +
+      'paginated JSON envelope for large result sets — see that endpoint\'s own `stream` parameter ' +
+      'description for details; pagination metadata is then returned via the `X-Total-Count`, `X-Page`, ' +
+      'and `X-Limit` response headers instead of the JSON body.\n\n' +
       '## Error Response Structure\n\n' +
       'All error responses follow a consistent envelope format for reliable parsing:\n\n' +
       '```json\n' +

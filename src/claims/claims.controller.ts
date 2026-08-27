@@ -1,4 +1,5 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException, Throttle } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import {
   ApiTags,
@@ -55,8 +56,8 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get claim history for a wallet address (query param)' })
   @ApiQuery({ name: 'wallet', required: true, description: 'Stellar wallet address' })
-  @ApiQuery({ name: 'page', required: false, description: 'Page number' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiQuery({
     name: 'stream',
     required: false,
@@ -128,8 +129,8 @@ export class ClaimsController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get all claims for a wallet address' })
   @ApiParam({ name: 'wallet', description: 'Stellar wallet address' })
-  @ApiQuery({ name: 'page', required: false, description: 'Page number' })
-  @ApiQuery({ name: 'limit', required: false, description: 'Items per page' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiQuery({
     name: 'stream',
     required: false,
