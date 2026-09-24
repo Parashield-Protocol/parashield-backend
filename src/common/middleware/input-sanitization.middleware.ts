@@ -18,6 +18,14 @@ const MAX_SANITIZATION_DEPTH = 10;
  * Only angle brackets are escaped on purpose: values such as webhook URLs,
  * Stellar addresses, oracle keys, and HMAC secrets are reused server-side,
  * and full HTML-entity encoding (e.g. of `&` or quotes) would corrupt them.
+ *
+ * #485 — this middleware is therefore NOT an output encoder. Stored strings
+ * may still contain `&`, `"` and `'`, which are only safe inside JSON. The
+ * API itself only ever responds with `application/json` (helmet sets
+ * `X-Content-Type-Options: nosniff` so browsers won't sniff it as HTML), and
+ * any consumer that interpolates these values into HTML — the frontend, an
+ * email template, a server-rendered page — must encode them for that
+ * context. Server-side code that builds HTML must use `escapeHtml()` below.
  * Registered globally on the Express adapter in main.ts, right after the
  * body parsers, so every route is covered without route-pattern wildcards.
  *
@@ -61,4 +69,26 @@ function sanitize(value: unknown, depth = 0): unknown {
 
 function sanitizeString(value: string): string {
   return value.trim().replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+const HTML_ESCAPES: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+/**
+ * #485 — context-appropriate output encoding for HTML text and quoted
+ * attribute values. Encodes all five HTML-significant characters, so a value
+ * like `x" onmouseover="alert(1)` cannot break out of an attribute.
+ *
+ * Apply this at render time, not on input: `&` is escaped first-class here,
+ * so running it over a value the input sanitizer already touched turns
+ * `&lt;` into `&amp;lt;`, which renders as the literal text `&lt;` rather
+ * than markup — safe, just visibly double-encoded.
+ */
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
 }
