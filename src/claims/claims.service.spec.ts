@@ -7,6 +7,7 @@ import { OracleService } from '../oracle/oracle.service';
 import { PolicyService } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StatusEventsService } from '../common/events/status-events.service';
+import { WebhooksService } from '../common/events/webhooks.service';
 import { Prisma } from '@prisma/client';
 
 describe('ClaimsService', () => {
@@ -23,6 +24,11 @@ describe('ClaimsService', () => {
   const mockStatusEventsService = {
     emitPolicyStatusChange: jest.fn(),
     subscribeToPolicyStatus: jest.fn(),
+  };
+
+  const mockWebhooksService = {
+    notifyClaimStatusChange:  jest.fn(),
+    notifyPolicyStatusChange: jest.fn(),
   };
 
   const mockPolicyService = {
@@ -42,6 +48,7 @@ describe('ClaimsService', () => {
   const mockPrismaService = {
     policy: {
       findUnique: jest.fn(),
+      findMany:   jest.fn(),
       update:     jest.fn(),
       updateMany: jest.fn(),
     },
@@ -51,9 +58,11 @@ describe('ClaimsService', () => {
       findUnique: jest.fn(),
       create:     jest.fn(),
       update:     jest.fn(),
+      updateMany: jest.fn(),
     },
     auditLog: {
-      create: jest.fn().mockResolvedValue({}),
+      create:     jest.fn().mockResolvedValue({}),
+      createMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
     $transaction: jest.fn(),
   };
@@ -94,6 +103,7 @@ describe('ClaimsService', () => {
         { provide: ConfigService,  useValue: mockConfigService },
         { provide: PrismaService,  useValue: mockPrismaService },
         { provide: StatusEventsService, useValue: mockStatusEventsService },
+        { provide: WebhooksService, useValue: mockWebhooksService },
       ],
     }).compile();
 
@@ -672,6 +682,134 @@ describe('ClaimsService', () => {
 
       expect(result).toBe('Paid');
       expect(mockPolicyService.getProductById).not.toHaveBeenCalled();
+    });
+  });
+
+  // #486 — policies stranded in PROCESSING must be recovered by the worker.
+  describe('recoverStuckProcessingPolicies', () => {
+    const NOW = new Date('2026-09-24T12:00:00.000Z');
+
+    beforeEach(() => {
+      mockPrismaService.auditLog.create.mockResolvedValue({});
+      // Run interactive transactions against the same mocked client.
+      mockPrismaService.$transaction.mockImplementation(async (arg: unknown) =>
+        typeof arg === 'function' ? (arg as (tx: unknown) => unknown)(mockPrismaService) : arg,
+      );
+    });
+
+    it('only scans PROCESSING policies older than the default 30-minute cutoff', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { status: 'PROCESSING', updatedAt: { lt: new Date('2026-09-24T11:30:00.000Z') } },
+      }));
+      expect(summary).toEqual({ scanned: 0, revertedToActive: 0, markedClaimed: 0, needsManualReview: 0, skipped: 0 });
+      expect(mockPrismaService.policy.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('honours CLAIMS_STUCK_PROCESSING_MINUTES', async () => {
+      (mockConfigService.get as jest.Mock).mockImplementationOnce((key: string) => (key === 'CLAIMS_STUCK_PROCESSING_MINUTES' ? '5' : ''));
+      mockPrismaService.policy.findMany.mockResolvedValue([]);
+
+      await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(mockPrismaService.policy.findMany).toHaveBeenCalledWith(expect.objectContaining({
+        where: { status: 'PROCESSING', updatedAt: { lt: new Date('2026-09-24T11:55:00.000Z') } },
+      }));
+    });
+
+    it('reverts a stuck policy to ACTIVE and fails its in-flight claim so it can be retried', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        { id: POLICY_ID, claims: [{ id: 'c1', status: 'PROCESSING', txHash: null }] },
+      ]);
+      mockPrismaService.policy.updateMany.mockResolvedValue({ count: 1 });
+      mockPrismaService.claim.updateMany.mockResolvedValue({ count: 1 });
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(summary.revertedToActive).toBe(1);
+      expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith({
+        where: { id: POLICY_ID, status: 'PROCESSING', updatedAt: { lt: expect.any(Date) } },
+        data:  { status: 'ACTIVE' },
+      });
+      expect(mockPrismaService.claim.updateMany).toHaveBeenCalledWith({
+        where: { id: { in: ['c1'] }, status: 'PROCESSING' },
+        data:  { status: 'FAILED', processedAt: NOW },
+      });
+      expect(mockPrismaService.auditLog.createMany).toHaveBeenCalled();
+      expect(mockStatusEventsService.emitPolicyStatusChange).toHaveBeenCalledWith(POLICY_ID, 'ACTIVE');
+      expect(mockWebhooksService.notifyClaimStatusChange).toHaveBeenCalledWith(
+        expect.objectContaining({ claimId: 'c1', fromStatus: 'PROCESSING', toStatus: 'FAILED' }),
+      );
+    });
+
+    it('reverts a policy left PROCESSING after a REJECTED evaluation without touching the claim', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        { id: POLICY_ID, claims: [{ id: 'c1', status: 'REJECTED', txHash: null }] },
+      ]);
+      mockPrismaService.policy.updateMany.mockResolvedValue({ count: 1 });
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(summary.revertedToActive).toBe(1);
+      expect(mockPrismaService.claim.updateMany).not.toHaveBeenCalled();
+      expect(mockWebhooksService.notifyClaimStatusChange).not.toHaveBeenCalled();
+    });
+
+    it('marks the policy CLAIMED when a PAID claim already exists', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        { id: POLICY_ID, claims: [{ id: 'c1', status: 'PAID', txHash: 'tx-1' }] },
+      ]);
+      mockPrismaService.policy.updateMany.mockResolvedValue({ count: 1 });
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(summary.markedClaimed).toBe(1);
+      expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+        data: { status: 'CLAIMED' },
+      }));
+      expect(mockPrismaService.claim.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('does not retry a claim that has an unconfirmed on-chain txHash', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        { id: POLICY_ID, claims: [{ id: 'c1', status: 'PROCESSING', txHash: 'tx-unknown' }] },
+      ]);
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(summary.needsManualReview).toBe(1);
+      expect(mockPrismaService.policy.updateMany).not.toHaveBeenCalled();
+      expect(mockPrismaService.claim.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('skips a policy that progressed concurrently (guard misses)', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        { id: POLICY_ID, claims: [{ id: 'c1', status: 'PROCESSING', txHash: null }] },
+      ]);
+      mockPrismaService.policy.updateMany.mockResolvedValue({ count: 0 });
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(summary.skipped).toBe(1);
+      expect(mockPrismaService.claim.updateMany).not.toHaveBeenCalled();
+      expect(mockStatusEventsService.emitPolicyStatusChange).not.toHaveBeenCalled();
+    });
+
+    it('keeps recovering other policies when one fails', async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        { id: 'p-bad', claims: [] },
+        { id: 'p-good', claims: [] },
+      ]);
+      mockPrismaService.policy.updateMany
+        .mockRejectedValueOnce(new Error('db down'))
+        .mockResolvedValueOnce({ count: 1 });
+
+      const summary = await service.recoverStuckProcessingPolicies(NOW);
+
+      expect(summary).toEqual(expect.objectContaining({ scanned: 2, revertedToActive: 1, skipped: 1 }));
     });
   });
 });

@@ -29,6 +29,8 @@ export interface EnvironmentVariables {
   USDC_CONTRACT?: string;
   POOL_CAPACITY_XLM?: string;
   KEEPER_MIN_BALANCE_XLM?: string;
+  // #486 — minutes a policy may stay PROCESSING before the claims worker recovers it (default 30)
+  CLAIMS_STUCK_PROCESSING_MINUTES?: string;
 
   // #379 — API key rotation (previous keys + grace window in minutes)
   ORACLE_OPERATOR_API_KEY_PREVIOUS?: string;

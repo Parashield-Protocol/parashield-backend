@@ -28,6 +28,21 @@ export interface ClaimSummary {
   createdAt:      number;
 }
 
+/** Outcome counts from a single stuck-PROCESSING recovery sweep (#486). */
+export interface StuckPolicyRecoverySummary {
+  scanned:           number;
+  revertedToActive:  number;
+  markedClaimed:     number;
+  // PROCESSING claim with a txHash: on-chain outcome unknown, not retried.
+  needsManualReview: number;
+  skipped:           number;
+}
+
+// #486 — how long a policy may sit in PROCESSING before the worker treats
+// the claim flow as dead. autoProcess holds the gate for seconds (oracle read
+// + one Soroban call), so this is far outside any legitimate in-flight window.
+const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -336,6 +351,130 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     }
 
     return 'Paid';
+  }
+
+  /**
+   * #486 — recover policies stranded in PROCESSING.
+   *
+   * autoProcess flips a policy ACTIVE → PROCESSING before evaluating it, and
+   * relies on later writes to move it on. If the process crashes, the DB
+   * write fails, or the payout-failure rollback itself fails, nothing ever
+   * touches the row again: the worker only scans ACTIVE policies. The
+   * trigger-not-met / no-reading paths also leave the policy in PROCESSING,
+   * which the worker's guarded ACTIVE → EXPIRED update then misses.
+   *
+   * Any policy whose PROCESSING status is older than
+   * CLAIMS_STUCK_PROCESSING_MINUTES (default 30) is resolved from its claims:
+   *  - a PAID claim exists           → CLAIMED (payout already recorded)
+   *  - a PROCESSING claim has a txHash → left as-is and logged (something
+   *    was submitted on-chain but its outcome is unknown; retrying could
+   *    double-pay, so it needs manual review)
+   *  - otherwise                     → ACTIVE, with any PROCESSING claims
+   *    marked FAILED, so the next worker scan re-evaluates it (retry) or
+   *    expires it exactly like any other ACTIVE policy.
+   *
+   * Every write is guarded on status = PROCESSING and the same updatedAt
+   * cutoff, so a policy that makes progress concurrently is left alone.
+   */
+  async recoverStuckProcessingPolicies(now: Date = new Date()): Promise<StuckPolicyRecoverySummary> {
+    const configured = parseInt(this.config.get<string>('CLAIMS_STUCK_PROCESSING_MINUTES') ?? '', 10);
+    const stuckMinutes = Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_STUCK_PROCESSING_MINUTES;
+    const cutoff = new Date(now.getTime() - stuckMinutes * 60 * 1000);
+
+    const stuck = await this.prisma.policy.findMany({
+      where:  { status: PolicyStatus.PROCESSING, updatedAt: { lt: cutoff } },
+      select: { id: true, claims: { select: { id: true, status: true, txHash: true } } },
+    });
+
+    const summary: StuckPolicyRecoverySummary = {
+      scanned: stuck.length, revertedToActive: 0, markedClaimed: 0, needsManualReview: 0, skipped: 0,
+    };
+    if (stuck.length === 0) return summary;
+
+    this.logger.warn(`Found ${stuck.length} policies stuck in PROCESSING for more than ${stuckMinutes} minutes — recovering`);
+
+    for (const policy of stuck) {
+      const guard = { id: policy.id, status: PolicyStatus.PROCESSING, updatedAt: { lt: cutoff } };
+      const paidClaim = policy.claims.find((c) => c.status === ClaimStatus.PAID);
+      const inFlightClaims = policy.claims.filter((c) => c.status === ClaimStatus.PROCESSING);
+      const unconfirmedOnChain = inFlightClaims.find((c) => c.txHash);
+
+      try {
+        if (paidClaim) {
+          const { count } = await this.prisma.policy.updateMany({
+            where: guard,
+            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.CLAIMED) as PolicyStatus },
+          });
+          if (count === 0) { summary.skipped++; continue; }
+          await this.auditOp('Policy', policy.id, PolicyStatus.PROCESSING, PolicyStatus.CLAIMED, `Recovered stuck PROCESSING: claim ${paidClaim.id} already PAID`)
+            .catch((err) => this.logger.error(`Failed to write audit log for policy ${policy.id} recovery`, err));
+          this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.CLAIMED);
+          summary.markedClaimed++;
+          this.logger.warn(`Recovered stuck policy ${policy.id} → CLAIMED (claim ${paidClaim.id} already PAID)`);
+          continue;
+        }
+
+        if (unconfirmedOnChain) {
+          // Left in PROCESSING on purpose (and re-reported every sweep): the
+          // PolicyStatus enum has no ERROR state to park it in, and reverting
+          // to ACTIVE would let the next scan re-invoke the contract.
+          summary.needsManualReview++;
+          this.logger.error(
+            `Stuck policy ${policy.id} has claim ${unconfirmedOnChain.id} with unconfirmed txHash=${unconfirmedOnChain.txHash} — not retrying, manual review required`,
+          );
+          continue;
+        }
+
+        const reverted = await this.prisma.$transaction(async (tx) => {
+          const { count } = await tx.policy.updateMany({
+            where: guard,
+            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.ACTIVE) as PolicyStatus },
+          });
+          if (count === 0) return false;
+          if (inFlightClaims.length > 0) {
+            await tx.claim.updateMany({
+              where: { id: { in: inFlightClaims.map((c) => c.id) }, status: ClaimStatus.PROCESSING },
+              data:  { status: ClaimStatus.FAILED, processedAt: now },
+            });
+          }
+          await tx.auditLog.createMany({
+            data: [
+              ...inFlightClaims.map((c) => ({
+                entityType: 'Claim', entityId: c.id,
+                fromStatus: ClaimStatus.PROCESSING, toStatus: ClaimStatus.FAILED,
+                reason: 'Recovered stuck PROCESSING: claim flow did not complete',
+              })),
+              {
+                entityType: 'Policy', entityId: policy.id,
+                fromStatus: PolicyStatus.PROCESSING, toStatus: PolicyStatus.ACTIVE,
+                reason: `Recovered stuck PROCESSING after ${stuckMinutes} minutes`,
+              },
+            ],
+          });
+          return true;
+        });
+        if (!reverted) { summary.skipped++; continue; }
+
+        this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.ACTIVE);
+        for (const c of inFlightClaims) {
+          this.webhooks.notifyClaimStatusChange({
+            claimId: c.id,
+            fromStatus: ClaimStatus.PROCESSING,
+            toStatus: ClaimStatus.FAILED,
+            timestamp: Date.now(),
+          });
+        }
+        summary.revertedToActive++;
+        this.logger.warn(`Recovered stuck policy ${policy.id} → ACTIVE (${inFlightClaims.length} in-flight claims marked FAILED)`);
+      } catch (err) {
+        // One bad row must not block recovery of the rest; it stays
+        // PROCESSING and is retried on the next sweep.
+        summary.skipped++;
+        this.logger.error(`Failed to recover stuck policy ${policy.id}`, err);
+      }
+    }
+
+    return summary;
   }
 
   /** Manually submit a claim for a policy (initiated by policyholder). */

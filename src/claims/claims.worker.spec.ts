@@ -6,7 +6,7 @@ import { PolicyService } from '../policy/policy.service';
 
 describe('ClaimsWorker', () => {
   let worker: ClaimsWorker;
-  let mockClaims: jest.Mocked<Pick<ClaimsService, 'autoProcess'>>;
+  let mockClaims: jest.Mocked<Pick<ClaimsService, 'autoProcess' | 'recoverStuckProcessingPolicies'>>;
   let mockPrisma: {
     policy: { findMany: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
   };
@@ -23,7 +23,12 @@ describe('ClaimsWorker', () => {
   }
 
   beforeEach(() => {
-    mockClaims = { autoProcess: jest.fn() };
+    mockClaims = {
+      autoProcess: jest.fn(),
+      recoverStuckProcessingPolicies: jest.fn().mockResolvedValue({
+        scanned: 0, revertedToActive: 0, markedClaimed: 0, needsManualReview: 0, skipped: 0,
+      }),
+    };
     mockPrisma = {
       policy: {
         findMany: jest.fn(),
@@ -143,5 +148,27 @@ describe('ClaimsWorker', () => {
     // row simply doesn't match and updateMany affects 0 rows — asserted above by
     // resolving mockResolvedValue({ count: 0 }) without the call throwing.
     expect(mockPrisma.policy.update).not.toHaveBeenCalled();
+  });
+
+  // #486 — stuck PROCESSING policies are recovered before the ACTIVE scan so
+  // that anything reverted to ACTIVE is picked up in the same tick.
+  it('recovers stuck PROCESSING policies before scanning for expiring ones', async () => {
+    mockPrisma.policy.findMany.mockResolvedValue([]);
+
+    await worker.processActivePolicies();
+
+    expect(mockClaims.recoverStuckProcessingPolicies).toHaveBeenCalledTimes(1);
+    expect(mockClaims.recoverStuckProcessingPolicies.mock.invocationCallOrder[0])
+      .toBeLessThan(mockPrisma.policy.findMany.mock.invocationCallOrder[0]);
+  });
+
+  it('still runs the regular scan when stuck-policy recovery throws', async () => {
+    mockClaims.recoverStuckProcessingPolicies.mockRejectedValue(new Error('db down'));
+    mockPrisma.policy.findMany.mockResolvedValue([policy('p1')]);
+    mockClaims.autoProcess.mockResolvedValue('Paid');
+
+    await expect(worker.processActivePolicies()).resolves.toBeUndefined();
+
+    expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1', expect.any(Map));
   });
 });

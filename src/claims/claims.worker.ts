@@ -24,6 +24,9 @@ const jitterMs = (minMs: number, maxMs: number) =>
  * Looks ahead 1 hour for policies whose endTime is approaching.
  * This gives the Soroban transaction time to confirm before the policy window closes.
  *
+ * Each tick first recovers policies stuck in PROCESSING (#486) — see
+ * ClaimsService.recoverStuckProcessingPolicies.
+ *
  * Policies are processed in batches of BATCH_SIZE with a random 1–5 s jitter between
  * batches to avoid saturating the Soroban RPC node when many policies expire at once.
  */
@@ -61,6 +64,21 @@ export class ClaimsWorker {
   async processActivePolicies(): Promise<void> {
     const tickStart = Date.now();
     this.logger.log('Claims worker tick — scanning for expiring policies');
+
+    // #486 — release policies stranded in PROCESSING before scanning, so any
+    // reverted to ACTIVE are retried (or expired) by this same tick. Failure
+    // here must not block the regular scan.
+    try {
+      const recovery = await this.claims.recoverStuckProcessingPolicies();
+      if (recovery.scanned > 0) {
+        this.logger.warn(
+          `Stuck PROCESSING recovery — scanned: ${recovery.scanned}, revertedToActive: ${recovery.revertedToActive}, ` +
+          `markedClaimed: ${recovery.markedClaimed}, needsManualReview: ${recovery.needsManualReview}, skipped: ${recovery.skipped}`,
+        );
+      }
+    } catch (err) {
+      this.logger.error('Stuck PROCESSING recovery failed', err);
+    }
 
     const now        = new Date();
     const oneHourOut = new Date(now.getTime() + 60 * 60 * 1000);
