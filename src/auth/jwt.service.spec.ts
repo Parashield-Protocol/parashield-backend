@@ -49,6 +49,25 @@ describe('JwtService', () => {
       }).toThrow(UnauthorizedException);
     });
 
+    // #555 — tokens with wrong issuer or audience must be rejected
+    it('should reject a token signed with a different issuer', () => {
+      const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+      const token = jwt.sign({ walletAddress, iss: 'wrong-issuer' }, 'my-secret-key', {
+        algorithm: 'HS256',
+        expiresIn: '1h',
+      });
+      expect(() => service.verify(token)).toThrow(UnauthorizedException);
+    });
+
+    it('should reject a token signed with a different audience', () => {
+      const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+      const token = jwt.sign({ walletAddress, aud: 'wrong-audience' }, 'my-secret-key', {
+        algorithm: 'HS256',
+        expiresIn: '1h',
+      });
+      expect(() => service.verify(token)).toThrow(UnauthorizedException);
+    });
+
     // #182 — the whole point of a 7-day expiry is that expired tokens are
     // rejected; craft an already-expired token directly with the same
     // secret the service uses, rather than only testing malformed strings.

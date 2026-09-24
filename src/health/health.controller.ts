@@ -87,6 +87,7 @@ export class HealthController {
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
   async check(): Promise<HealthResponseDto> {
+    const startTime = Date.now();
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
     let dbPool: { active: number; idle: number; waiting: number; max: number; utilizationPercent: number; exhausted: boolean } | undefined;
@@ -561,6 +562,7 @@ export class HealthController {
       status:    healthy ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       service:   'parashield-api',
+      responseTimeMs: Date.now() - startTime,
       checks: checks as any,
     };
 

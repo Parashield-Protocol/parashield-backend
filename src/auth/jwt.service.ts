@@ -6,6 +6,8 @@ export interface JwtPayload {
   walletAddress: string;
   role?: string;
   admin?: boolean;
+  iss?: string;
+  aud?: string;
   iat?: number;
   exp?: number;
 }
@@ -23,6 +25,8 @@ export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
   private readonly tokenExpiry = "1h";
+  private readonly issuer = "parashield-api";
+  private readonly audience = "parashield-clients";
 
   constructor(private readonly config: ConfigService) {
     const secret = config.get<string>("JWT_SECRET");
@@ -46,6 +50,8 @@ export class JwtService {
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
       expiresIn: '1h',
+      issuer: this.issuer,
+      audience: this.audience,
     };
     const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress}`);
@@ -62,6 +68,8 @@ export class JwtService {
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
       expiresIn: '1h',
+      issuer: this.issuer,
+      audience: this.audience,
     };
     const token = jwt.sign(payload, this.secret, options);
     this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
@@ -80,6 +88,8 @@ export class JwtService {
       // re-signed with RS256 using the HMAC secret as the public key).
       const decoded = jwt.verify(token, this.secret, {
         algorithms: ['HS256'],
+        issuer: this.issuer,
+        audience: this.audience,
       }) as JwtPayload;
       return {
         walletAddress: decoded.walletAddress,
@@ -92,6 +102,9 @@ export class JwtService {
       }
       if (err instanceof jwt.JsonWebTokenError) {
         throw new UnauthorizedException("Invalid token");
+      }
+      if (err instanceof jwt.NotBeforeError) {
+        throw new UnauthorizedException("Token not yet valid");
       }
       throw new UnauthorizedException("Token verification failed");
     }

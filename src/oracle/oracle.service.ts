@@ -44,7 +44,7 @@ class CircuitBreaker {
     ) {
       this.state = CircuitState.HALF_OPEN;
       this.probeInFlight = false;
-      this.logger.warn(`Circuit half-open — allowing probe request`);
+      this.logger.warn(`Circuit half-open — allowing probe request (previously failed ${this.failureCount} times)`);
     }
     return this.state;
   }
