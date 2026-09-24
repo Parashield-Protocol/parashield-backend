@@ -62,6 +62,14 @@ describe('AuthController', () => {
       );
     });
 
+    it('should not run expired-challenge cleanup on the request path (#489)', async () => {
+      mockPrismaService.authChallenge.upsert.mockResolvedValue({ walletAddress, nonce: 'mocknonce' });
+
+      await controller.getChallenge(walletAddress);
+
+      expect(mockPrismaService.authChallenge.deleteMany).not.toHaveBeenCalled();
+    });
+
     it('should throw UnauthorizedException for an invalid wallet address format', async () => {
       await expect(controller.getChallenge('invalid-wallet')).rejects.toThrow(UnauthorizedException);
     });

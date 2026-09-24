@@ -7,12 +7,12 @@ import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 /**
  * AuthCleanupWorker — periodically prunes expired AuthChallenge rows.
  *
- * Expired challenges are also opportunistically cleaned up whenever a new
- * challenge is requested for the same wallet (see AuthController#getChallenge),
- * but that only touches rows for wallets that come back. A wallet that
- * requests a challenge once and never returns — or fails login — leaves a
- * permanent row with no other trigger to remove it. This runs independently
- * of request traffic, mirroring the pattern used by ClaimsWorker.
+ * #489 — this is the only place expired challenges are pruned. The cleanup
+ * used to also run on every GET /auth/challenge, which put a table-wide
+ * deleteMany on the hot path of every login. Stale rows are harmless in the
+ * meantime: login rejects an expired nonce and the next challenge for the
+ * same wallet overwrites its row via upsert. This runs independently of
+ * request traffic, mirroring the pattern used by ClaimsWorker.
  */
 @Injectable()
 export class AuthCleanupWorker {
@@ -23,7 +23,7 @@ export class AuthCleanupWorker {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
-  @Cron(CronExpression.EVERY_6_HOURS)
+  @Cron(CronExpression.EVERY_10_MINUTES)
   async cleanupExpiredChallenges(): Promise<void> {
     const { count } = await this.prisma.authChallenge.deleteMany({
       where: { expiresAt: { lt: new Date() } },

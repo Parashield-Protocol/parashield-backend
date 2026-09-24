@@ -54,12 +54,8 @@ export class AuthController {
     const nonce = crypto.randomBytes(32).toString('hex');
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes TTL
 
-    // Proactively clean up any expired challenges to prevent DB bloat
-    await this.prisma.authChallenge.deleteMany({
-      where: { expiresAt: { lt: new Date() } },
-    }).catch((err) => {
-      this.logger.warn(`Error cleaning up expired challenges: ${err.message}`);
-    });
+    // #489 — expired-challenge cleanup is a table-wide deleteMany, so it runs
+    // on a schedule in AuthCleanupWorker rather than on every request here.
 
     // Store the nonce keyed by wallet address (upsert if they request again)
     await this.prisma.authChallenge.upsert({

@@ -11,7 +11,7 @@ import type Redis from 'ioredis';
 export const WORKER_HEARTBEATS = {
   oracle: { key: 'health:worker:oracle', ttlSeconds: 2 * 60 * 60 },
   claims: { key: 'health:worker:claims', ttlSeconds: 2 * 60 * 60 },
-  'auth-cleanup': { key: 'health:worker:auth-cleanup', ttlSeconds: 12 * 60 * 60 },
+  'auth-cleanup': { key: 'health:worker:auth-cleanup', ttlSeconds: 20 * 60 },
 } as const;
 
 export type WorkerHeartbeatName = keyof typeof WORKER_HEARTBEATS;
