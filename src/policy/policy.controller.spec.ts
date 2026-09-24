@@ -1,5 +1,6 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { PolicyController } from "./policy.controller";
+import { PolicyController, SSE_HEARTBEAT_INTERVAL_MS } from "./policy.controller";
+import { EventEmitter } from "events";
 import { PolicyService } from "./policy.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { OperatorAuthGuard } from "../auth/operator-auth.guard";
@@ -612,6 +613,62 @@ describe("PolicyController", () => {
       const guards = reflector.get<unknown[]>("__guards__", controller.confirmPolicy);
       expect(guards).toBeDefined();
       expect(guards).toContain(JwtAuthGuard);
+    });
+  });
+  describe("#491 — policyStatusEvents (SSE) connection lifecycle", () => {
+    const wallet = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+    let unsubscribe: jest.Mock;
+
+    function sseRequest() {
+      const req = new EventEmitter() as EventEmitter & Partial<AuthenticatedRequest>;
+      Object.assign(req, {
+        user: { walletAddress: wallet },
+        wallet,
+        socket: { setKeepAlive: jest.fn() },
+      });
+      return req as unknown as AuthenticatedRequest & EventEmitter;
+    }
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      unsubscribe = jest.fn();
+      mockStatusEventsService.subscribeToPolicyStatus.mockReturnValue(unsubscribe);
+      mockPolicyService.getPolicy.mockResolvedValue({ id: "p1", policyholder: wallet, status: "ACTIVE" });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it("sends periodic heartbeat events while the connection is open", async () => {
+      const req = sseRequest();
+      const events: any[] = [];
+      const stream = await controller.policyStatusEvents("p1", req);
+      const sub = stream.subscribe((e) => events.push(e));
+
+      jest.advanceTimersByTime(SSE_HEARTBEAT_INTERVAL_MS * 2);
+
+      expect(events.filter((e) => e.type === "heartbeat")).toHaveLength(2);
+      expect(req.socket.setKeepAlive).toHaveBeenCalledWith(true, expect.any(Number));
+      sub.unsubscribe();
+    });
+
+    it("tears down the status subscription and heartbeat when the client disconnects", async () => {
+      const req = sseRequest();
+      const events: any[] = [];
+      let completed = false;
+      const stream = await controller.policyStatusEvents("p1", req);
+      stream.subscribe({ next: (e) => events.push(e), complete: () => { completed = true; } });
+
+      req.emit("close");
+
+      expect(completed).toBe(true);
+      expect(unsubscribe).toHaveBeenCalledTimes(1);
+      expect(req.listenerCount("close")).toBe(0);
+
+      const countAfterClose = events.length;
+      jest.advanceTimersByTime(SSE_HEARTBEAT_INTERVAL_MS * 3);
+      expect(events).toHaveLength(countAfterClose);
     });
   });
 });

@@ -44,6 +44,14 @@ import { AuthenticatedRequest } from '../auth/authenticated-request';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { PolicyStatusEventDto } from '../common/events/dto/sse-event.dto';
 
+// #491 — how often the policy SSE stream writes a heartbeat. Writing to a
+// socket whose peer vanished without a FIN (crashed client, dropped network)
+// is what eventually surfaces the dead connection as an error/'close', so the
+// subscription gets torn down instead of lingering until the policy changes.
+export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
+// OS-level TCP keepalive probes back up the heartbeat for idle sockets.
+const SSE_TCP_KEEPALIVE_MS = 30_000;
+
 @ApiTags('policy')
 @Controller()
 @ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto, CancellationResponseDto)
@@ -411,7 +419,10 @@ export class PolicyController {
       '```js\n' +
       'const es = new EventSource("/api/v1/policies/:id/events", { withCredentials: true });\n' +
       "es.onmessage = (e) => console.log(JSON.parse(e.data));\n" +
-      '```',
+      '```\n\n' +
+      'Every 15 seconds the server also sends a named `heartbeat` event (`{ "timestamp": 1700000000000 }`) ' +
+      'so dead connections are detected and cleaned up. `onmessage` ignores named events; listen with ' +
+      '`es.addEventListener("heartbeat", ...)` if you want to use it for client-side liveness checks.',
   })
   @ApiParam({ name: 'id', description: 'Policy UUID' })
   @ApiResponse({
@@ -442,7 +453,25 @@ export class PolicyController {
       const unsubscribe = this.statusEvents.subscribeToPolicyStatus(id, (event) => {
         subscriber.next({ data: event });
       });
-      return () => unsubscribe();
+
+      // #491 — detect clients that went away without a clean close. The
+      // periodic write fails once the peer is gone, and both that and a
+      // normal disconnect fire 'close' on the request, which completes the
+      // stream and runs the teardown below.
+      const heartbeat = setInterval(() => {
+        subscriber.next({ type: 'heartbeat', data: { timestamp: Date.now() } });
+      }, SSE_HEARTBEAT_INTERVAL_MS);
+      heartbeat.unref?.();
+
+      req.socket?.setKeepAlive?.(true, SSE_TCP_KEEPALIVE_MS);
+      const onClose = () => subscriber.complete();
+      req.once?.('close', onClose);
+
+      return () => {
+        clearInterval(heartbeat);
+        req.off?.('close', onClose);
+        unsubscribe();
+      };
     });
   }
 }
