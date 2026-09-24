@@ -456,20 +456,21 @@ describe("PolicyController", () => {
     ];
 
     it("returns a list of active products", async () => {
-      mockPolicyService.getActiveProducts.mockResolvedValue(MOCK_PRODUCTS);
+      const page = { data: MOCK_PRODUCTS, total: 1, page: 1, limit: 20 };
+      mockPolicyService.getActiveProducts.mockResolvedValue(page);
 
       const result = await controller.getProducts();
 
-      expect(mockPolicyService.getActiveProducts).toHaveBeenCalled();
-      expect(result).toEqual({ success: true, data: MOCK_PRODUCTS });
+      expect(mockPolicyService.getActiveProducts).toHaveBeenCalledWith(1, 20);
+      expect(result).toEqual({ success: true, ...page });
     });
 
     it("returns an empty array when no products are active", async () => {
-      mockPolicyService.getActiveProducts.mockResolvedValue([]);
+      mockPolicyService.getActiveProducts.mockResolvedValue({ data: [], total: 0, page: 1, limit: 20 });
 
       const result = await controller.getProducts();
 
-      expect(result).toEqual({ success: true, data: [] });
+      expect(result).toEqual({ success: true, data: [], total: 0, page: 1, limit: 20 });
     });
 
     it("has no auth guard registered (public endpoint)", () => {
