@@ -21,6 +21,33 @@ describe('CreateProductDto', () => {
     expect(errors).toHaveLength(0);
   });
 
+  describe('category (#498)', () => {
+    it.each(['crop', 'flight', 'disaster', 'health', 'defi'])(
+      'passes with allowed category: %s',
+      async (cat) => {
+        const dto = validDto();
+        dto.category = cat;
+        const errors = await validate(dto);
+        expect(errors).toHaveLength(0);
+      },
+    );
+
+    it('fails with an unrecognised category', async () => {
+      const dto = validDto();
+      dto.category = 'invalid_category';
+      const errors = await validate(dto);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].property).toBe('category');
+    });
+
+    it('rejects an empty string as category', async () => {
+      const dto = validDto();
+      dto.category = '';
+      const errors = await validate(dto);
+      expect(errors.some((e) => e.property === 'category')).toBe(true);
+    });
+  });
+
   describe('maxDuration', () => {
     it('fails when 0', async () => {
       const dto = validDto();

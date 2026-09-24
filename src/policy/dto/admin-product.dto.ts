@@ -11,7 +11,7 @@ import {
 } from 'class-validator';
 import { ApiProperty, PartialType } from '@nestjs/swagger';
 
-const CATEGORIES   = ['crop', 'flight', 'defi'];
+const CATEGORIES   = ['crop', 'flight', 'disaster', 'health', 'defi'];
 const COMPARISONS  = ['gte', 'lte', 'eq'];
 const STATUSES     = ['ACTIVE', 'INACTIVE', 'DEPRECATED'];
 
