@@ -113,6 +113,8 @@ describe('ClaimsService', () => {
 
   describe('submitClaim — duplicate claim prevention', () => {
     it('should throw ConflictException when a PAID claim already exists for the policy', async () => {
+      // #371 — ownership/status checks run before the duplicate guard
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
       mockPrismaService.claim.findFirst.mockResolvedValue({
         id:       'existing-claim-id',
         policyId: POLICY_ID,
@@ -126,6 +128,8 @@ describe('ClaimsService', () => {
     });
 
     it('should throw ConflictException when a PROCESSING claim already exists for the policy', async () => {
+      // #371 — ownership/status checks run before the duplicate guard
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
       mockPrismaService.claim.findFirst.mockResolvedValue({
         id:       'processing-claim-id',
         policyId: POLICY_ID,
