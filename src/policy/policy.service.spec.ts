@@ -3,9 +3,10 @@ import { PolicyService, ProductSummary, OracleKeyValidationResult } from "./poli
 import { StellarService } from "../stellar/stellar.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
-import { ConflictException, GoneException } from "@nestjs/common";
+import { BadRequestException, ConflictException, GoneException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { StatusEventsService } from "../common/events/status-events.service";
+import { WebhooksService } from "../common/events/webhooks.service";
 import {
   TransactionBuilder,
   Keypair,
@@ -66,6 +67,7 @@ describe("PolicyService.calculatePremium", () => {
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: ConfigService, useValue: mockConfigService },
         { provide: StatusEventsService, useValue: mockStatusEventsService },
+        { provide: WebhooksService, useValue: { notifyPolicyStatusChange: jest.fn(), notifyClaimStatusChange: jest.fn() } },
       ],
     }).compile();
 
@@ -468,6 +470,44 @@ describe("PolicyService.calculatePremium", () => {
       await expect(service.createPolicy(dto, "duplicate-tx-abc")).rejects.toThrow(
         /duplicate-tx-abc.*already been used to create a policy/,
       );
+    });
+  });
+
+  describe("calculateProRatedRefund — BigInt arithmetic (issue #488)", () => {
+    const start = new Date("2026-01-01T00:00:00Z");
+    const end = new Date("2026-01-31T00:00:00Z");
+    const mid = new Date("2026-01-16T00:00:00Z");
+
+    it("refunds half the premium at the midpoint as a 7-decimal string", () => {
+      expect(service.calculateProRatedRefund(new Prisma.Decimal("100"), start, end, mid)).toBe("50.0000000");
+    });
+
+    it("floors to the stroop so the refund never exceeds what was paid", () => {
+      // 999999.9999999 * 0.5 = 499999.99999995 → floored to 499999.9999999
+      expect(service.calculateProRatedRefund("999999.9999999", start, end, mid)).toBe("499999.9999999");
+    });
+
+    it("stays exact for premiums beyond Number.MAX_SAFE_INTEGER stroops", () => {
+      // 9,007,199,254.7409917 XLM = 2^53 + 1 stroops (not representable as a double)
+      const premium = new Prisma.Decimal("900719925.4740993");
+      expect(service.calculateProRatedRefund(premium, start, end, start)).toBe("900719925.4740993");
+      expect(service.calculateProRatedRefund(premium, start, end, mid)).toBe("450359962.7370496");
+    });
+
+    it("refunds the full premium when cancelled before start", () => {
+      expect(service.calculateProRatedRefund("12.3456789", start, end, new Date("2025-12-01T00:00:00Z"))).toBe("12.3456789");
+    });
+
+    it("refunds nothing once the coverage period has elapsed", () => {
+      expect(service.calculateProRatedRefund("12.3456789", start, end, new Date("2026-02-01T00:00:00Z"))).toBe("0.0000000");
+    });
+
+    it("refunds nothing for a zero-length or inverted period", () => {
+      expect(service.calculateProRatedRefund("10", end, start, mid)).toBe("0.0000000");
+    });
+
+    it("still accepts plain numbers", () => {
+      expect(service.calculateProRatedRefund(10, start, end, mid)).toBe("5.0000000");
     });
   });
 

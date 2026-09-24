@@ -11,6 +11,17 @@ import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
 
+const STROOPS_PER_XLM = 10_000_000n;
+
+/** Format an integer stroop amount as a 7-decimal XLM string (e.g. 15000000n → "1.5000000"). */
+function formatStroops(stroops: bigint): string {
+  const sign = stroops < 0n ? '-' : '';
+  const abs = stroops < 0n ? -stroops : stroops;
+  const whole = abs / STROOPS_PER_XLM;
+  const frac = (abs % STROOPS_PER_XLM).toString().padStart(7, '0');
+  return `${sign}${whole}.${frac}`;
+}
+
 export interface ProductSummary {
   id:           string;
   name:         string;
@@ -684,13 +695,31 @@ export class PolicyService {
    * verify it's correct. The computed amount is surfaced in the
    * cancellation response for manual/off-chain processing until a real
    * refund entrypoint exists.
+   *
+   * #488 — computed in integer stroops (1 XLM = 10^7) with BigInt, like
+   * calculatePremium, instead of `Math.floor(premium * fraction * 1e7)`,
+   * which loses precision once the intermediate product nears
+   * Number.MAX_SAFE_INTEGER. The premium is taken as a Decimal (or its
+   * string form) so it never passes through a float, and the result is
+   * returned as a 7-decimal string for the same reason.
    */
-  calculateProRatedRefund(premiumPaidXlm: number, startTime: Date, endTime: Date, now: Date = new Date()): number {
-    const totalMs = endTime.getTime() - startTime.getTime();
-    if (totalMs <= 0) return 0;
-    const remainingMs = Math.max(0, endTime.getTime() - now.getTime());
-    const fraction = Math.min(1, remainingMs / totalMs);
-    return Math.floor(premiumPaidXlm * fraction * 1e7) / 1e7;
+  calculateProRatedRefund(
+    premiumPaidXlm: Prisma.Decimal | string | number,
+    startTime: Date,
+    endTime: Date,
+    now: Date = new Date(),
+  ): string {
+    const totalMs = BigInt(endTime.getTime() - startTime.getTime());
+    if (totalMs <= 0n) return formatStroops(0n);
+    let remainingMs = BigInt(Math.max(0, endTime.getTime() - now.getTime()));
+    if (remainingMs > totalMs) remainingMs = totalMs;
+
+    const premiumStroops = BigInt(
+      new Prisma.Decimal(premiumPaidXlm).mul(STROOPS_PER_XLM.toString()).toFixed(0, Prisma.Decimal.ROUND_DOWN),
+    );
+    // BigInt division truncates, so the refund is floored to the stroop and
+    // can never exceed what was actually paid.
+    return formatStroops((premiumStroops * remainingMs) / totalMs);
   }
 
   /**
@@ -712,7 +741,7 @@ export class PolicyService {
     transition(existing.status, PolicyStatus.CANCELLED);
 
     const refundAmountXlm = this.calculateProRatedRefund(
-      existing.premiumPaid.toNumber(),
+      existing.premiumPaid,
       existing.startTime,
       existing.endTime,
     );
@@ -757,7 +786,7 @@ export class PolicyService {
       startTime:       Math.floor(updated!.startTime.getTime() / 1000),
       endTime:         Math.floor(updated!.endTime.getTime() / 1000),
       status:          updated!.status,
-      refundAmountXlm: refundAmountXlm.toFixed(7),
+      refundAmountXlm,
     };
   }
 
