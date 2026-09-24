@@ -73,6 +73,20 @@ export class DatabaseCheckDto {
   error?: string;
 }
 
+export class StellarNetworkCheckDto {
+  @ApiProperty({ description: 'Whether the Stellar network is operational and matches the configured network', enum: ['ok', 'error'] })
+  status: 'ok' | 'error';
+
+  @ApiProperty({ description: 'Health reported by the Stellar RPC node (e.g. "healthy")', required: false })
+  rpcHealth?: string;
+
+  @ApiProperty({ description: 'Current Stellar protocol version', required: false })
+  protocolVersion?: number;
+
+  @ApiProperty({ description: 'Whether the RPC network passphrase matches the configured STELLAR_NETWORK', required: false })
+  passphraseMatches?: boolean;
+}
+
 export class StellarCheckDto {
   @ApiProperty({ description: 'Stellar RPC/keeper connectivity status', enum: ['ok', 'error'] })
   status: 'ok' | 'error';
@@ -88,6 +102,9 @@ export class StellarCheckDto {
 
   @ApiProperty({ description: 'Latest ledger sequence number returned by Stellar RPC', required: false })
   rpcLedger?: number;
+
+  @ApiProperty({ description: 'Stellar network operational status (#474)', type: StellarNetworkCheckDto, required: false })
+  network?: StellarNetworkCheckDto;
 
   @ApiProperty({ description: 'Error message when status is "error"', required: false })
   error?: string;

@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
-import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto } from './dto/health-response.dto';
+import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, StellarNetworkCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto } from './dto/health-response.dto';
 import { WORKER_HEARTBEATS } from '../common/worker-heartbeat';
 
 // #191 — default floor below which the keeper account is considered too low
@@ -45,7 +45,7 @@ const AVIATIONSTACK_HEALTH_URL =
 
 @ApiTags('health')
 @Controller('health')
-@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto)
+@ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, StellarNetworkCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto)
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
 
@@ -81,6 +81,8 @@ export class HealthController {
     let stellarRpcStatus: 'ok' | 'error' = 'ok';
     let stellarRpcLatencyMs: number | undefined;
     let stellarRpcLedger: number | undefined;
+    // #474 — Stellar network operational status
+    let stellarNetwork: { status: 'ok' | 'error'; rpcHealth?: string; protocolVersion?: number; passphraseMatches?: boolean } | undefined;
     let queueStatus: 'ok' | 'error' = 'ok';
     let queueError: string | undefined;
 
@@ -153,6 +155,35 @@ export class HealthController {
       stellarStatus    = 'error';
       stellarError     = `Stellar RPC unreachable: ${err instanceof Error ? err.message : String(err)}`;
       this.logger.error(`Health check: ${stellarError}`);
+    }
+
+    // #474 — Stellar network status check. Reachability (above) doesn't
+    // tell us the network is actually operational: an RPC node can answer
+    // getLatestLedger while it has stopped ingesting ledgers (network halt,
+    // node fallen behind) or while pointed at the wrong network. Either way
+    // every contract call would fail, so both mark stellar as degraded.
+    try {
+      const net = await this.stellar.checkNetworkStatus(HEALTH_CHECK_RPC_TIMEOUT_MS);
+      stellarNetwork = {
+        status: net.healthy ? 'ok' : 'error',
+        rpcHealth: net.rpcHealth,
+        protocolVersion: net.protocolVersion,
+        passphraseMatches: net.passphraseMatches,
+      };
+      if (!net.healthy) {
+        stellarStatus = 'error';
+        const netMsg = !net.passphraseMatches
+          ? 'Stellar RPC is serving a different network than the configured STELLAR_NETWORK'
+          : `Stellar network not operational: RPC health is "${net.rpcHealth}"`;
+        stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
+        this.logger.error(`Health check: ${netMsg}`);
+      }
+    } catch (err) {
+      stellarNetwork = { status: 'error' };
+      stellarStatus = 'error';
+      const netMsg = `Stellar network status check failed: ${err instanceof Error ? err.message : String(err)}`;
+      stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
+      this.logger.error(`Health check: ${netMsg}`);
     }
 
     try {
@@ -455,6 +486,7 @@ export class HealthController {
         rpcStatus: stellarRpcStatus,
         ...(stellarRpcLatencyMs !== undefined ? { rpcLatencyMs: stellarRpcLatencyMs } : {}),
         ...(stellarRpcLedger !== undefined ? { rpcLedger: stellarRpcLedger } : {}),
+        ...(stellarNetwork !== undefined ? { network: stellarNetwork } : {}),
         ...(keeperBalanceXlm !== undefined ? { keeperBalanceXlm } : {}),
         ...(stellarError ? { error: stellarError } : {}),
       },

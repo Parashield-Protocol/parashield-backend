@@ -479,6 +479,39 @@ export class StellarService {
     };
   }
 
+  /**
+   * #474 — Verify the Stellar network itself is operational, not just that
+   * the RPC node answers. getHealth reports "healthy" only while the node is
+   * keeping up with the network (it errors out when ledger ingestion stalls,
+   * e.g. during a network halt or a node falling behind), and getNetwork
+   * confirms the node is serving the network we sign transactions for — a
+   * passphrase mismatch means every submission would be rejected.
+   *
+   * @param timeoutMs  Maximum time to wait in milliseconds (default 10s).
+   */
+  async checkNetworkStatus(timeoutMs?: number): Promise<{
+    healthy: boolean;
+    rpcHealth: string;
+    protocolVersion: number;
+    passphraseMatches: boolean;
+  }> {
+    const [health, network] = await Promise.all([
+      this.withTimeout(this.rpc.getHealth(), "getHealth", timeoutMs),
+      this.withTimeout(this.rpc.getNetwork(), "getNetwork", timeoutMs),
+    ]);
+    // The SDK types status as the literal "healthy", but nodes that have
+    // fallen behind can report otherwise (or reject getHealth outright,
+    // which surfaces as a thrown error to the caller).
+    const rpcHealth = String(health.status);
+    const passphraseMatches = network.passphrase === this.network;
+    return {
+      healthy:         rpcHealth === "healthy" && passphraseMatches,
+      rpcHealth,
+      protocolVersion: Number(network.protocolVersion),
+      passphraseMatches,
+    };
+  }
+
   /** Return the current network passphrase. */
   get networkPassphrase(): string {
     return this.network;

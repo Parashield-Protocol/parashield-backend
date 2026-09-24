@@ -8,6 +8,7 @@ describe('HealthController', () => {
     balance?: string;
     dbFails?: boolean;
     rpcFails?: boolean;
+    network?: { status?: string; passphrase?: string; fails?: boolean };
     minBalance?: string;
     poolActive?: number;
     connectionLimit?: string;
@@ -36,6 +37,18 @@ describe('HealthController', () => {
         ? jest.fn().mockRejectedValue(new Error('RPC unreachable'))
         : jest.fn().mockResolvedValue(overrides?.balance ?? '100.0000000'),
       checkRpcConnectivity: jest.fn().mockResolvedValue({ latencyMs: 10, ledger: 1 }),
+      checkNetworkStatus: overrides?.network?.fails
+        ? jest.fn().mockRejectedValue(new Error('getHealth timed out'))
+        : jest.fn().mockImplementation(async () => {
+            const rpcHealth = overrides?.network?.status ?? 'healthy';
+            const passphraseMatches = overrides?.network?.passphrase === undefined;
+            return {
+              healthy: rpcHealth === 'healthy' && passphraseMatches,
+              rpcHealth,
+              protocolVersion: 22,
+              passphraseMatches,
+            };
+          }),
     };
     const config = {
       get: jest.fn((key: string) => {
@@ -180,6 +193,67 @@ describe('HealthController', () => {
           checks: expect.objectContaining({
             database: expect.objectContaining({
               pool: expect.objectContaining({ max: 10, utilizationPercent: 90, exhausted: true }),
+            }),
+          }),
+        }),
+      });
+    });
+  });
+
+  // #474 — Stellar network status
+  describe('Stellar network status (#474)', () => {
+    it('reports network ok when the RPC is healthy and on the configured network', async () => {
+      const body = await build({ balance: '50' }).check();
+
+      expect(body.checks.stellar.network).toMatchObject({
+        status: 'ok',
+        rpcHealth: 'healthy',
+        passphraseMatches: true,
+      });
+    });
+
+    it('reports degraded when the RPC reports the network is not healthy', async () => {
+      const controller = build({ balance: '50', network: { status: 'unhealthy' } });
+
+      await expect(controller.check()).rejects.toMatchObject({
+        response: expect.objectContaining({
+          checks: expect.objectContaining({
+            stellar: expect.objectContaining({
+              status: 'error',
+              network: expect.objectContaining({ status: 'error', rpcHealth: 'unhealthy' }),
+              error: expect.stringContaining('not operational'),
+            }),
+          }),
+        }),
+      });
+    });
+
+    it('reports degraded when the RPC serves a different network than configured', async () => {
+      const controller = build({ balance: '50', network: { passphrase: 'other' } });
+
+      await expect(controller.check()).rejects.toMatchObject({
+        response: expect.objectContaining({
+          checks: expect.objectContaining({
+            stellar: expect.objectContaining({
+              status: 'error',
+              network: expect.objectContaining({ passphraseMatches: false }),
+              error: expect.stringContaining('different network'),
+            }),
+          }),
+        }),
+      });
+    });
+
+    it('reports degraded when the network status probe fails', async () => {
+      const controller = build({ balance: '50', network: { fails: true } });
+
+      await expect(controller.check()).rejects.toMatchObject({
+        response: expect.objectContaining({
+          checks: expect.objectContaining({
+            stellar: expect.objectContaining({
+              status: 'error',
+              network: { status: 'error' },
+              error: expect.stringContaining('network status check failed'),
             }),
           }),
         }),
