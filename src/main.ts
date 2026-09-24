@@ -47,7 +47,15 @@ function parseCsvEnv(value: string | undefined): string[] | undefined {
 }
 
 async function bootstrap() {
-  await loadVaultSecrets();
+  // #496 — Vault runs before Nest (and its logger) exist. Fail fast with the
+  // loader's explanation instead of an unhandled rejection, and never start
+  // with secrets missing.
+  try {
+    await loadVaultSecrets();
+  } catch (err) {
+    new Logger('Bootstrap').error(`Fatal Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
   await initializeOpenTelemetry();
   const app = await NestFactory.create<NestExpressApplication>(AppModule);
   // #352 — structured JSON logs instead of unstructured colored text, so a

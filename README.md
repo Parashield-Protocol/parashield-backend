@@ -233,6 +233,15 @@ If you want to source secrets from HashiCorp Vault instead of environment variab
 
 When all three are present, the server fetches the KV secret before Nest bootstraps and merges the returned key/value pairs into `process.env`. The Vault payload should use the standard KV v2 shape (`data.data`).
 
+If none of the three are set, Vault is skipped. Once any of them is set, the server **fails fast** at startup (exit code 1, with the reason logged) instead of starting with missing secrets when:
+
+- only some of `VAULT_ADDR` / `VAULT_TOKEN` / `VAULT_KV_PATH` are set (the missing ones are named)
+- Vault is unreachable or does not answer within `VAULT_TIMEOUT_MS` (default `5000`)
+- Vault returns a non-2xx status (with hints for 403/404) or a payload without `data.data`
+- any key listed in the optional comma-separated `VAULT_REQUIRED_KEYS` is still unset after loading (the missing keys are named)
+
+On success the loaded key names (never values) are logged.
+
 ### OpenTelemetry tracing
 
 Tracing is enabled when the OpenTelemetry packages are installed and the following variables are set:
