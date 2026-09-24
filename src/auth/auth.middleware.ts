@@ -47,6 +47,19 @@ export class AuthMiddleware implements NestMiddleware {
       return;
     }
 
+    // #562 — Validate Stellar address format before hitting the database.
+    // A malformed address will never match a challenge, so the DB lookup is
+    // pure waste. Stellar public keys are base32-encoded 56-character strings
+    // starting with G (public) or S (seed).
+    if (!/^[GS][A-Z2-7]{55}$/.test(address)) {
+      this.logger.warn(`Header-auth rejected: invalid wallet address format "${address}"`);
+      res.status(401).json({
+        statusCode: 401,
+        message:    'Invalid wallet address format. Must be a 56-character Stellar address starting with G or S.',
+      });
+      return;
+    }
+
     // Verify the message matches a stored, unexpired server-issued challenge
     let challenge: { nonce: string; expiresAt: Date } | null = null;
     try {

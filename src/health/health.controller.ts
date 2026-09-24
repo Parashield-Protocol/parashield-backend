@@ -64,6 +64,18 @@ export class HealthController {
     aviationStackConfigured: boolean;
   } | null = null;
 
+  // #559 — Cache Redis memory info to avoid re-parsing INFO output on every
+  // health check. Redis memory stats change slowly; 30s is plenty for ops
+  // monitoring while eliminating redundant GC pressure from string splitting.
+  private redisMemoryCache: {
+    timestamp: number;
+    used: string;
+    peak: string;
+    maxmemory: string;
+    usedBytes: number;
+    maxBytes: number;
+  } | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
@@ -357,20 +369,26 @@ export class HealthController {
       };
     }
 
-    // #466 — Redis memory usage monitoring
-    // Track Redis memory consumption to detect memory exhaustion before it
-    // causes failures. Redis INFO memory command returns current memory usage,
-    // peak usage, and configured max memory. Alert on high utilization.
+    // #466/#559 — Redis memory usage monitoring, cached for 30s to avoid
+    // re-parsing INFO output on every health check.
     let redisMemory: { used: string; peak: string; maxmemory: string; usagePercent?: number } | undefined;
     try {
-      const memInfo = await this.redis.info('memory');
-      const lines = memInfo.split('\r\n');
-      const used = lines.find(l => l.startsWith('used_memory_human:'))?.split(':')[1] || 'unknown';
-      const peak = lines.find(l => l.startsWith('used_memory_peak_human:'))?.split(':')[1] || 'unknown';
-      const maxmemory = lines.find(l => l.startsWith('maxmemory_human:'))?.split(':')[1] || 'unknown';
-      const usedBytes = parseInt(lines.find(l => l.startsWith('used_memory:'))?.split(':')[1] || '0');
-      const maxBytes = parseInt(lines.find(l => l.startsWith('maxmemory:'))?.split(':')[1] || '0');
-      
+      const now = Date.now();
+      let used: string, peak: string, maxmemory: string, usedBytes: number, maxBytes: number;
+
+      if (this.redisMemoryCache && (now - this.redisMemoryCache.timestamp) < EXTERNAL_API_CACHE_TTL_MS) {
+        ({ used, peak, maxmemory, usedBytes, maxBytes } = this.redisMemoryCache);
+      } else {
+        const memInfo = await this.redis.info('memory');
+        const lines = memInfo.split('\r\n');
+        used = lines.find(l => l.startsWith('used_memory_human:'))?.split(':')[1] || 'unknown';
+        peak = lines.find(l => l.startsWith('used_memory_peak_human:'))?.split(':')[1] || 'unknown';
+        maxmemory = lines.find(l => l.startsWith('maxmemory_human:'))?.split(':')[1] || 'unknown';
+        usedBytes = parseInt(lines.find(l => l.startsWith('used_memory:'))?.split(':')[1] || '0');
+        maxBytes = parseInt(lines.find(l => l.startsWith('maxmemory:'))?.split(':')[1] || '0');
+        this.redisMemoryCache = { timestamp: now, used, peak, maxmemory, usedBytes, maxBytes };
+      }
+
       redisMemory = { used, peak, maxmemory };
       if (maxBytes > 0) {
         redisMemory.usagePercent = Math.round((usedBytes / maxBytes) * 100);
@@ -562,6 +580,7 @@ export class HealthController {
       status:    healthy ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       service:   'parashield-api',
+      version:   this.config.get<string>('npm_package_version') ?? process.env.npm_package_version ?? 'unknown',
       responseTimeMs: Date.now() - startTime,
       checks: checks as any,
     };

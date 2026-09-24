@@ -192,6 +192,9 @@ export class HealthResponseDto {
   @ApiProperty({ description: 'Service identifier', example: 'parashield-api' })
   service: string;
 
+  @ApiProperty({ description: 'Application version from package.json', example: '0.1.0' })
+  version: string;
+
   @ApiProperty({ description: 'Total health check duration in milliseconds', example: 125 })
   responseTimeMs: number;
 

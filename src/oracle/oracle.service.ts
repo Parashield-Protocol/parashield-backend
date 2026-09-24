@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Inject,
   Logger,
   ServiceUnavailableException,
 } from "@nestjs/common";
@@ -21,8 +22,11 @@ enum CircuitState {
  * subsequent calls fail fast without hitting the network.  After
  * `resetTimeoutMs` the circuit moves to HALF_OPEN, allowing one probe
  * request through.  A success closes the circuit; a failure reopens it.
+ *
+ * Exported so oracle.module.ts can create shared singleton instances via
+ * NestJS providers (#563), preserving state across OracleService re-instantiations.
  */
-class CircuitBreaker {
+export class CircuitBreaker {
   private state: CircuitState = CircuitState.CLOSED;
   private failureCount = 0;
   private lastFailureTime = 0;
@@ -157,13 +161,18 @@ export const SANITY_BOUNDS = {
 @Injectable()
 export class OracleService {
   private readonly logger = new Logger(OracleService.name);
-  private readonly openMeteoBreaker = new CircuitBreaker("open-meteo", 5, 30_000);
-  private readonly aviationStackBreaker = new CircuitBreaker("aviationstack", 3, 60_000);
+  private readonly openMeteoBreaker: CircuitBreaker;
+  private readonly aviationStackBreaker: CircuitBreaker;
 
   constructor(
     private readonly config: ConfigService,
     private readonly prisma: PrismaService,
-  ) {}
+    @Inject('CIRCUIT_BREAKER_OPEN_METEO') openMeteoBreaker: CircuitBreaker,
+    @Inject('CIRCUIT_BREAKER_AVIATIONSTACK') aviationStackBreaker: CircuitBreaker,
+  ) {
+    this.openMeteoBreaker = openMeteoBreaker;
+    this.aviationStackBreaker = aviationStackBreaker;
+  }
 
   /**
    * Truncate a Unix-second timestamp to the start of its idempotency bucket (#172).
