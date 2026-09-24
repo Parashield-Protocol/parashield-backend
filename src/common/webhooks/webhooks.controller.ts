@@ -42,8 +42,8 @@ export class WebhooksController {
   @ApiBearerAuth()
   @ApiResponse({ status: 201, description: 'Webhook registered successfully', schema: { $ref: getSchemaPath(WebhookRegistrationResponseDto) } })
   @ApiErrorResponse(400, 'Request body failed validation (missing url, unsupported event type, etc.).', undefined, 'url must be a URL address; events must contain only supported event types')
-  register(@Body() dto: RegisterWebhookDto) {
-    const result = this.webhooks.registerWebhook({
+  async register(@Body() dto: RegisterWebhookDto) {
+    const result = await this.webhooks.registerWebhook({
       url: dto.url,
       events: dto.events,
       secret: dto.secret,
@@ -69,7 +69,9 @@ export class WebhooksController {
       ],
     },
   })
-  list() {
-    return { success: true, data: this.webhooks.getRegistrations() };
+  async list() {
+    // Never echo the HMAC signing secret back to API callers.
+    const registrations = await this.webhooks.getRegistrations();
+    return { success: true, data: registrations.map(({ secret: _secret, ...rest }) => rest) };
   }
 }

@@ -140,3 +140,17 @@ model AuditLog {
   @@index([entityType, entityId])
   @@index([occurredAt])
 }
+
+// #482 — webhook registrations were held in an in-memory Map and silently
+// lost on every restart; persisted here so they survive restarts and are
+// shared across instances.
+model WebhookRegistration {
+  id        String   @id @default(uuid())
+  url       String
+  secret    String?
+  events    String[]
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@index([isActive])
+}

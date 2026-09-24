@@ -2,11 +2,13 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 
+type WebhookEvent = 'policy.status.change' | 'claim.status.change';
+
 export interface WebhookRegistration {
   id: string;
   url: string;
   secret?: string;
-  events: ('policy.status.change' | 'claim.status.change')[];
+  events: WebhookEvent[];
   createdAt: Date;
   isActive: boolean;
 }
@@ -21,47 +23,64 @@ const RETRY_BASE_DELAY_MS = 1_000;
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
-  private readonly registrations = new Map<string, WebhookRegistration>();
 
   constructor(private readonly prisma: PrismaService) {}
 
-  registerWebhook(dto: { url: string; events: ('policy.status.change' | 'claim.status.change')[]; secret?: string }) {
-    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-    const registration: WebhookRegistration = {
-      id,
-      url: dto.url,
-      secret: dto.secret,
-      events: dto.events,
-      createdAt: new Date(),
-      isActive: true,
-    };
-
-    this.registrations.set(id, registration);
-    this.logger.log(`Webhook registered: ${id} → ${dto.url} for events: ${dto.events.join(', ')}`);
-    return { id, status: 'registered' };
+  // #482 — registrations are persisted via Prisma (previously an in-memory
+  // Map) so they survive restarts and are visible to every instance.
+  async registerWebhook(dto: { url: string; events: WebhookEvent[]; secret?: string }) {
+    const registration = await this.prisma.webhookRegistration.create({
+      data: { url: dto.url, secret: dto.secret, events: dto.events },
+    });
+    this.logger.log(`Webhook registered: ${registration.id} → ${dto.url} for events: ${dto.events.join(', ')}`);
+    return { id: registration.id, status: 'registered' };
   }
 
-  unregisterWebhook(id: string) {
-    const registration = this.registrations.get(id);
-    if (registration) {
-      registration.isActive = false;
-      this.registrations.delete(id);
-      this.logger.log(`Webhook unregistered: ${id}`);
-      return { id, status: 'unregistered' };
+  async unregisterWebhook(id: string) {
+    const { count } = await this.prisma.webhookRegistration.updateMany({
+      where: { id, isActive: true },
+      data: { isActive: false },
+    });
+    if (count === 0) {
+      throw new BadRequestException(`Webhook ${id} not found`);
     }
-    throw new BadRequestException(`Webhook ${id} not found`);
+    this.logger.log(`Webhook unregistered: ${id}`);
+    return { id, status: 'unregistered' };
   }
 
-  getRegistrations(): WebhookRegistration[] {
-    return Array.from(this.registrations.values()).filter((r) => r.isActive);
+  async getRegistrations(): Promise<WebhookRegistration[]> {
+    const rows = await this.prisma.webhookRegistration.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    return rows.map((r) => ({
+      id: r.id,
+      url: r.url,
+      secret: r.secret ?? undefined,
+      events: r.events as WebhookEvent[],
+      createdAt: r.createdAt,
+      isActive: r.isActive,
+    }));
+  }
+
+  /**
+   * Callers (PolicyService, ClaimsService) fire notifications without
+   * awaiting them, so a DB failure loading registrations must be logged
+   * here rather than surfacing as an unhandled rejection.
+   */
+  private async getRegistrationsForEvent(event: WebhookEvent): Promise<WebhookRegistration[]> {
+    try {
+      return (await this.getRegistrations()).filter((r) => r.events.includes(event));
+    } catch (err) {
+      this.logger.error(`Failed to load webhook registrations for ${event}: ${(err as Error).message}`);
+      return [];
+    }
   }
 
   async notifyPolicyStatusChange(event: { policyId: string; fromStatus: string; toStatus: string; timestamp: number }) {
-    const registrations = this.getRegistrations();
+    const registrations = await this.getRegistrationsForEvent('policy.status.change');
 
     for (const registration of registrations) {
-      if (!registration.events.includes('policy.status.change')) continue;
-
       const payload = {
         policyId: event.policyId,
         fromStatus: event.fromStatus,
@@ -80,11 +99,9 @@ export class WebhooksService {
   }
 
   async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }) {
-    const registrations = this.getRegistrations();
+    const registrations = await this.getRegistrationsForEvent('claim.status.change');
 
     for (const registration of registrations) {
-      if (!registration.events.includes('claim.status.change')) continue;
-
       const payload = {
         claimId: event.claimId,
         fromStatus: event.fromStatus,
