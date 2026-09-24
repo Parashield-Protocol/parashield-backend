@@ -380,6 +380,11 @@ export class OracleController {
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
       throw new BadRequestException('date must be in YYYY-MM-DD format');
     }
+    const maxFutureDate = new Date();
+    maxFutureDate.setDate(maxFutureDate.getDate() + 1);
+    if (new Date(date) > maxFutureDate) {
+      throw new BadRequestException('date must not be more than 1 day in the future');
+    }
 
     const reading = await this.oracle.fetchFlightDelay(flight, date);
     return {

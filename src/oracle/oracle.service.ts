@@ -521,7 +521,21 @@ export class OracleService {
       }),
     );
     const key = `flight:${flightNumber}:${date}`;
-    const flight = res.data.data?.[0];
+    if (!res.data || !Array.isArray(res.data.data)) {
+      this.logger.warn(
+        `AviationStack returned unexpected response structure for ${key} — emitting NO_DATA with confidence 0`,
+      );
+      return {
+        dataType: "flight",
+        key,
+        value: "0",
+        confidence: 0,
+        timestamp: Math.floor(Date.now() / 1000),
+        source: "aviationstack",
+        status: "NO_DATA",
+      };
+    }
+    const flight = res.data.data[0];
     const delay = flight?.departure?.delay;
 
     // A missing flight or a null delay means "unknown", not "on time" (#171).

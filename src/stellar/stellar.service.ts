@@ -1,4 +1,4 @@
-import { Injectable, Logger, HttpException, HttpStatus } from "@nestjs/common";
+import { Injectable, Logger, HttpException, HttpStatus, BadRequestException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Networks,
@@ -124,6 +124,11 @@ export class StellarService {
     args: xdr.ScVal[],
     signerKeypair?: Keypair,
   ): Promise<string> {
+    if (!/^C[A-BA-HJ-NP-Z0-9]{55}$/.test(contractId)) {
+      throw new BadRequestException(
+        `Invalid Stellar contract address: ${contractId}`,
+      );
+    }
     const signer = signerKeypair ?? this.keeperKeypair;
     const contract = new Contract(contractId);
     const MAX_ATTEMPTS = 3;
