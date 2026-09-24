@@ -1,6 +1,6 @@
 import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException, Logger, UnauthorizedException, HttpException, HttpStatus, Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { timingSafeEqual } from 'crypto';
+import { createHash, timingSafeEqual } from 'crypto';
 import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
 import Redis from 'ioredis';
@@ -170,15 +170,15 @@ export class OperatorAuthGuard implements CanActivate {
 
   // #181 — a static, long-lived secret checked on every request is a prime
   // target for a byte-by-byte timing attack under plain string `===`.
-  // crypto.timingSafeEqual requires equal-length buffers (it throws
-  // otherwise), so the length check must happen first — but done as a
-  // simple early return, not a thrown exception, per the fix suggested in
-  // the issue.
+  // #490 — crypto.timingSafeEqual requires equal-length buffers, and the old
+  // early `length !==` return made a mismatched length fail measurably faster,
+  // leaking the configured key's length. Hashing both sides to fixed-length
+  // SHA-256 digests first means every comparison does the same work
+  // regardless of input length or content.
   private constantTimeEqual(a: string, b: string): boolean {
-    const bufA = Buffer.from(a);
-    const bufB = Buffer.from(b);
-    if (bufA.length !== bufB.length) return false;
-    return timingSafeEqual(bufA, bufB);
+    const digestA = createHash('sha256').update(a, 'utf8').digest();
+    const digestB = createHash('sha256').update(b, 'utf8').digest();
+    return timingSafeEqual(digestA, digestB);
   }
 
   private getOptionalBearerToken(request: AuthenticatedRequest): string | null {
