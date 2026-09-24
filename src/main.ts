@@ -142,7 +142,14 @@ async function bootstrap() {
 
   const corsOrigin = configService.get<string>('CORS_ORIGIN');
   if (!corsOrigin) {
-    logger.error('Fatal Error: CORS_ORIGIN environment variable is required');
+    // #495 — tell the operator what a valid value looks like, not just that it's missing.
+    logger.error(
+      'Fatal Error: CORS_ORIGIN environment variable is required. ' +
+      'Set it to the frontend origin(s) allowed to call the API, e.g. ' +
+      'CORS_ORIGIN=http://localhost:3000 for local development, or a comma-separated ' +
+      'list such as CORS_ORIGIN=https://app.example.com,https://staging.example.com. ' +
+      'Wildcards (*) are not accepted. See .env.example and the README "CORS configuration" section.',
+    );
     process.exit(1);
   }
 
