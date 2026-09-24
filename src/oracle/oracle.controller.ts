@@ -231,9 +231,11 @@ export class OracleController {
       dto.year,
       dto.month,
     );
+    // #517 — omit internal fields (source) from the operator response.
+    const { source: _source, ...publicFields } = reading as typeof reading & { source?: unknown };
     return {
       success: true,
-      data: { ...reading, value: reading.value.toString() },
+      data: { ...publicFields, value: reading.value.toString() },
     };
   }
 

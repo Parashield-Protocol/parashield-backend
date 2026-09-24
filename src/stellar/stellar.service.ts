@@ -450,11 +450,26 @@ export class StellarService {
    *                   health probe long enough to trigger a pod restart.
    */
   async getAccountBalance(publicKey: string, timeoutMs?: number): Promise<string> {
-    const account = await this.withTimeout(
-      this.horizon.loadAccount(publicKey),
-      "loadAccount",
-      timeoutMs,
-    );
+    let account: Awaited<ReturnType<typeof this.horizon.loadAccount>>;
+    try {
+      account = await this.withTimeout(
+        this.horizon.loadAccount(publicKey),
+        "loadAccount",
+        timeoutMs,
+      );
+    } catch (err) {
+      // #515 — horizon.loadAccount throws when the account does not exist on
+      // the network (404). Return '0' rather than propagating the error so
+      // callers (e.g. health checks) get a safe default instead of a crash.
+      const status =
+        (err as { response?: { status?: number }; status?: number })?.response
+          ?.status ?? (err as { status?: number })?.status;
+      if (status === 404) {
+        this.logger.warn(`Account not found on network: ${publicKey}`);
+        return "0";
+      }
+      throw err;
+    }
     const nativeBalance = account.balances.find(
       (b): b is Horizon.HorizonApi.BalanceLineNative =>
         b.asset_type === "native",
