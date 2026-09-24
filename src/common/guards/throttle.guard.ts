@@ -103,11 +103,11 @@ export class ThrottleGuard implements CanActivate, OnModuleDestroy {
     response.setHeader('X-RateLimit-Reset', resetAt);
   }
 
+  // #494 — never read X-Forwarded-For directly: it is client-controlled, so
+  // any caller could rotate it to get a fresh window on every request.
+  // req.ip already resolves the header through Express's `trust proxy`
+  // setting (see TRUST_PROXY in main.ts) and falls back to the TCP peer.
   private extractIP(request: Request): string {
-    const forwarded = request.headers['x-forwarded-for'];
-    if (typeof forwarded === 'string') {
-      return forwarded.split(',')[0].trim();
-    }
     return request.ip ?? request.socket.remoteAddress ?? 'unknown';
   }
 }

@@ -213,6 +213,8 @@ Check each entry in `error.message` for the field name and violated constraint.
 ### Rate limiting (429)
 
 The global throttle allows **60 requests per minute per IP**. When exceeded the response includes a `Retry-After` header with the number of seconds until the window resets. Clients should respect this header rather than retrying immediately.
+
+The client IP is taken from Express's `req.ip`. `X-Forwarded-For` is **only** honoured for proxies listed in `TRUST_PROXY` — by default none are trusted, so a client cannot bypass the limit by spoofing that header. When running behind a load balancer or reverse proxy, set `TRUST_PROXY` to the number of trusted hops (e.g. `1`) or a comma-separated list of proxy IPs/CIDRs (e.g. `loopback,10.0.0.0/8`), otherwise every request will appear to come from the proxy's address.
 Successful responses from guarded routes also include:
 
 - `X-RateLimit-Limit`

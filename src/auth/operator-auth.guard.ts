@@ -111,10 +111,11 @@ export class OperatorAuthGuard implements CanActivate {
     await this.redis.del(key);
   }
 
+  // #494 — use req.ip (resolved through Express's `trust proxy` setting)
+  // rather than the raw X-Forwarded-For header, which a client could rotate
+  // to reset its failed-attempt lockout counter.
   private getClientIp(request: AuthenticatedRequest): string {
-    const forwarded = request.headers['x-forwarded-for'];
-    const ip = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0];
-    return ip?.trim() ?? request.ip ?? 'unknown';
+    return request.ip ?? request.socket?.remoteAddress ?? 'unknown';
   }
 
   private hasValidApiKey(request: AuthenticatedRequest): boolean {

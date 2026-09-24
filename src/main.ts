@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
@@ -16,6 +17,7 @@ import { applyRateLimitHeaders } from './common/swagger/rate-limit-headers';
 import { REALTIME_DOCS } from './common/swagger/realtime-docs';
 import { ErrorResponseDto } from './common/swagger/error-response.dto';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
+import { parseTrustProxy } from './common/network/trust-proxy';
 import helmet from 'helmet';
 import compression from 'compression';
 import { ConfigService } from '@nestjs/config';
@@ -47,7 +49,7 @@ function parseCsvEnv(value: string | undefined): string[] | undefined {
 async function bootstrap() {
   await loadVaultSecrets();
   await initializeOpenTelemetry();
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
   // #352 — structured JSON logs instead of unstructured colored text, so a
   // log aggregator (CloudWatch/Datadog/Loki/etc.) can actually parse them.
   app.useLogger(new JsonLogger());
@@ -59,6 +61,11 @@ async function bootstrap() {
     logger.error('Fatal Error: JWT_SECRET environment variable is required');
     process.exit(1);
   }
+
+  // #494 — only honour X-Forwarded-For from explicitly trusted proxies, so
+  // req.ip (used as the rate-limit and auth-lockout key) cannot be spoofed
+  // by a client-supplied header. Defaults to trusting no proxies.
+  app.set('trust proxy', parseTrustProxy(configService.get<string>('TRUST_PROXY')));
 
   // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
   app.use(helmet());
@@ -186,7 +193,7 @@ async function bootstrap() {
       '|-----------|-------|\n' +
       '| Window    | 60 seconds (default) |\n' +
       '| Limit     | 60 requests per window (default) |\n' +
-      '| Scope     | Per IP address (uses `X-Forwarded-For` when behind a proxy) |\n\n' +
+      '| Scope     | Per IP address (`X-Forwarded-For` is honoured only from proxies trusted via `TRUST_PROXY`) |\n\n' +
       '| Endpoint | Window | Limit |\n' +
       '|----------|--------|-------|\n' +
       '| `POST /auth/challenge`, `POST /auth/login` | 60 seconds | 10 requests |\n' +
