@@ -79,7 +79,15 @@ export class AuthMiddleware implements NestMiddleware {
     try {
       const messageBuffer = Buffer.from(message, 'utf8');
       const nonceBuffer = Buffer.from(challenge.nonce, 'utf8');
-      if (messageBuffer.length !== nonceBuffer.length || !timingSafeEqual(messageBuffer, nonceBuffer)) {
+      // Pad the shorter buffer so timingSafeEqual always compares equal-length
+      // buffers — avoids leaking the expected nonce length via a timing
+      // side-channel on the length check (see #551).
+      const maxLen = Math.max(messageBuffer.length, nonceBuffer.length);
+      const paddedMessage = Buffer.alloc(maxLen, 0);
+      const paddedNonce   = Buffer.alloc(maxLen, 0);
+      messageBuffer.copy(paddedMessage);
+      nonceBuffer.copy(paddedNonce);
+      if (!timingSafeEqual(paddedMessage, paddedNonce)) {
         this.logger.warn(`Header-auth rejected: message does not match nonce for ${address}`);
         res.status(401).json({ statusCode: 401, message: 'Invalid challenge message' });
         return;

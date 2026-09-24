@@ -1,5 +1,6 @@
 import { Controller, Get, Inject, Logger, HttpException, HttpStatus } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiExtraModels } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { PrismaService } from '../prisma/prisma.service';
@@ -43,11 +44,25 @@ const OPEN_METEO_HEALTH_URL =
 const AVIATIONSTACK_HEALTH_URL =
   'https://api.aviationstack.com/v1/flights?flight_iata=AA1&access_key=';
 
+// #554 — Cache external API health check results for 30 seconds so load
+// balancers polling every 5-10s don't trigger redundant outbound HTTP calls.
+const EXTERNAL_API_CACHE_TTL_MS = 30_000;
+
 @ApiTags('health')
 @Controller('health')
 @ApiExtraModels(HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, StellarNetworkCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto)
 export class HealthController {
   private readonly logger = new Logger(HealthController.name);
+
+  // Simple in-memory cache for external API probe results.
+  private externalApiCache: {
+    timestamp: number;
+    openMeteoStatus: 'ok' | 'error';
+    openMeteoError?: string;
+    aviationStackStatus: 'ok' | 'error';
+    aviationStackError?: string;
+    aviationStackConfigured: boolean;
+  } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -67,6 +82,7 @@ export class HealthController {
    *        Redis, a stale background worker heartbeat, Open-Meteo, or AviationStack)
    */
   @Get()
+  @Throttle({ default: { limit: 60, ttl: 60000 } })
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
@@ -270,54 +286,74 @@ export class HealthController {
       this.logger.warn(`Failed to fetch worker heartbeats: ${err instanceof Error ? err.message : String(err)}`);
     }
 
-    // #426 — Open-Meteo reachability check.
-    // Open-Meteo is a free API with no authentication requirement. A minimal
-    // forecast request (1-day window at lat/lng 0,0) confirms HTTP reachability
-    // without consuming any quota. Any non-2xx response or network error is
-    // flagged as degraded — oracle rainfall and temperature feeds will fail.
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+    // #554 — External API checks are cached for 30s so load balancers polling
+    // every 5-10s don't trigger redundant outbound HTTP calls.
+    const now = Date.now();
+    if (this.externalApiCache && (now - this.externalApiCache.timestamp) < EXTERNAL_API_CACHE_TTL_MS) {
+      openMeteoStatus = this.externalApiCache.openMeteoStatus;
+      openMeteoError = this.externalApiCache.openMeteoError;
+      aviationStackStatus = this.externalApiCache.aviationStackStatus;
+      aviationStackError = this.externalApiCache.aviationStackError;
+      aviationStackConfigured = this.externalApiCache.aviationStackConfigured;
+    } else {
+      // #426 — Open-Meteo reachability check.
+      // Open-Meteo is a free API with no authentication requirement. A minimal
+      // forecast request (1-day window at lat/lng 0,0) confirms HTTP reachability
+      // without consuming any quota. Any non-2xx response or network error is
+      // flagged as degraded — oracle rainfall and temperature feeds will fail.
       try {
-        const res = await fetch(OPEN_METEO_HEALTH_URL, { signal: controller.signal });
-        if (!res.ok) {
-          openMeteoStatus = 'error';
-          openMeteoError  = `Open-Meteo responded with HTTP ${res.status}`;
-          this.logger.error(`Health check: ${openMeteoError}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+        try {
+          const res = await fetch(OPEN_METEO_HEALTH_URL, { signal: controller.signal });
+          if (!res.ok) {
+            openMeteoStatus = 'error';
+            openMeteoError  = `Open-Meteo responded with HTTP ${res.status}`;
+            this.logger.error(`Health check: ${openMeteoError}`);
+          }
+        } finally {
+          clearTimeout(timeout);
         }
-      } finally {
-        clearTimeout(timeout);
+      } catch (err) {
+        openMeteoStatus = 'error';
+        openMeteoError  = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
       }
-    } catch (err) {
-      openMeteoStatus = 'error';
-      openMeteoError  = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
-    }
 
-    // AviationStack reachability check.
-    // Key-gated API: if no key is configured we still probe the endpoint
-    // (with an empty access_key) so a 401/403 response confirms the API
-    // itself is reachable, distinct from key misconfiguration which is
-    // surfaced separately via the `configured` flag. Any network error or
-    // 5xx/timeout is flagged as degraded — flight delay oracle reads will fail.
-    aviationStackConfigured = !!this.config.get<string>('AVIATIONSTACK_API_KEY');
-    try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+      // AviationStack reachability check.
+      // Key-gated API: if no key is configured we still probe the endpoint
+      // (with an empty access_key) so a 401/403 response confirms the API
+      // itself is reachable, distinct from key misconfiguration which is
+      // surfaced separately via the `configured` flag. Any network error or
+      // 5xx/timeout is flagged as degraded — flight delay oracle reads will fail.
+      aviationStackConfigured = !!this.config.get<string>('AVIATIONSTACK_API_KEY');
       try {
-        const res = await fetch(AVIATIONSTACK_HEALTH_URL, { signal: controller.signal });
-        if (res.status >= 500) {
-          aviationStackStatus = 'error';
-          aviationStackError  = `AviationStack responded with HTTP ${res.status}`;
-          this.logger.error(`Health check: ${aviationStackError}`);
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+        try {
+          const res = await fetch(AVIATIONSTACK_HEALTH_URL, { signal: controller.signal });
+          if (res.status >= 500) {
+            aviationStackStatus = 'error';
+            aviationStackError  = `AviationStack responded with HTTP ${res.status}`;
+            this.logger.error(`Health check: ${aviationStackError}`);
+          }
+        } finally {
+          clearTimeout(timeout);
         }
-      } finally {
-        clearTimeout(timeout);
+      } catch (err) {
+        aviationStackStatus = 'error';
+        aviationStackError  = err instanceof Error ? err.message : String(err);
+        this.logger.error(`Health check AviationStack failed: ${aviationStackError}`);
       }
-    } catch (err) {
-      aviationStackStatus = 'error';
-      aviationStackError  = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Health check AviationStack failed: ${aviationStackError}`);
+
+      this.externalApiCache = {
+        timestamp: now,
+        openMeteoStatus,
+        openMeteoError,
+        aviationStackStatus,
+        aviationStackError,
+        aviationStackConfigured,
+      };
     }
 
     // #466 — Redis memory usage monitoring

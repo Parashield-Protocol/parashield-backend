@@ -1,4 +1,4 @@
-import { Controller, Post, Body, UnauthorizedException, Logger, HttpCode, HttpStatus, Get, Query } from '@nestjs/common';
+import { Controller, Post, Body, UnauthorizedException, BadRequestException, Logger, HttpCode, HttpStatus, Get, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../common/swagger/api-error-responses';
 import { Throttle } from '@nestjs/throttler';
@@ -47,7 +47,7 @@ export class AuthController {
   @ApiErrorResponse(429, 'Rate limit exceeded — auth endpoints allow 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async getChallenge(@Query('wallet') wallet: string) {
     if (!wallet || !/^G[A-Z2-7]{55}$/.test(wallet)) {
-      throw new UnauthorizedException('Invalid or missing Stellar wallet address');
+      throw new BadRequestException('Invalid or missing Stellar wallet address');
     }
 
     // Generate a secure, cryptographically random nonce
