@@ -687,6 +687,30 @@ describe('ClaimsService', () => {
       expect(result).toBe('Paid');
       expect(mockPolicyService.getProductById).not.toHaveBeenCalled();
     });
+
+    it('#492 — treats a supplied productsMap as authoritative and does not fall back to the DB on a miss', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-map-miss', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(40_000_000),
+        confidence: 90,
+      });
+
+      // Product was deactivated, so it is absent from the active-products map.
+      const result = await service.autoProcess(POLICY_ID, new Map());
+
+      expect(result).toBe('Rejected');
+      expect(mockPolicyService.getProductById).not.toHaveBeenCalled();
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'claim-map-miss' },
+          data:  expect.objectContaining({ status: 'FAILED' }),
+        }),
+      );
+    });
   });
 
   // #486 — policies stranded in PROCESSING must be recovered by the worker.

@@ -81,6 +81,27 @@ describe('ClaimsWorker', () => {
     expect(mockPrisma.policy.update).not.toHaveBeenCalled();
   });
 
+  it('passes the same pre-fetched productsMap to every policy across batches (#492)', async () => {
+    // Skip the inter-batch jitter sleep.
+    const timeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(((cb: () => void) => {
+      cb();
+      return 0 as unknown as NodeJS.Timeout;
+    }) as typeof setTimeout);
+    const policies = Array.from({ length: 25 }, (_, i) => policy(`p${i}`));
+    mockPrisma.policy.findMany.mockResolvedValue(policies);
+    mockClaims.autoProcess.mockResolvedValue('Paid');
+    mockPolicyService.getActiveProducts.mockResolvedValue({ data: [{ id: 'prod1' }], total: 1, page: 1, limit: 100 });
+
+    await worker.processActivePolicies();
+    timeoutSpy.mockRestore();
+
+    expect(mockPolicyService.getActiveProducts).toHaveBeenCalledTimes(1);
+    expect(mockClaims.autoProcess).toHaveBeenCalledTimes(25);
+    const maps = new Set(mockClaims.autoProcess.mock.calls.map((call) => call[1]));
+    expect(maps.size).toBe(1);
+    expect([...maps][0]).toBeInstanceOf(Map);
+  });
+
   it('pages through the whole active product catalogue for productsMap', async () => {
     mockPrisma.policy.findMany.mockResolvedValue([policy('p1')]);
     mockClaims.autoProcess.mockResolvedValue('Paid');

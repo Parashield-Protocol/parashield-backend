@@ -177,8 +177,14 @@ export class ClaimsService {
       return 'Rejected';
     }
 
-    // Evaluate trigger condition against product definition (#120: direct lookup, #266: cached map lookup)
-    const product = productsMap?.get(policy.productId) ?? (await this.policyService.getProductById(policy.productId));
+    // Evaluate trigger condition against product definition (#120: direct lookup, #266: cached map lookup).
+    // #492 — when the worker supplies productsMap (every ACTIVE product, loaded
+    // once per tick) it is authoritative: getProductById applies the same
+    // ACTIVE filter, so a miss here would just be one wasted query per policy
+    // that can only return null. Only callers without a map hit the DB.
+    const product = productsMap
+      ? (productsMap.get(policy.productId) ?? null)
+      : await this.policyService.getProductById(policy.productId);
     if (!product) {
       // #259 — the product may have been deactivated after this policy was
       // sold. Silently substituting a hardcoded threshold/comparison here
