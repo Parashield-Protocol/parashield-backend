@@ -1101,3 +1101,93 @@ describe("PolicyService.calculatePremium", () => {
     });
   });
 });
+
+describe("PolicyService.cancelPolicy — SSE emission ordering (#493)", () => {
+  let service: PolicyService;
+  const callOrder: string[] = [];
+
+  const activePolicy = {
+    id: "policy-1",
+    productId: "product-1",
+    policyholder: "GABC",
+    coverageXlm: new Prisma.Decimal("100"),
+    premiumPaid: new Prisma.Decimal("10"),
+    oracleKey: "WEATHER:NGA:LAGOS:RAIN_MM",
+    startTime: new Date(Date.now() - 1000),
+    endTime: new Date(Date.now() + 1000),
+    status: "ACTIVE",
+  };
+
+  const mockPrismaService = {
+    policy: {
+      findUnique: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    auditLog: {
+      create: jest.fn(),
+    },
+  };
+
+  const mockStatusEventsService = {
+    emitPolicyStatusChange: jest.fn(() => { callOrder.push("sse"); }),
+    subscribeToPolicyStatus: jest.fn(),
+  };
+
+  const mockWebhooksService = {
+    notifyPolicyStatusChange: jest.fn(() => { callOrder.push("webhook"); return Promise.resolve(); }),
+    notifyClaimStatusChange: jest.fn(),
+  };
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PolicyService,
+        { provide: StellarService, useValue: {} },
+        { provide: PrismaService, useValue: mockPrismaService },
+        { provide: ConfigService, useValue: { get: jest.fn() } },
+        { provide: StatusEventsService, useValue: mockStatusEventsService },
+        { provide: WebhooksService, useValue: mockWebhooksService },
+      ],
+    }).compile();
+
+    service = module.get<PolicyService>(PolicyService);
+    jest.clearAllMocks();
+    callOrder.length = 0;
+    mockPrismaService.policy.findUnique
+      .mockResolvedValueOnce(activePolicy)
+      .mockResolvedValueOnce({ ...activePolicy, status: "CANCELLED" });
+    mockPrismaService.policy.updateMany.mockImplementation(() => {
+      callOrder.push("update");
+      return Promise.resolve({ count: 1 });
+    });
+  });
+
+  it("emits the SSE event right after the status update, before the audit log write", async () => {
+    mockPrismaService.auditLog.create.mockImplementation(() => {
+      callOrder.push("audit");
+      return Promise.resolve({});
+    });
+
+    await service.cancelPolicy("policy-1");
+
+    expect(mockStatusEventsService.emitPolicyStatusChange).toHaveBeenCalledWith("policy-1", "CANCELLED");
+    expect(callOrder).toEqual(["update", "sse", "webhook", "audit"]);
+  });
+
+  it("still emits the SSE event when the audit log write fails", async () => {
+    mockPrismaService.auditLog.create.mockRejectedValue(new Error("audit down"));
+
+    const result = await service.cancelPolicy("policy-1");
+
+    expect(mockStatusEventsService.emitPolicyStatusChange).toHaveBeenCalledWith("policy-1", "CANCELLED");
+    expect(result.status).toBe("CANCELLED");
+  });
+
+  it("does not emit the SSE event when the atomic update matches no ACTIVE row", async () => {
+    mockPrismaService.policy.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.cancelPolicy("policy-1")).rejects.toBeInstanceOf(ConflictException);
+    expect(mockStatusEventsService.emitPolicyStatusChange).not.toHaveBeenCalled();
+    expect(mockWebhooksService.notifyPolicyStatusChange).not.toHaveBeenCalled();
+  });
+});

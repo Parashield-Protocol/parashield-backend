@@ -755,6 +755,17 @@ export class PolicyService {
         `Policy ${policyId} is no longer ACTIVE and cannot be cancelled`,
       );
     }
+    // #493 — notify SSE subscribers (and webhooks) immediately after the
+    // atomic status change, before any other I/O, so real-time delivery is
+    // never delayed or blocked by the audit-log write below.
+    this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CANCELLED);
+    this.webhooks.notifyPolicyStatusChange({
+      policyId,
+      fromStatus: PolicyStatus.ACTIVE,
+      toStatus: PolicyStatus.CANCELLED,
+      timestamp: Date.now(),
+    });
+
     // #350 — best-effort audit write after the guarded update succeeds;
     // not folded into the update itself so the cancellation can't be
     // blocked by an audit-log write failure.
@@ -767,13 +778,6 @@ export class PolicyService {
         reason:     `Policyholder-initiated cancellation; refund owed: ${refundAmountXlm} XLM`,
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
-    this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.CANCELLED);
-    this.webhooks.notifyPolicyStatusChange({
-      policyId,
-      fromStatus: PolicyStatus.ACTIVE,
-      toStatus: PolicyStatus.CANCELLED,
-      timestamp: Date.now(),
-    });
 
     const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
     return {
