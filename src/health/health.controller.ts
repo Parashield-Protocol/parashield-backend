@@ -188,7 +188,7 @@ export class HealthController {
 
     try {
       keeperBalanceXlm = await this.stellar.getAccountBalance(
-        this.stellar.keeperKeypair.publicKey(),
+        this.stellar.keeperPublicKey,
         HEALTH_CHECK_RPC_TIMEOUT_MS,
       );
 

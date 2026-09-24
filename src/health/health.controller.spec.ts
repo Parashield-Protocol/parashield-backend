@@ -32,7 +32,7 @@ describe('HealthController', () => {
           }),
     };
     const stellar = {
-      keeperKeypair: { publicKey: () => KEEPER_ADDRESS },
+      keeperPublicKey: KEEPER_ADDRESS,
       getAccountBalance: overrides?.rpcFails
         ? jest.fn().mockRejectedValue(new Error('RPC unreachable'))
         : jest.fn().mockResolvedValue(overrides?.balance ?? '100.0000000'),

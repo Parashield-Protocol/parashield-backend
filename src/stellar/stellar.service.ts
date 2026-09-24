@@ -57,7 +57,7 @@ export class StellarService {
   private readonly rpc: StellarRpc.Server;
   private readonly horizon: Horizon.Server;
   private readonly network: string;
-  readonly keeperKeypair: Keypair;
+  private readonly keeperKeypair: Keypair;
 
   constructor(private readonly config: ConfigService) {
     const rpcUrl =
@@ -406,7 +406,7 @@ export class StellarService {
     operation: string,
     timeoutMs: number = 10000,
   ): Promise<T> {
-    let timer: NodeJS.Timeout;
+    let timer: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         this.logger.warn(`RPC operation timed out after ${timeoutMs}ms: ${operation}`);
@@ -420,10 +420,10 @@ export class StellarService {
     });
     try {
       const result = await Promise.race([promise, timeoutPromise]);
-      clearTimeout(timer!);
+      clearTimeout(timer);
       return result;
     } catch (err) {
-      clearTimeout(timer!);
+      clearTimeout(timer);
       throw err;
     }
   }
@@ -510,6 +510,11 @@ export class StellarService {
       protocolVersion: Number(network.protocolVersion),
       passphraseMatches,
     };
+  }
+
+  /** Return the keeper's public key without exposing the mutable Keypair object (#505). */
+  get keeperPublicKey(): string {
+    return this.keeperKeypair.publicKey();
   }
 
   /** Return the current network passphrase. */

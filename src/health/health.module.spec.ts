@@ -21,7 +21,7 @@ describe('HealthModule', () => {
       .useValue({})
       .overrideProvider(StellarService)
       .useValue({
-        keeperKeypair: { publicKey: () => 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ' },
+        keeperPublicKey: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
         getAccountBalance: jest.fn().mockResolvedValue('100.0000000'),
       })
       .compile();

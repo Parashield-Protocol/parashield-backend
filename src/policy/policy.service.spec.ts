@@ -23,7 +23,7 @@ describe("PolicyService.calculatePremium", () => {
   const mockStellarService = {
     simulateInvoke: jest.fn(),
     simulateAssembleAndSend: jest.fn(),
-    keeperKeypair: { publicKey: jest.fn().mockReturnValue("GABC") },
+    keeperPublicKey: "GABC",
     networkPassphrase: "Test SDF Network ; September 2015",
   };
 
