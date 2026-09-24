@@ -26,6 +26,7 @@ class CircuitBreaker {
   private state: CircuitState = CircuitState.CLOSED;
   private failureCount = 0;
   private lastFailureTime = 0;
+  private probeInFlight = false;
   private readonly logger: Logger;
 
   constructor(
@@ -42,6 +43,7 @@ class CircuitBreaker {
       Date.now() - this.lastFailureTime >= this.resetTimeoutMs
     ) {
       this.state = CircuitState.HALF_OPEN;
+      this.probeInFlight = false;
       this.logger.warn(`Circuit half-open — allowing probe request`);
     }
     return this.state;
@@ -59,12 +61,24 @@ class CircuitBreaker {
       );
     }
 
+    if (currentState === CircuitState.HALF_OPEN) {
+      if (this.probeInFlight) {
+        this.logger.warn(
+          `Circuit half-open — probe already in flight, rejecting concurrent request`,
+        );
+        throw new ServiceUnavailableException(
+          `External service "${this.name}" is temporarily unavailable (circuit half-open, probe in flight)`,
+        );
+      }
+      this.probeInFlight = true;
+    }
+
     try {
       const result = await fn();
       this.onSuccess();
       return result;
     } catch (error) {
-      this.onFailure();
+      this.onFailure(error);
       throw error;
     }
   }
@@ -73,11 +87,24 @@ class CircuitBreaker {
     if (this.state === CircuitState.HALF_OPEN) {
       this.logger.log("Probe succeeded — circuit closed");
     }
+    this.probeInFlight = false;
     this.failureCount = 0;
     this.state = CircuitState.CLOSED;
   }
 
-  private onFailure(): void {
+  private onFailure(error: unknown): void {
+    // Only count 5xx and network errors as circuit-breaking failures.
+    // 4xx client errors (bad request, invalid key, etc.) indicate a caller
+    // misconfiguration, not an upstream outage — opening the circuit on
+    #548 them would block all subsequent valid requests too.
+    const status = (error as any)?.response?.status;
+    if (typeof status === "number" && status >= 400 && status < 500) {
+      this.logger.warn(
+        `Circuit breaker: ignoring client error ${status} on "${this.name}" (not counting toward threshold)`,
+      );
+      return;
+    }
+
     this.failureCount++;
     this.lastFailureTime = Date.now();
     if (this.failureCount >= this.failureThreshold) {
@@ -341,6 +368,20 @@ export class OracleService {
       }>(url, { timeout: 10_000 }),
     );
 
+    // Validate upstream response structure (#560).
+    if (
+      !res.data?.daily ||
+      !Array.isArray(res.data.daily.precipitation_sum) ||
+      !Array.isArray(res.data.daily.time)
+    ) {
+      this.logger.error(
+        `Open-Meteo returned unexpected response structure for rainfall key=${key}`,
+      );
+      throw new ServiceUnavailableException(
+        "Upstream rainfall data has unexpected structure",
+      );
+    }
+
     // Filter to only observed days (date <= today) and exclude null values.
     // For past months from /archive endpoint, all data is observed.
     // For current/forecast months from /forecast endpoint, exclude future forecasts.
@@ -438,6 +479,20 @@ export class OracleService {
       }>(url, { timeout: 10_000 }),
     );
 
+    // Validate upstream response structure (#560).
+    if (
+      !res.data?.daily ||
+      !Array.isArray(res.data.daily.temperature_2m_max) ||
+      !Array.isArray(res.data.daily.time)
+    ) {
+      this.logger.error(
+        `Open-Meteo returned unexpected response structure for temperature key=${key}`,
+      );
+      throw new ServiceUnavailableException(
+        "Upstream temperature data has unexpected structure",
+      );
+    }
+
     const todayStr = today.toISOString().split("T")[0];
     const rawTemps = res.data.daily.temperature_2m_max;
     const times = res.data.daily.time;
@@ -521,7 +576,17 @@ export class OracleService {
       }),
     );
     const key = `flight:${flightNumber}:${date}`;
-    if (!res.data || !Array.isArray(res.data.data)) {
+
+    // Validate upstream response structure (#560).
+    if (!res.data || typeof res.data !== "object") {
+      this.logger.error(
+        `AviationStack returned non-object response for ${key}`,
+      );
+      throw new ServiceUnavailableException(
+        "Upstream flight data has unexpected structure",
+      );
+    }
+    if (!Array.isArray(res.data.data)) {
       this.logger.warn(
         `AviationStack returned unexpected response structure for ${key} — emitting NO_DATA with confidence 0`,
       );
