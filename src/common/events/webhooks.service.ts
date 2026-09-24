@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import * as crypto from 'crypto';
 import { PrismaService } from '../../prisma/prisma.service';
 
 export interface WebhookRegistration {
@@ -163,7 +164,6 @@ export class WebhooksService {
   }
 
   private signPayload(payload: unknown, secret: string): string {
-    const crypto = require('crypto');
     const payloadStr = JSON.stringify(payload);
     return crypto.createHmac('sha256', secret).update(payloadStr).digest('base64');
   }
