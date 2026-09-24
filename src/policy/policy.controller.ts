@@ -207,8 +207,10 @@ export class PolicyController {
     if (dto.walletAddress !== authedWallet) {
       throw new ForbiddenException('Wallet address does not match authenticated user');
     }
-    const products = await this.policy.getActiveProducts();
-    const product = products.find((p) => p.id === dto.productId);
+    // #487 — look up the one product we need instead of loading the whole
+    // (paginated) active catalogue on every quote. getProductById only
+    // returns ACTIVE products, so inactive/unknown IDs still 404 below.
+    const product = await this.policy.getProductById(dto.productId);
 
     if (!product) {
       throw new NotFoundException(`Product ${dto.productId} not found`);
