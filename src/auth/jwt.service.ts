@@ -22,7 +22,7 @@ export interface JwtPayload {
 export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
-  private readonly tokenExpiry = "1h";
+  private readonly tokenExpiry = "7d";
 
   constructor(private readonly config: ConfigService) {
     const secret = config.get<string>("JWT_SECRET");
@@ -48,7 +48,10 @@ export class JwtService {
       expiresIn: '1h',
     };
     const token = jwt.sign(payload, this.secret, options);
-    this.logger.log(`JWT issued for wallet: ${walletAddress}`);
+    const maskedWallet = walletAddress.length > 8 
+      ? `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}` 
+      : '***';
+    this.logger.debug(`JWT issued for wallet: ${maskedWallet}`);
     return token;
   }
 
@@ -64,7 +67,10 @@ export class JwtService {
       expiresIn: '1h',
     };
     const token = jwt.sign(payload, this.secret, options);
-    this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
+    const maskedWallet = walletAddress.length > 8 
+      ? `${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}` 
+      : '***';
+    this.logger.debug(`JWT issued for wallet: ${maskedWallet} (role=${role})`);
     return token;
   }
 
