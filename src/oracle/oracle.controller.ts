@@ -335,14 +335,14 @@ export class OracleController {
   }
 
   /**
-   * GET /api/v1/oracle/flight — fetch flight delay status
+   * POST /api/v1/oracle/flight — fetch flight delay status
    *
    * PROTECTED ENDPOINT: Requires AviationStack API key.
    * Fetches flight delay data from AviationStack.
    *
    * Rate limited: 60 requests/minute per IP (global ThrottleGuard)
    */
-  @Get("flight")
+  @Post("flight")
   @UseGuards(OperatorAuthGuard, AviationStackApiKeyGuard)
   @ApiBearerAuth()
   @ApiSecurity("operator-api-key")
