@@ -42,7 +42,7 @@ export class OracleKeyValidationMiddleware implements NestMiddleware {
     if (!isValidOracleKeyFormat(key)) {
       this.logger.warn(`Rejected malformed oracle key: ${key}`);
       throw new BadRequestException(
-        `Invalid oracle key format: "${key}". Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,
+        `Invalid oracle key format. Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,
       );
     }
 

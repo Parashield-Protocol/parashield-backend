@@ -270,23 +270,43 @@ export class StellarService {
     const assembledTx = StellarRpc.assembleTransaction(tx, simResult).build();
     assembledTx.sign(this.keeperKeypair);
 
-    const sendResult = await this.withTimeout(
+    // #528 — TRY_AGAIN_LATER means the RPC node's queue rejected the
+    // submission outright (never broadcast), so the same signed transaction
+    // (same sequence number) can safely be sent again, like invokeContract
+    // does. Backoff matches invokeContract's non-rate-limit schedule.
+    const MAX_SEND_ATTEMPTS = 3;
+    let sendResult = await this.withTimeout(
       this.rpc.sendTransaction(assembledTx),
       "sendTransaction",
     );
+    for (
+      let attempt = 1;
+      sendResult.status === "TRY_AGAIN_LATER" && attempt < MAX_SEND_ATTEMPTS;
+      attempt++
+    ) {
+      const backoffMs = Math.min(2000 * Math.pow(2, attempt - 1), 10000);
+      this.logger.warn(
+        `sendTransaction rejected with TRY_AGAIN_LATER (attempt ${attempt}/${MAX_SEND_ATTEMPTS}) — retrying in ${backoffMs}ms`,
+      );
+      await this.sleep(backoffMs);
+      sendResult = await this.withTimeout(
+        this.rpc.sendTransaction(assembledTx),
+        "sendTransaction",
+      );
+    }
     if (sendResult.status === "ERROR") {
       throw new Error(
         `Transaction submission failed: ${this.formatXdr(sendResult.errorResult)}`,
       );
     }
-    // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
-    // submission outright (never broadcast). This method returns the raw
-    // send result to the caller with no waitForTransaction step of its own,
-    // so silently treating TRY_AGAIN_LATER like PENDING/DUPLICATE here would
-    // hand callers a hash that will never confirm as if it were in-flight.
+    // #183 — still TRY_AGAIN_LATER after every attempt: the transaction was
+    // never broadcast. This method returns the raw send result to the caller
+    // with no waitForTransaction step of its own, so silently treating it like
+    // PENDING/DUPLICATE would hand callers a hash that will never confirm as
+    // if it were in-flight.
     if (sendResult.status === "TRY_AGAIN_LATER") {
       throw new Error(
-        `Transaction submission was rejected by the RPC node (TRY_AGAIN_LATER) — not broadcast.`,
+        `Transaction submission was rejected by the RPC node (TRY_AGAIN_LATER) after ${MAX_SEND_ATTEMPTS} attempts — not broadcast.`,
       );
     }
 
@@ -447,6 +467,36 @@ export class StellarService {
   }
 
   /**
+   * Reads an account's native XLM balance from its ledger entry over the RPC.
+   * Returns a 7-decimal string like Horizon does, or "0" when the account
+   * does not exist.
+   */
+  private async getNativeBalanceViaRpc(
+    publicKey: string,
+    timeoutMs?: number,
+  ): Promise<string> {
+    const key = xdr.LedgerKey.account(
+      new xdr.LedgerKeyAccount({
+        accountId: Keypair.fromPublicKey(publicKey).xdrAccountId(),
+      }),
+    );
+    const response = await this.withTimeout(
+      this.rpc.getLedgerEntries(key),
+      "getLedgerEntries",
+      timeoutMs,
+    );
+    const entry = response.entries[0];
+    if (!entry) {
+      this.logger.warn(`Account not found on network: ${publicKey}`);
+      return "0";
+    }
+    const stroops = entry.val.account().balance().toString().padStart(8, "0");
+    const balance = `${stroops.slice(0, -7)}.${stroops.slice(-7)}`;
+    this.logger.log(`Account ${publicKey} balance: ${balance} XLM`);
+    return balance;
+  }
+
+  /**
    * Get the native XLM balance for an account.
    * Used for keeper health checks to ensure the keeper has sufficient funds.
    * @param timeoutMs  Maximum time to wait in milliseconds (default 10s).
@@ -455,6 +505,17 @@ export class StellarService {
    *                   health probe long enough to trigger a pod restart.
    */
   async getAccountBalance(publicKey: string, timeoutMs?: number): Promise<string> {
+    // #530 — the account's ledger entry carries its native balance, so ask the
+    // RPC first and only fall back to Horizon if the RPC cannot answer.
+    try {
+      return await this.getNativeBalanceViaRpc(publicKey, timeoutMs);
+    } catch (err) {
+      this.logger.warn(
+        `RPC balance lookup failed for ${publicKey}, falling back to Horizon: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     let account: Awaited<ReturnType<typeof this.horizon.loadAccount>>;
     try {
       account = await this.withTimeout(

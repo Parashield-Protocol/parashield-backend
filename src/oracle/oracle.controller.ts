@@ -77,19 +77,19 @@ export class OracleController {
     },
   })
   @ApiResponse({ status: 404, description: "No reading found for the given key" })
-  @ApiErrorResponse(400, 'The key does not match a recognized oracle key format.', undefined, 'Invalid oracle key format: "garbage". Expected rainfall:<lat>,<lng>:YYYY-MM, temperature:<lat>,<lng>:YYYY-MM, or flight:<code>:YYYY-MM-DD.')
-  @ApiErrorResponse(404, 'No oracle reading found for the requested key.', undefined, 'No reading found for key: rainfall:-0.0917,34.7679:2026-06')
+  @ApiErrorResponse(400, 'The key does not match a recognized oracle key format.', undefined, 'Invalid oracle key format. Expected rainfall:<lat>,<lng>:YYYY-MM, temperature:<lat>,<lng>:YYYY-MM, or flight:<code>:YYYY-MM-DD.')
+  @ApiErrorResponse(404, 'No oracle reading found for the requested key.', undefined, 'No reading found for the requested key.')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getReadingByKey(@Query("key") key: string) {
     const decoded = decodeURIComponent(key ?? "");
     if (!isValidOracleKeyFormat(decoded)) {
       throw new BadRequestException(
-        `Invalid oracle key format: "${decoded}". Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,
+        `Invalid oracle key format. Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,
       );
     }
     const reading = await this.oracle.getLatestReading(decoded);
     if (!reading) {
-      throw new NotFoundException(`No reading found for key: ${decoded}`);
+      throw new NotFoundException("No reading found for the requested key.");
     }
     return {
       success: true,
@@ -144,6 +144,9 @@ export class OracleController {
     @Query("limit") limit?: string,
     @Query("page") page?: string,
   ) {
+    // Oracle data is public by design, so no access control is added beyond the
+    // per-IP rate limit above; the page size is capped so a single call cannot
+    // enumerate every reading at once.
     const pageNumber = page ? Math.max(parseInt(page, 10) || 1, 1) : 1;
     const cap = limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100;
     const readings = await this.oracle.getAllReadings(cap, pageNumber);
@@ -192,13 +195,13 @@ export class OracleController {
     },
   })
   @ApiResponse({ status: 404, description: "No reading found for the given key", })
-  @ApiErrorResponse(400, 'The key does not match a recognized oracle key format.', undefined, 'Invalid oracle key format: "garbage". Expected rainfall:<lat>,<lng>:YYYY-MM, temperature:<lat>,<lng>:YYYY-MM, or flight:<code>:YYYY-MM-DD.')
-  @ApiErrorResponse(404, 'No oracle reading found for the given key (path param).', undefined, 'No reading found for key: rainfall:-0.0917,34.7679:2026-06')
+  @ApiErrorResponse(400, 'The key does not match a recognized oracle key format.', undefined, 'Invalid oracle key format. Expected rainfall:<lat>,<lng>:YYYY-MM, temperature:<lat>,<lng>:YYYY-MM, or flight:<code>:YYYY-MM-DD.')
+  @ApiErrorResponse(404, 'No oracle reading found for the given key (path param).', undefined, 'No reading found for the requested key.')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getLatestReading(@Param("key") key: string) {
     const reading = await this.oracle.getLatestReading(key);
     if (!reading) {
-      throw new NotFoundException(`No reading found for key: ${key}`);
+      throw new NotFoundException("No reading found for the requested key.");
     }
     return {
       success: true,

@@ -510,7 +510,10 @@ describe("StellarService", () => {
     // #183 — this method has no waitForTransaction step of its own, so a
     // TRY_AGAIN_LATER (never broadcast) result must never be handed back to
     // the caller shaped like a normal in-flight send.
-    it("#183 — throws when sendTransaction returns a TRY_AGAIN_LATER status", async () => {
+    it("#183/#528 — throws after retrying when every send returns TRY_AGAIN_LATER", async () => {
+      jest
+        .spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep")
+        .mockResolvedValue(undefined);
       mockRpc.sendTransaction.mockResolvedValue({
         status: "TRY_AGAIN_LATER",
         hash: "retry-later-hash",
@@ -520,6 +523,22 @@ describe("StellarService", () => {
       await expect(service.simulateAssembleAndSend(fakeTx)).rejects.toThrow(
         /TRY_AGAIN_LATER/,
       );
+      expect(mockRpc.sendTransaction).toHaveBeenCalledTimes(3);
+    });
+
+    it("#528 — retries on TRY_AGAIN_LATER and returns the result once the send is accepted", async () => {
+      jest
+        .spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep")
+        .mockResolvedValue(undefined);
+      mockRpc.sendTransaction
+        .mockResolvedValueOnce({ status: "TRY_AGAIN_LATER", hash: "rejected-hash" })
+        .mockResolvedValueOnce({ status: "PENDING", hash: "accepted-hash" });
+      const fakeTx = { sign: jest.fn() } as any;
+
+      const result = await service.simulateAssembleAndSend(fakeTx);
+
+      expect(result).toEqual({ status: "PENDING", hash: "accepted-hash" });
+      expect(mockRpc.sendTransaction).toHaveBeenCalledTimes(2);
     });
   });
 
