@@ -31,7 +31,7 @@ describe('ClaimsWorker', () => {
         updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       },
     };
-    mockPolicyService = { getActiveProducts: jest.fn().mockResolvedValue([]) };
+    mockPolicyService = { getActiveProducts: jest.fn().mockResolvedValue({ data: [], total: 0, page: 1, limit: 100 }) };
     mockRedis = { set: jest.fn().mockResolvedValue('OK'), mget: jest.fn().mockResolvedValue([]) };
     worker = new ClaimsWorker(
       mockClaims as unknown as ClaimsService,
@@ -65,13 +65,31 @@ describe('ClaimsWorker', () => {
   it('auto-processes each expiring policy with pre-fetched productsMap (#266)', async () => {
     mockPrisma.policy.findMany.mockResolvedValue([policy('p1')]);
     mockClaims.autoProcess.mockResolvedValue('Paid');
-    mockPolicyService.getActiveProducts.mockResolvedValue([{ id: 'prod1', name: 'Product 1' }]);
+    mockPolicyService.getActiveProducts.mockResolvedValue({ data: [{ id: 'prod1', name: 'Product 1' }], total: 1, page: 1, limit: 100 });
 
     await worker.processActivePolicies();
 
     expect(mockPolicyService.getActiveProducts).toHaveBeenCalledTimes(1);
     expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1', expect.any(Map));
+    const productsMap = mockClaims.autoProcess.mock.calls[0][1] as Map<string, unknown>;
+    expect(productsMap.get('prod1')).toEqual({ id: 'prod1', name: 'Product 1' });
     expect(mockPrisma.policy.update).not.toHaveBeenCalled();
+  });
+
+  it('pages through the whole active product catalogue for productsMap', async () => {
+    mockPrisma.policy.findMany.mockResolvedValue([policy('p1')]);
+    mockClaims.autoProcess.mockResolvedValue('Paid');
+    const firstPage = Array.from({ length: 100 }, (_, i) => ({ id: `prod${i}` }));
+    mockPolicyService.getActiveProducts
+      .mockResolvedValueOnce({ data: firstPage, total: 101, page: 1, limit: 100 })
+      .mockResolvedValueOnce({ data: [{ id: 'prod100' }], total: 101, page: 2, limit: 100 });
+
+    await worker.processActivePolicies();
+
+    expect(mockPolicyService.getActiveProducts).toHaveBeenNthCalledWith(1, 1, 100);
+    expect(mockPolicyService.getActiveProducts).toHaveBeenNthCalledWith(2, 2, 100);
+    const productsMap = mockClaims.autoProcess.mock.calls[0][1] as Map<string, unknown>;
+    expect(productsMap.size).toBe(101);
   });
 
   it('marks a policy EXPIRED when auto-processing does not result in a payout', async () => {

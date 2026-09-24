@@ -4,11 +4,12 @@ import { PolicyStatus } from '@prisma/client';
 import type Redis from 'ioredis';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { PolicyService } from '../policy/policy.service';
+import { PolicyService, ProductSummary } from '../policy/policy.service';
 import { transition } from '../policy/policy-status.machine';
 import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 
 const BATCH_SIZE = 10;
+const PRODUCTS_PAGE_SIZE = 100;
 
 // Returns a promise that resolves after `ms` milliseconds.
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -43,6 +44,19 @@ export class ClaimsWorker {
     );
   }
 
+  // getActiveProducts() is paginated (max 100 per page), so page through the
+  // whole catalogue — a single call would silently miss products past page 1
+  // and push those policies back onto the per-policy getProductById path.
+  private async loadActiveProductsMap(): Promise<Map<string, ProductSummary>> {
+    const productsMap = new Map<string, ProductSummary>();
+    for (let page = 1; ; page++) {
+      const { data, total } = await this.policyService.getActiveProducts(page, PRODUCTS_PAGE_SIZE);
+      for (const product of data) productsMap.set(product.id, product);
+      if (data.length < PRODUCTS_PAGE_SIZE || productsMap.size >= total) break;
+    }
+    return productsMap;
+  }
+
   @Cron(CronExpression.EVERY_HOUR)
   async processActivePolicies(): Promise<void> {
     const tickStart = Date.now();
@@ -66,8 +80,7 @@ export class ClaimsWorker {
     }
 
     // #266 — Fetch active products once per tick to avoid repeating N+1 Product queries inside batch loop
-    const activeProducts = await this.policyService.getActiveProducts();
-    const productsMap = new Map(activeProducts.map((p) => [p.id, p]));
+    const productsMap = await this.loadActiveProductsMap();
 
     this.logger.log(
       `Found ${expiringPolicies.length} expiring policies — processing in batches of ${BATCH_SIZE}`,
