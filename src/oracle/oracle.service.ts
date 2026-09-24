@@ -161,13 +161,13 @@ export class OracleService {
     value: number,
     key: string,
   ): void {
-    const { min, max } = SANITY_BOUNDS[label];
-    if (!Number.isFinite(value) || value < min || value > max) {
+    const bounds = SANITY_BOUNDS[label];
+    if (!Number.isFinite(value) || value < bounds.min || value > bounds.max) {
       this.logger.error(
-        `Rejecting out-of-range ${label} value for key=${key}: ${value} (allowed ${min}..${max})`,
+        `Rejecting out-of-range ${label} value for key=${key}: ${value} (allowed ${bounds.min}..${bounds.max})`,
       );
       throw new ServiceUnavailableException(
-        `Upstream ${label} value ${value} is outside the plausible range ${min}..${max}`,
+        `Upstream ${label} value ${value} is outside the plausible range ${bounds.min}..${bounds.max}`,
       );
     }
   }
