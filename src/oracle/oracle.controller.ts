@@ -24,6 +24,10 @@ import {
 import { ApiErrorResponse } from "../common/swagger/api-error-responses";
 import { Throttle } from "@nestjs/throttler";
 import { OracleService } from "./oracle.service";
+import {
+  isValidOracleKeyFormat,
+  ORACLE_KEY_FORMAT_DESCRIPTION,
+} from "./oracle-key-format";
 import { OracleFeedRequestDto } from "./dto/oracle-reading.dto";
 import { OperatorAuthGuard } from "../auth/operator-auth.guard";
 import { AviationStackApiKeyGuard } from "./guards/aviation-stack-api-key.guard";
@@ -78,6 +82,11 @@ export class OracleController {
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getReadingByKey(@Query("key") key: string) {
     const decoded = decodeURIComponent(key ?? "");
+    if (!isValidOracleKeyFormat(decoded)) {
+      throw new BadRequestException(
+        `Invalid oracle key format: "${decoded}". Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,
+      );
+    }
     const reading = await this.oracle.getLatestReading(decoded);
     if (!reading) {
       throw new NotFoundException(`No reading found for key: ${decoded}`);
@@ -89,7 +98,7 @@ export class OracleController {
   }
 
   /**
-   * GET /api/v1/oracle/readings?limit=... — list all stored oracle readings
+  * GET /api/v1/oracle/readings?page=...&limit=... — list all stored oracle readings
    *
    * PUBLIC ENDPOINT: No authentication required.
    * Oracle data is public and accessible to all users.
@@ -111,6 +120,11 @@ export class OracleController {
       "Rate limited to 60 requests/minute per IP.",
   })
   @ApiQuery({
+    name: "page",
+    required: false,
+    description: "Page number (default 1)",
+  })
+  @ApiQuery({
     name: "limit",
     required: false,
     description: "Max rows to return (default 100, max 500)",
@@ -126,9 +140,13 @@ export class OracleController {
   })
   @ApiResponse({ status: 200, description: "Array of oracle readings (JSON envelope) or NDJSON stream when ?stream=true", schema: { example: { success: true, data: [ { dataType: "weather", key: "rainfall:-0.0917,34.7679:2026-06", value: "324000000", confidence: 95, timestamp: 1719576600, source: "open-meteo" } ] } } })
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
-  async getAllReadings(@Query("limit") limit?: string) {
+  async getAllReadings(
+    @Query("limit") limit?: string,
+    @Query("page") page?: string,
+  ) {
+    const pageNumber = page ? Math.max(parseInt(page, 10) || 1, 1) : 1;
     const cap = limit ? Math.min(parseInt(limit, 10) || 100, 500) : 100;
-    const readings = await this.oracle.getAllReadings(cap);
+    const readings = await this.oracle.getAllReadings(cap, pageNumber);
     return {
       success: true,
       data: readings.map((r) => ({ ...r, value: r.value.toString() })),

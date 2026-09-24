@@ -305,22 +305,35 @@ export class StellarService {
    * lack plain properties, causing JSON.stringify to yield {} and template
    * interpolation to yield [object Object]. This helper extracts base64 XDR or JSON.
    */
-  formatXdr(val: any): string {
+  formatXdr(val: unknown): string {
     if (val === null || val === undefined) {
       return '';
     }
     if (typeof val === 'string') {
       return val;
     }
-    if (typeof val?.toXDR === 'function') {
+    const toXDR =
+      typeof val === 'object' && val !== null && 'toXDR' in val
+        ? (val as { toXDR?: (...args: string[]) => unknown }).toXDR
+        : undefined;
+    if (typeof toXDR === 'function') {
       try {
-        return val.toXDR('base64');
-      } catch {
-        try {
-          return val.toXDR().toString('base64');
-        } catch {
-          // fallback
+        const encoded = toXDR('base64');
+        if (typeof encoded === 'string') {
+          return encoded;
         }
+      } catch {
+        // fallback
+      }
+      try {
+        const encoded = toXDR();
+        if (encoded && typeof encoded === 'object') {
+          return (encoded as { toString: (encoding?: string) => string }).toString(
+            'base64',
+          );
+        }
+      } catch {
+        // fallback
       }
     }
     if (typeof val === 'object') {

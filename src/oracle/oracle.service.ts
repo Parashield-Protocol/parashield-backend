@@ -270,10 +270,11 @@ export class OracleService {
     });
   }
 
-  /** Get all stored oracle readings ordered by submittedAt desc, with an optional row cap. */
-  async getAllReadings(limit = 100): Promise<OracleReading[]> {
+  /** Get a page of stored oracle readings ordered by submittedAt desc. */
+  async getAllReadings(limit = 100, page = 1): Promise<OracleReading[]> {
     const records = await this.prisma.oracleReading.findMany({
       orderBy: { submittedAt: "desc" },
+      skip: (page - 1) * limit,
       take: Math.min(limit, 500),
     });
 
