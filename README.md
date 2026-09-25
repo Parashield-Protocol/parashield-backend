@@ -68,7 +68,7 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | `POST` | `/api/v1/claims/submit` | Submit a manual claim |
 | `POST` | `/api/v1/claims/:policyId/auto` | Trigger automatic claim evaluation (keeper only) |
 | `GET` | `/api/v1/claims/:id` | Get claim details by ID |
-| `GET` | `/api/v1/claims/history/:wallet` | Get all claims for a wallet address |
+| `GET` | `/api/v1/claims/history/:wallet` | Deprecated: use `GET /api/v1/claims?wallet=...` |
 
 ### Oracle
 

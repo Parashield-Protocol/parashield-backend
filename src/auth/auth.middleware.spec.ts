@@ -18,6 +18,7 @@ describe('AuthMiddleware', () => {
 
   function mockResponse() {
     const res: any = {};
+    res.setHeader = jest.fn().mockReturnValue(res);
     res.status = jest.fn().mockReturnValue(res);
     res.json = jest.fn().mockReturnValue(res);
     return res;
@@ -123,6 +124,7 @@ describe('AuthMiddleware', () => {
     await middleware.use(req, res, next);
 
     expect(next).not.toHaveBeenCalled();
+    expect(res.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store, no-cache');
     expect(res.status).toHaveBeenCalledWith(401);
   });
 

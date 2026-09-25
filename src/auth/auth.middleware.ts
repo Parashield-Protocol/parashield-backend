@@ -27,6 +27,12 @@ export class AuthMiddleware implements NestMiddleware {
 
   constructor(private readonly prisma: PrismaService) {}
 
+  /** #572 — 401 responses must never be cached or replayed. */
+  private unauthorized(res: Response, body: { statusCode: number; message: string }): void {
+    res.setHeader('Cache-Control', 'no-store, no-cache');
+    res.status(401).json(body);
+  }
+
   async use(req: Request & { wallet?: string }, res: Response, next: NextFunction): Promise<void> {
     const address   = req.headers['x-wallet-address'] as string | undefined;
     const signature = req.headers['x-wallet-signature'] as string | undefined;
@@ -40,7 +46,7 @@ export class AuthMiddleware implements NestMiddleware {
     // If some but not all headers are present, reject
     if (!address || !signature || !message) {
       this.logger.warn('Partial wallet auth headers received');
-      res.status(401).json({
+      this.unauthorized(res, {
         statusCode: 401,
         message:    'Missing wallet auth headers: x-wallet-address, x-wallet-signature, x-wallet-message all required',
       });
@@ -53,7 +59,7 @@ export class AuthMiddleware implements NestMiddleware {
     // starting with G (public) or S (seed).
     if (!/^[GS][A-Z2-7]{55}$/.test(address)) {
       this.logger.warn(`Header-auth rejected: invalid wallet address format "${address}"`);
-      res.status(401).json({
+      this.unauthorized(res, {
         statusCode: 401,
         message:    'Invalid wallet address format. Must be a 56-character Stellar address starting with G or S.',
       });
@@ -69,13 +75,13 @@ export class AuthMiddleware implements NestMiddleware {
       });
     } catch (err) {
       this.logger.warn(`Challenge lookup failed for ${address}: ${err}`);
-      res.status(401).json({ statusCode: 401, message: 'Authentication service unavailable' });
+      this.unauthorized(res, { statusCode: 401, message: 'Authentication service unavailable' });
       return;
     }
 
     if (!challenge) {
       this.logger.warn(`Header-auth rejected: no challenge found for ${address}`);
-      res.status(401).json({
+      this.unauthorized(res, {
         statusCode: 401,
         message:    'No auth challenge found. Request a challenge via GET /auth/challenge first.',
       });
@@ -85,7 +91,7 @@ export class AuthMiddleware implements NestMiddleware {
     if (challenge.expiresAt < new Date()) {
       this.logger.warn(`Header-auth rejected: challenge expired for ${address}`);
       await this.prisma.authChallenge.delete({ where: { walletAddress: address } }).catch(() => {});
-      res.status(401).json({ statusCode: 401, message: 'Auth challenge expired. Request a new challenge.' });
+      this.unauthorized(res, { statusCode: 401, message: 'Auth challenge expired. Request a new challenge.' });
       return;
     }
 
@@ -102,12 +108,12 @@ export class AuthMiddleware implements NestMiddleware {
       nonceBuffer.copy(paddedNonce);
       if (!timingSafeEqual(paddedMessage, paddedNonce)) {
         this.logger.warn(`Header-auth rejected: message does not match nonce for ${address}`);
-        res.status(401).json({ statusCode: 401, message: 'Invalid challenge message' });
+        this.unauthorized(res, { statusCode: 401, message: 'Invalid challenge message' });
         return;
       }
     } catch (err) {
       this.logger.warn(`Header-auth rejected: nonce comparison failed for ${address}`);
-      res.status(401).json({ statusCode: 401, message: 'Invalid challenge message' });
+      this.unauthorized(res, { statusCode: 401, message: 'Invalid challenge message' });
       return;
     }
 
@@ -119,12 +125,12 @@ export class AuthMiddleware implements NestMiddleware {
 
       if (!isValid) {
         this.logger.warn(`Invalid signature from wallet: ${address}`);
-        res.status(401).json({ statusCode: 401, message: 'Invalid wallet signature' });
+        this.unauthorized(res, { statusCode: 401, message: 'Invalid wallet signature' });
         return;
       }
     } catch (err) {
       this.logger.warn(`Signature verification error for ${address}: ${err}`);
-      res.status(401).json({ statusCode: 401, message: 'Signature verification failed' });
+      this.unauthorized(res, { statusCode: 401, message: 'Signature verification failed' });
       return;
     }
 

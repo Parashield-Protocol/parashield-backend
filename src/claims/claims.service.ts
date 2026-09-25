@@ -485,7 +485,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
 
   /** Manually submit a claim for a policy (initiated by policyholder). */
   async submitClaim(claimant: string, policyId: string): Promise<string> {
-    this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant}`);
+    this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant.slice(0, 4)}...${claimant.slice(-4)}`);
 
     // #371 — Resolve policy and validate ownership FIRST, before any status
     // or duplicate-claim probes. Running the duplicate guard with only a
