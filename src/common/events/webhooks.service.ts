@@ -1,5 +1,6 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import * as crypto from 'crypto';
+import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 
 type WebhookEvent = 'policy.status.change' | 'claim.status.change';
@@ -20,17 +21,79 @@ export interface WebhookRegistration {
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
 
+// #606 — AES-256-GCM parameters for encrypting webhook secrets at rest.
+// SHA-256 of WEBHOOK_SECRET_KEY always yields the 32-byte key AES-256 requires.
+const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+const IV_BYTES = 12;
+
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
+  private readonly encryptionKey: Buffer | null;
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly config: ConfigService,
+  ) {
+    // #606 — Derive a 32-byte key from WEBHOOK_SECRET_KEY when configured.
+    // When the env var is absent the service still works; secrets are stored
+    // as-is (plain text) and a warning is emitted once at startup.
+    const raw = this.config.get<string>('WEBHOOK_SECRET_KEY');
+    if (raw) {
+      // SHA-256 always yields exactly 32 bytes — matches the AES-256 key size
+      // without forcing operators to supply a precise-length value.
+      this.encryptionKey = crypto.createHash('sha256').update(raw).digest();
+    } else {
+      this.logger.warn(
+        'WEBHOOK_SECRET_KEY is not set — webhook secrets will be stored as plain text. ' +
+        'Set WEBHOOK_SECRET_KEY to enable AES-256-GCM encryption at rest.',
+      );
+      this.encryptionKey = null;
+    }
+  }
+
+  /**
+   * #606 — Encrypt a webhook signing secret with AES-256-GCM before
+   * persisting to the database. Returns a colon-delimited string of
+   * hex-encoded iv:authTag:ciphertext so the three components travel
+   * together and can be decoded without extra columns.
+   * When WEBHOOK_SECRET_KEY is not configured the value is stored unchanged.
+   */
+  private encryptSecret(secret: string): string {
+    if (!this.encryptionKey) return secret;
+    const iv = crypto.randomBytes(IV_BYTES);
+    const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, this.encryptionKey, iv);
+    const ciphertext = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return `enc:${iv.toString('hex')}:${authTag.toString('hex')}:${ciphertext.toString('hex')}`;
+  }
+
+  /**
+   * #606 — Decrypt a secret encrypted by encryptSecret. Handles both
+   * encrypted (enc: prefix) and legacy plain-text values so existing rows
+   * stored before WEBHOOK_SECRET_KEY was configured remain readable.
+   */
+  private decryptSecret(stored: string): string {
+    if (!this.encryptionKey || !stored.startsWith('enc:')) return stored;
+    const parts = stored.split(':');
+    if (parts.length !== 4) return stored; // malformed — return as-is
+    const [, ivHex, authTagHex, ciphertextHex] = parts;
+    const iv = Buffer.from(ivHex, 'hex');
+    const authTag = Buffer.from(authTagHex, 'hex');
+    const ciphertext = Buffer.from(ciphertextHex, 'hex');
+    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, this.encryptionKey, iv);
+    decipher.setAuthTag(authTag);
+    return decipher.update(ciphertext).toString('utf8') + decipher.final('utf8');
+  }
 
   // #482 — registrations are persisted via Prisma (previously an in-memory
   // Map) so they survive restarts and are visible to every instance.
+  // #606 — signing secrets are encrypted at rest with AES-256-GCM when
+  // WEBHOOK_SECRET_KEY is configured.
   async registerWebhook(dto: { url: string; events: WebhookEvent[]; secret?: string }) {
+    const storedSecret = dto.secret ? this.encryptSecret(dto.secret) : dto.secret;
     const registration = await this.prisma.webhookRegistration.create({
-      data: { url: dto.url, secret: dto.secret, events: dto.events },
+      data: { url: dto.url, secret: storedSecret, events: dto.events },
     });
     this.logger.log(`Webhook registered: ${registration.id} → ${dto.url} for events: ${dto.events.join(', ')}`);
     return { id: registration.id, status: 'registered' };
@@ -56,7 +119,8 @@ export class WebhooksService {
     return rows.map((r) => ({
       id: r.id,
       url: r.url,
-      secret: r.secret ?? undefined,
+      // #606 — decrypt the stored secret before returning it for delivery signing.
+      secret: r.secret ? this.decryptSecret(r.secret) : undefined,
       events: r.events as WebhookEvent[],
       createdAt: r.createdAt,
       isActive: r.isActive,
