@@ -14,6 +14,14 @@ export interface WebhookRegistration {
   isActive: boolean;
 }
 
+export interface WebhookDeliveryResult {
+  registrationId: string;
+  url: string;
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+}
+
 // #437 — Retry configuration for failed webhook deliveries.
 // Up to MAX_RETRY_ATTEMPTS additional attempts after the initial failure,
 // with exponential backoff starting at RETRY_BASE_DELAY_MS and doubling
@@ -141,46 +149,86 @@ export class WebhooksService {
     }
   }
 
-  async notifyPolicyStatusChange(event: { policyId: string; fromStatus: string; toStatus: string; timestamp: number }) {
+  async notifyPolicyStatusChange(event: { policyId: string; fromStatus: string; toStatus: string; timestamp: number }): Promise<WebhookDeliveryResult[]> {
     const registrations = await this.getRegistrationsForEvent('policy.status.change');
 
-    for (const registration of registrations) {
-      const payload = {
-        policyId: event.policyId,
-        fromStatus: event.fromStatus,
-        toStatus: event.toStatus,
-        timestamp: event.timestamp,
-      };
+    const payload = {
+      policyId: event.policyId,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      timestamp: event.timestamp,
+    };
 
-      try {
-        await this.deliverWithRetry(registration, payload);
-      } catch (err) {
-        this.logger.error(
-          `All delivery attempts failed for policy webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
-        );
-      }
-    }
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for policy webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
   }
 
-  async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }) {
+  async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }): Promise<WebhookDeliveryResult[]> {
     const registrations = await this.getRegistrationsForEvent('claim.status.change');
 
-    for (const registration of registrations) {
-      const payload = {
-        claimId: event.claimId,
-        fromStatus: event.fromStatus,
-        toStatus: event.toStatus,
-        timestamp: event.timestamp,
-      };
+    const payload = {
+      claimId: event.claimId,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      timestamp: event.timestamp,
+    };
 
-      try {
-        await this.deliverWithRetry(registration, payload);
-      } catch (err) {
-        this.logger.error(
-          `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
-        );
-      }
-    }
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
   }
 
   /**
@@ -241,6 +289,27 @@ export class WebhooksService {
 
     if (!response.ok) {
       throw new Error(`Webhook responded with ${response.status}`);
+    }
+
+    // #613 — Verify response signature if the endpoint provides one.
+    // Some webhook consumers sign their responses with the shared secret
+    // so the caller can confirm the response wasn't tampered with by a
+    // MITM. When present, the X-Webhook-Signature-Response header must
+    // match the HMAC of the response body; a mismatch is treated as a
+    // delivery failure.
+    if (secret) {
+      const responseSignature = response.headers.get('x-webhook-signature-response');
+      if (responseSignature) {
+        const responseBody = await response.text();
+        const expectedSignature = crypto
+          .createHmac('sha256', secret)
+          .update(responseBody)
+          .digest('base64');
+
+        if (!crypto.timingSafeEqual(Buffer.from(responseSignature), Buffer.from(expectedSignature))) {
+          throw new Error('Webhook response signature verification failed');
+        }
+      }
     }
   }
 
