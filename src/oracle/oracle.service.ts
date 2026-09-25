@@ -100,7 +100,7 @@ export class CircuitBreaker {
     // Only count 5xx and network errors as circuit-breaking failures.
     // 4xx client errors (bad request, invalid key, etc.) indicate a caller
     // misconfiguration, not an upstream outage — opening the circuit on
-    #548 them would block all subsequent valid requests too.
+    // #548 them would block all subsequent valid requests too.
     const status = (error as any)?.response?.status;
     if (typeof status === "number" && status >= 400 && status < 500) {
       this.logger.warn(
@@ -217,6 +217,12 @@ export class OracleService {
     ) {
       this.logger.warn(
         `Skipping persistence of mock/confidence-0 reading for key: ${reading.key}`,
+      );
+      return;
+    }
+    if (!Number.isFinite(reading.confidence) || reading.confidence < 0 || reading.confidence > 100) {
+      this.logger.error(
+        `Rejecting reading with invalid confidence ${reading.confidence} for key: ${reading.key}`,
       );
       return;
     }
