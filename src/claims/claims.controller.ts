@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import {
@@ -33,7 +33,7 @@ export class ClaimsController {
   // (60 req/60s) configured in app.module.ts, to slow down abuse of claim payouts.
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
-  @ApiResponse({ status: 201, description: 'Claim submitted successfully', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { claimId: { type: 'string' } } } } }, ], }, })
+  @ApiResponse({ status: 201, description: 'Claim submitted successfully', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { claimId: { type: 'string' }, claim: { type: 'object', description: 'Initial claim details' } } } } }, ], }, })
   @ApiErrorResponse(403, 'Claimant field does not match the authenticated wallet address.', undefined, 'Claimant does not match authenticated wallet')
   @ApiErrorResponse(409, 'An active claim already exists for this policy.', undefined, 'An active claim already exists for this policy')
   @ApiErrorResponse(429, 'Rate limit exceeded — claim submission allows 5 req / 60 s.', undefined, 'Too many requests. Please try again later.')
@@ -46,7 +46,8 @@ export class ClaimsController {
       throw new ForbiddenException('Claimant does not match authenticated wallet');
     }
     const claimId = await this.claims.submitClaim(authedWallet, dto.policyId);
-    return { success: true, data: { claimId } };
+    const claim = await this.claims.getClaim(claimId);
+    return { success: true, data: { claimId, claim } };
   }
 
   /** GET /api/v1/claims?wallet=... — get claim history for the authenticated wallet */
@@ -95,8 +96,9 @@ export class ClaimsController {
   @ApiOperation({ summary: 'Trigger automatic claim evaluation for a policy (operator only)' })
   @ApiParam({ name: 'policyId', description: 'Policy UUID to evaluate' })
   @ApiResponse({ status: 201, description: 'Claim evaluation triggered', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { result: { type: 'string' } } } } } ] } })
+  @ApiErrorResponse(400, 'policyId is not a valid UUID.', undefined, 'Validation failed (uuid is expected)')
   @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
-  async autoProcess(@Param('policyId') policyId: string) {
+  async autoProcess(@Param('policyId', ParseUUIDPipe) policyId: string) {
     const result = await this.claims.autoProcess(policyId);
     return { success: true, data: { result } };
   }

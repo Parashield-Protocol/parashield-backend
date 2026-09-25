@@ -39,7 +39,8 @@ export class LoggingInterceptor implements NestInterceptor {
           const statusCode = err instanceof Error && 'status' in err
             ? (err as { status: number }).status
             : 500;
-          this.logger.warn(`← ${method} ${url} ${statusCode} — ${duration}ms (error)`);
+          const message    = err instanceof Error ? err.message : String(err);
+          this.logger.warn(`← ${method} ${url} ${statusCode} — ${duration}ms (error: ${message})`);
         },
       }),
     );

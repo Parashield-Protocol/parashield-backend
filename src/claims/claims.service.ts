@@ -43,6 +43,12 @@ export interface StuckPolicyRecoverySummary {
 // + one Soroban call), so this is far outside any legitimate in-flight window.
 const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 
+// #589 — per-wallet claim totals are cached briefly so paginated history
+// requests don't run a COUNT on every page. Entries are dropped whenever a
+// claim is created for the wallet, so the total never lags a new claim.
+const CLAIM_COUNT_CACHE_TTL_MS = 30_000;
+const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -52,6 +58,7 @@ const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 @Injectable()
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
+  private readonly claimCountCache = new Map<string, { total: number; expiresAt: number }>();
 
   constructor(
     private readonly stellar: StellarService,
@@ -161,6 +168,7 @@ export class ClaimsService {
       },
     });
 
+    this.claimCountCache.delete(policy.policyholder);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     // Fetch latest oracle reading for this policy's oracle key
@@ -555,6 +563,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       throw error;
     }
 
+    this.claimCountCache.delete(claimant);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     try {
@@ -595,15 +604,30 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     const safePage = Math.max(1, page);
     const safeLimit = Math.min(Math.max(1, limit), 100);
     this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${safePage} limit=${safeLimit}`);
-    const [claims, total] = await this.prisma.$transaction([
-      this.prisma.claim.findMany({
-        where: { claimant: walletAddress },
-        orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-        skip: (safePage - 1) * safeLimit,
-        take: safeLimit,
-      }),
-      this.prisma.claim.count({ where: { claimant: walletAddress } }),
-    ]);
+    const findClaims = this.prisma.claim.findMany({
+      where: { claimant: walletAddress },
+      orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
+      skip: (safePage - 1) * safeLimit,
+      take: safeLimit,
+    });
+
+    // #589 — reuse a recent total instead of running COUNT on every request
+    const cached = this.claimCountCache.get(walletAddress);
+    let claims: Awaited<typeof findClaims>;
+    let total: number;
+    if (cached && cached.expiresAt > Date.now()) {
+      claims = await findClaims;
+      total = cached.total;
+    } else {
+      [claims, total] = await this.prisma.$transaction([
+        findClaims,
+        this.prisma.claim.count({ where: { claimant: walletAddress } }),
+      ]);
+      if (this.claimCountCache.size >= CLAIM_COUNT_CACHE_MAX_ENTRIES) {
+        this.claimCountCache.clear();
+      }
+      this.claimCountCache.set(walletAddress, { total, expiresAt: Date.now() + CLAIM_COUNT_CACHE_TTL_MS });
+    }
 
     const summaries = claims.map((claim) => ({
       id:             claim.id,
