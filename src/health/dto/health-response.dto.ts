@@ -182,6 +182,12 @@ export class HealthChecksDto {
   externalApis: ExternalApisDto;
 }
 
+export class DependencyVersionsDto {
+  @ApiProperty({ example: '15.0' }) database: string;
+  @ApiProperty({ example: '7.2.0' }) redis: string;
+  @ApiProperty({ example: '13.0.0' }) stellarSdk: string;
+}
+
 export class HealthResponseDto {
   @ApiProperty({ description: 'Overall service health', enum: ['ok', 'degraded'] })
   status: 'ok' | 'degraded';
@@ -200,4 +206,7 @@ export class HealthResponseDto {
 
   @ApiProperty({ type: HealthChecksDto })
   checks: HealthChecksDto;
+
+  @ApiProperty({ type: DependencyVersionsDto })
+  versions: DependencyVersionsDto;
 }

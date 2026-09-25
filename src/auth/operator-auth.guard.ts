@@ -48,7 +48,7 @@ export class OperatorAuthGuard implements CanActivate {
     }
 
     try {
-      const payload = this.jwtService.verify(token);
+      const payload = await this.jwtService.verifyAsync(token);
       if (payload.admin !== true && payload.role !== 'admin') {
         await this.recordFailure(ip);
         throw new UnauthorizedException('Admin bearer token required');

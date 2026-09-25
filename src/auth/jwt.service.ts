@@ -1,6 +1,8 @@
-import { Injectable, Logger, UnauthorizedException } from "@nestjs/common";
+import { Injectable, Inject, Logger, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import * as jwt from "jsonwebtoken";
+import * as crypto from "crypto";
+import Redis from 'ioredis';
 
 export interface JwtPayload {
   walletAddress: string;
@@ -10,6 +12,7 @@ export interface JwtPayload {
   aud?: string;
   iat?: number;
   exp?: number;
+  jti?: string;
 }
 
 /**
@@ -28,7 +31,7 @@ export class JwtService {
   private readonly issuer = "parashield-api";
   private readonly audience = "parashield-clients";
 
-  constructor(private readonly config: ConfigService) {
+  constructor(private readonly config: ConfigService, @Inject('REDIS_CLIENT') private readonly redis: Redis) {
     const secret = config.get<string>("JWT_SECRET");
     if (!secret) {
       this.logger.error("JWT_SECRET environment variable is required");
@@ -46,7 +49,7 @@ export class JwtService {
    * Token expires in 1 hour.
    */
   sign(walletAddress: string): string {
-    const payload: JwtPayload = { walletAddress };
+    const payload: JwtPayload = { walletAddress, jti: crypto.randomUUID() };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
       expiresIn: '1h',
@@ -64,7 +67,7 @@ export class JwtService {
    * Token expires in 1 hour.
    */
   signWithRole(walletAddress: string, role: string, admin = false): string {
-    const payload: JwtPayload = { walletAddress, role, admin };
+    const payload: JwtPayload = { walletAddress, role, admin, jti: crypto.randomUUID() };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
       expiresIn: '1h',
@@ -90,7 +93,7 @@ export class JwtService {
         algorithms: ['HS256'],
         issuer: this.issuer,
         audience: this.audience,
-      }) as JwtPayload;
+      }) as JwtPayload & { jti?: string };
       return {
         walletAddress: decoded.walletAddress,
         role: decoded.role,
@@ -108,5 +111,21 @@ export class JwtService {
       }
       throw new UnauthorizedException("Token verification failed");
     }
+  }
+
+  async verifyAsync(token: string): Promise<JwtPayload> {
+    const payload = this.verify(token);
+    const decoded = jwt.decode(token) as JwtPayload & { jti?: string };
+    if (decoded.jti && await this.redis.exists(`jwt:revoked:${decoded.jti}`)) {
+      throw new UnauthorizedException("Token has been revoked");
+    }
+    return payload;
+  }
+
+  async revoke(token: string): Promise<void> {
+    const decoded = jwt.decode(token) as (JwtPayload & { jti?: string }) | null;
+    if (!decoded?.jti || !decoded.exp) throw new UnauthorizedException("Invalid token");
+    const ttl = Math.max(decoded.exp - Math.floor(Date.now() / 1000), 1);
+    await this.redis.set(`jwt:revoked:${decoded.jti}`, '1', 'EX', ttl);
   }
 }

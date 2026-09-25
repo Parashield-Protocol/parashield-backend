@@ -47,6 +47,7 @@ const AVIATIONSTACK_HEALTH_URL =
 // #554 — Cache external API health check results for 30 seconds so load
 // balancers polling every 5-10s don't trigger redundant outbound HTTP calls.
 const EXTERNAL_API_CACHE_TTL_MS = 30_000;
+const DB_THROUGHPUT_CACHE_TTL_MS = 10_000;
 
 @ApiTags('health')
 @Controller('health')
@@ -75,6 +76,7 @@ export class HealthController {
     usedBytes: number;
     maxBytes: number;
   } | null = null;
+  private dbThroughputCache: { timestamp: number; value: { commits: number; rollbacks: number; conflicts: number } } | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -404,17 +406,16 @@ export class HealthController {
     // declining commit rates or rising rollback ratios.
     let dbThroughput: { commits: number; rollbacks: number; conflicts: number } | undefined;
     try {
-      const [stats] = await this.prisma.$queryRaw<Array<{ xact_commit: bigint; xact_rollback: bigint; conflicts: bigint }>>`
-        SELECT xact_commit, xact_rollback, conflicts
-        FROM pg_stat_database
-        WHERE datname = current_database()
-      `;
-      if (stats) {
-        dbThroughput = {
-          commits: Number(stats.xact_commit),
-          rollbacks: Number(stats.xact_rollback),
-          conflicts: Number(stats.conflicts),
-        };
+      const now = Date.now();
+      if (this.dbThroughputCache && now - this.dbThroughputCache.timestamp < DB_THROUGHPUT_CACHE_TTL_MS) {
+        dbThroughput = this.dbThroughputCache.value;
+      } else {
+        const [stats] = await this.prisma.$queryRaw<Array<{ xact_commit: bigint; xact_rollback: bigint; conflicts: bigint }>>`
+          SELECT xact_commit, xact_rollback, conflicts FROM pg_stat_database WHERE datname = current_database()`;
+        if (stats) {
+          dbThroughput = { commits: Number(stats.xact_commit), rollbacks: Number(stats.xact_rollback), conflicts: Number(stats.conflicts) };
+          this.dbThroughputCache = { timestamp: now, value: dbThroughput };
+        }
       }
     } catch (err) {
       this.logger.warn(`Failed to fetch database throughput stats: ${err instanceof Error ? err.message : String(err)}`);
@@ -523,9 +524,10 @@ export class HealthController {
       // Non-fatal: pg_stat_replication and pg_last_wal_receive_lsn may be
       // restricted on managed databases (RDS, Cloud SQL, etc.) or not
       // applicable (SQLite/test environments). Log and continue.
-      this.logger.warn(
-        `Failed to fetch database replication stats: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const code = (err as { code?: string })?.code;
+      const message = err instanceof Error ? err.message : String(err);
+      if (code === '42501') this.logger.warn(`Database replication stats unavailable due to insufficient privileges: ${message}`);
+      else this.logger.warn(`Failed to fetch database replication stats: ${message}`);
     }
 
     const checks = {
@@ -582,6 +584,11 @@ export class HealthController {
       service:   'parashield-api',
       version:   this.config.get<string>('npm_package_version') ?? process.env.npm_package_version ?? 'unknown',
       responseTimeMs: Date.now() - startTime,
+      versions: {
+        database: this.config.get<string>('DATABASE_VERSION') ?? 'PostgreSQL',
+        redis: this.config.get<string>('REDIS_VERSION') ?? 'Redis',
+        stellarSdk: this.config.get<string>('STELLAR_SDK_VERSION') ?? '13.0.0',
+      },
       checks: checks as any,
     };
 

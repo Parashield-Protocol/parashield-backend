@@ -48,7 +48,7 @@ export class UserThrottlerGuard extends ThrottlerGuard {
     const [scheme, token] = authHeader?.split(' ') ?? [];
     if (scheme === 'Bearer' && token) {
       try {
-        const payload = this.jwtService.verify(token);
+        const payload = await this.jwtService.verifyAsync(token);
         if (payload?.walletAddress) {
           return `user:${payload.walletAddress}`;
         }
