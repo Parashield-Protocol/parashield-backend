@@ -53,7 +53,7 @@ describe('WebhooksService', () => {
       { id: 'a', url: 'https://a.test', secret: 'topsecret', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
       { id: 'b', url: 'https://b.test', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
     ]);
-    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
 
     const event = { claimId: 'c1', fromStatus: 'PROCESSING', toStatus: 'PAID', timestamp: 1 };
     await service.notifyClaimStatusChange(event);
@@ -119,7 +119,7 @@ describe('WebhooksService', () => {
       const { service } = build([
         { id: 'a', url: 'https://a.test', secret: 'sig-secret', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
       ]);
-      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200 } as Response);
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
 
       const event = { claimId: 'x', fromStatus: 'PROCESSING', toStatus: 'PAID', timestamp: 99 };
       await service.notifyClaimStatusChange(event);
@@ -127,6 +127,117 @@ describe('WebhooksService', () => {
       const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
       const expected = crypto.createHmac('sha256', 'sig-secret').update(JSON.stringify(event)).digest('base64');
       expect((init.headers as Record<string, string>)['X-Webhook-Signature']).toBe(expected);
+    });
+  });
+
+  describe('#612 — parallel webhook delivery', () => {
+    it('delivers to multiple webhooks in parallel, not sequentially', async () => {
+      const { service } = build([
+        { id: 'a', url: 'https://a.test', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+        { id: 'b', url: 'https://b.test', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+        { id: 'c', url: 'https://c.test', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      const callOrder: string[] = [];
+      jest.spyOn(global, 'fetch').mockImplementation(async (url: string) => {
+        callOrder.push(url as string);
+        return { ok: true, status: 200, headers: new Map() } as unknown as Response;
+      });
+
+      await service.notifyPolicyStatusChange({
+        policyId: 'p1',
+        fromStatus: 'ACTIVE',
+        toStatus: 'CLAIMED',
+        timestamp: Date.now(),
+      });
+
+      // All three should have been called
+      expect(callOrder).toHaveLength(3);
+    });
+  });
+
+  describe('#614 — delivery status feedback', () => {
+    it('returns delivery results with success/failure per registration', async () => {
+      const { service } = build([
+        { id: 'a', url: 'https://a.test', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+        { id: 'b', url: 'https://b.test', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      let callCount = 0;
+      jest.spyOn(global, 'fetch').mockImplementation(async (url: string) => {
+        callCount++;
+        if (url === 'https://b.test') {
+          return { ok: false, status: 500, headers: new Map() } as unknown as Response;
+        }
+        return { ok: true, status: 200, headers: new Map() } as unknown as Response;
+      });
+
+      const results = await service.notifyPolicyStatusChange({
+        policyId: 'p1',
+        fromStatus: 'ACTIVE',
+        toStatus: 'CLAIMED',
+        timestamp: Date.now(),
+      });
+
+      expect(results).toHaveLength(2);
+      const successResult = results.find((r) => r.registrationId === 'a');
+      const failResult = results.find((r) => r.registrationId === 'b');
+      expect(successResult?.success).toBe(true);
+      expect(failResult?.success).toBe(false);
+    });
+  });
+
+  describe('#613 — response signature verification', () => {
+    it('verifies response signature when present', async () => {
+      const { service } = build([
+        { id: 'a', url: 'https://a.test', secret: 'mysecret', events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      const responseBody = '{"status":"ok"}';
+      const expectedResponseSig = crypto.createHmac('sha256', 'mysecret').update(responseBody).digest('base64');
+
+      const responseHeaders = new Map([['x-webhook-signature-response', expectedResponseSig]]);
+      jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: responseHeaders,
+        text: async () => responseBody,
+      } as unknown as Response);
+
+      await expect(
+        service.notifyPolicyStatusChange({
+          policyId: 'p1',
+          fromStatus: 'ACTIVE',
+          toStatus: 'CLAIMED',
+          timestamp: Date.now(),
+        }),
+      ).resolves.toEqual(
+        expect.arrayContaining([expect.objectContaining({ success: true })]),
+      );
+    });
+
+    it('rejects when response signature does not match', async () => {
+      const { service } = build([
+        { id: 'a', url: 'https://a.test', secret: 'mysecret', events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      const responseHeaders = new Map([['x-webhook-signature-response', 'badsignature']]);
+      jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: responseHeaders,
+        text: async () => '{"status":"ok"}',
+      } as unknown as Response);
+
+      const results = await service.notifyPolicyStatusChange({
+        policyId: 'p1',
+        fromStatus: 'ACTIVE',
+        toStatus: 'CLAIMED',
+        timestamp: Date.now(),
+      });
+
+      expect(results[0].success).toBe(false);
+      expect(results[0].error).toContain('signature verification failed');
     });
   });
 });
