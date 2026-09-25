@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { OracleService } from '../oracle/oracle.service';
-import { PolicyService, ProductSummary } from '../policy/policy.service';
+import { PolicyService, ProductSummary, PolicySummary } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
@@ -199,8 +199,8 @@ export class ClaimsService {
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
-        this.prisma.policy.update({
-          where: { id: policyId },
+        this.prisma.policy.updateMany({
+          where: { id: policyId, status: PolicyStatus.PROCESSING },
           data:  { status: PolicyStatus.ACTIVE },
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Product not found'),
@@ -231,8 +231,8 @@ export class ClaimsService {
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
-        this.prisma.policy.update({
-          where: { id: policyId },
+        this.prisma.policy.updateMany({
+          where: { id: policyId, status: PolicyStatus.PROCESSING },
           data:  { status: PolicyStatus.ACTIVE },
         }),
 this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
@@ -295,8 +295,8 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
-        this.prisma.policy.update({
-          where: { id: policyId },
+        this.prisma.policy.updateMany({
+          where: { id: policyId, status: PolicyStatus.PROCESSING },
           data:  { status: PolicyStatus.ACTIVE },
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'On-chain payout failed'),
@@ -629,12 +629,15 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     };
   }
 
-  async getClaim(claimId: string): Promise<ClaimSummary | null> {
+  async getClaim(claimId: string): Promise<(ClaimSummary & { policy?: PolicySummary }) | null> {
     this.logger.log(`get_claim: ${claimId}`);
-    const claim = await this.prisma.claim.findUnique({ where: { id: claimId } });
+    const claim = await this.prisma.claim.findUnique({
+      where: { id: claimId },
+      include: { policy: true },
+    });
     if (!claim) return null;
 
-    return {
+    const summary: ClaimSummary & { policy?: PolicySummary } = {
       id:             claim.id,
       policyId:       claim.policyId,
       claimant:       claim.claimant,
@@ -649,5 +652,21 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       txHash:         claim.txHash,
       createdAt:      Math.floor(claim.createdAt.getTime() / 1000),
     };
+
+    if (claim.policy) {
+      summary.policy = {
+        id:             claim.policy.id,
+        productId:      claim.policy.productId,
+        policyholder:   claim.policy.policyholder,
+        coverage:       claim.policy.coverageXlm.toString(),
+        premiumPaid:    claim.policy.premiumPaid.toString(),
+        oracleKey:      claim.policy.oracleKey,
+        startTime:      Math.floor(claim.policy.startTime.getTime() / 1000),
+        endTime:        Math.floor(claim.policy.endTime.getTime() / 1000),
+        status:         claim.policy.status,
+      };
+    }
+
+    return summary;
   }
 }
