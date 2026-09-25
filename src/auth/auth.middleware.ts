@@ -33,6 +33,12 @@ export class AuthMiddleware implements NestMiddleware {
     res.status(401).json(body);
   }
 
+  /** Truncate a wallet address to first 8 + last 4 characters for safe logging. */
+  private truncateAddress(address: string): string {
+    if (address.length <= 12) return address;
+    return `${address.slice(0, 8)}...${address.slice(-4)}`;
+  }
+
   async use(req: Request & { wallet?: string }, res: Response, next: NextFunction): Promise<void> {
     const address   = req.headers['x-wallet-address'] as string | undefined;
     const signature = req.headers['x-wallet-signature'] as string | undefined;
@@ -58,7 +64,7 @@ export class AuthMiddleware implements NestMiddleware {
     // pure waste. Stellar public keys are base32-encoded 56-character strings
     // starting with G (public) or S (seed).
     if (!/^[GS][A-Z2-7]{55}$/.test(address)) {
-      this.logger.warn(`Header-auth rejected: invalid wallet address format "${address}"`);
+      this.logger.warn(`Header-auth rejected: invalid wallet address format "${this.truncateAddress(address)}"`);
       this.unauthorized(res, {
         statusCode: 401,
         message:    'Invalid wallet address format. Must be a 56-character Stellar address starting with G or S.',
@@ -74,13 +80,13 @@ export class AuthMiddleware implements NestMiddleware {
         select: { nonce: true, expiresAt: true },
       });
     } catch (err) {
-      this.logger.warn(`Challenge lookup failed for ${address}: ${err}`);
+      this.logger.warn(`Challenge lookup failed for ${this.truncateAddress(address)}: ${err}`);
       this.unauthorized(res, { statusCode: 401, message: 'Authentication service unavailable' });
       return;
     }
 
     if (!challenge) {
-      this.logger.warn(`Header-auth rejected: no challenge found for ${address}`);
+      this.logger.warn(`Header-auth rejected: no challenge found for ${this.truncateAddress(address)}`);
       this.unauthorized(res, {
         statusCode: 401,
         message:    'No auth challenge found. Request a challenge via GET /auth/challenge first.',
@@ -89,7 +95,7 @@ export class AuthMiddleware implements NestMiddleware {
     }
 
     if (challenge.expiresAt < new Date()) {
-      this.logger.warn(`Header-auth rejected: challenge expired for ${address}`);
+      this.logger.warn(`Header-auth rejected: challenge expired for ${this.truncateAddress(address)}`);
       await this.prisma.authChallenge.delete({ where: { walletAddress: address } }).catch(() => {});
       this.unauthorized(res, { statusCode: 401, message: 'Auth challenge expired. Request a new challenge.' });
       return;
@@ -107,12 +113,12 @@ export class AuthMiddleware implements NestMiddleware {
       messageBuffer.copy(paddedMessage);
       nonceBuffer.copy(paddedNonce);
       if (!timingSafeEqual(paddedMessage, paddedNonce)) {
-        this.logger.warn(`Header-auth rejected: message does not match nonce for ${address}`);
+        this.logger.warn(`Header-auth rejected: message does not match nonce for ${this.truncateAddress(address)}`);
         this.unauthorized(res, { statusCode: 401, message: 'Invalid challenge message' });
         return;
       }
     } catch (err) {
-      this.logger.warn(`Header-auth rejected: nonce comparison failed for ${address}`);
+      this.logger.warn(`Header-auth rejected: nonce comparison failed for ${this.truncateAddress(address)}`);
       this.unauthorized(res, { statusCode: 401, message: 'Invalid challenge message' });
       return;
     }
@@ -124,23 +130,23 @@ export class AuthMiddleware implements NestMiddleware {
       const isValid      = keypair.verify(messageBytes, sigBytes);
 
       if (!isValid) {
-        this.logger.warn(`Invalid signature from wallet: ${address}`);
+        this.logger.warn(`Invalid signature from wallet: ${this.truncateAddress(address)}`);
         this.unauthorized(res, { statusCode: 401, message: 'Invalid wallet signature' });
         return;
       }
     } catch (err) {
-      this.logger.warn(`Signature verification error for ${address}: ${err}`);
+      this.logger.warn(`Signature verification error for ${this.truncateAddress(address)}: ${err}`);
       this.unauthorized(res, { statusCode: 401, message: 'Signature verification failed' });
       return;
     }
 
     // Invalidate the nonce (one-time use)
     await this.prisma.authChallenge.delete({ where: { walletAddress: address } }).catch((err) => {
-      this.logger.warn(`Failed to delete challenge for ${address}: ${err}`);
+      this.logger.warn(`Failed to delete challenge for ${this.truncateAddress(address)}: ${err}`);
     });
 
     req.wallet = address;
-    this.logger.log(`Wallet authenticated via header: ${address}`);
+    this.logger.log(`Wallet authenticated via header: ${this.truncateAddress(address)}`);
     next();
   }
 }
