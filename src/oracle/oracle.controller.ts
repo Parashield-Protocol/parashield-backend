@@ -228,6 +228,9 @@ export class OracleController {
   @ApiResponse({ status: 201, description: "Returns the fetched oracle reading" })
   @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
   async fetchRainfall(@Body() dto: OracleFeedRequestDto) {
+    if (!Number.isInteger(dto.month) || dto.month < 1 || dto.month > 12) {
+      throw new BadRequestException('month must be an integer between 1 and 12');
+    }
     const reading = await this.oracle.fetchRainfall(
       dto.lat,
       dto.lng,
