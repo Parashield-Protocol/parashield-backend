@@ -450,7 +450,7 @@ export class StellarService {
         this.logger.warn(`RPC operation timed out after ${timeoutMs}ms: ${operation}`);
         reject(
           new HttpException(
-            { message: `RPC operation timed out: ${operation}`, operation },
+            { message: 'RPC operation timed out' },
             HttpStatus.GATEWAY_TIMEOUT,
           ),
         );
