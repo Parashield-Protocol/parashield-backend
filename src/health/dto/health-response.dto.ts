@@ -204,6 +204,9 @@ export class HealthResponseDto {
   @ApiProperty({ description: 'Total health check duration in milliseconds', example: 125 })
   responseTimeMs: number;
 
+  @ApiProperty({ description: 'Server uptime in milliseconds since process started', example: 3600000 })
+  uptimeMs: number;
+
   @ApiProperty({ type: HealthChecksDto })
   checks: HealthChecksDto;
 

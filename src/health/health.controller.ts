@@ -1,8 +1,9 @@
-import { Controller, Get, Inject, Logger, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Get, Inject, Logger, HttpException, HttpStatus, Req } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiExtraModels } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
+import { Request } from 'express';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, StellarNetworkCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto } from './dto/health-response.dto';
@@ -85,6 +86,40 @@ export class HealthController {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
+  private sanitizeErrorMessage(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('password') || message.includes('connection') || message.includes('credentials')) {
+      return 'Service dependency unavailable';
+    }
+    if (message.includes('timeout') || message.includes('ECONNREFUSED')) {
+      return 'Connection timeout or refused';
+    }
+    if (message.length > 100) {
+      return 'An error occurred';
+    }
+    return message;
+  }
+
+  private getStatusFormat(acceptHeader: string | undefined): 'standard' | 'springboot' {
+    if (acceptHeader?.includes('application/vnd.spring-boot.actuator')) {
+      return 'springboot';
+    }
+    return 'standard';
+  }
+
+  private transformStatusFormat(
+    body: HealthResponseDto,
+    format: 'standard' | 'springboot',
+  ): any {
+    if (format === 'springboot') {
+      return {
+        ...body,
+        status: body.status === 'ok' ? 'UP' : 'DOWN',
+      };
+    }
+    return body;
+  }
+
   /**
    * GET /api/v1/health
    * Returns service health status including DB, Stellar, queue, and external
@@ -100,7 +135,7 @@ export class HealthController {
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
-  async check(): Promise<HealthResponseDto> {
+  async check(@Req() req: Request): Promise<HealthResponseDto> {
     const startTime = Date.now();
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
@@ -128,7 +163,9 @@ export class HealthController {
       await this.prisma.$queryRaw`SELECT 1`;
     } catch (err) {
       dbStatus = 'error';
-      this.logger.error(`Health check DB query failed: ${err instanceof Error ? err.message : String(err)}`);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      dbError = this.sanitizeErrorMessage(err);
+      this.logger.error(`Health check DB query failed: ${errorMsg}`);
     }
 
     // #444/#471 — connection pool health: query pg_stat_activity so load
@@ -162,9 +199,9 @@ export class HealthController {
 
       if (exhausted) {
         dbStatus = 'error';
-        const poolMsg = `Connection pool utilization ${utilizationPercent}% (${active}/${maxConnections} active) meets or exceeds the exhaustion warning threshold of ${warnPercent}%`;
+        const poolMsg = `Connection pool exhausted`;
         dbError = dbError ? `${dbError}; ${poolMsg}` : poolMsg;
-        this.logger.error(`Health check: ${poolMsg}`);
+        this.logger.error(`Health check: Connection pool utilization ${utilizationPercent}% (${active}/${maxConnections} active) meets or exceeds the exhaustion warning threshold of ${warnPercent}%`);
       }
     } catch {
       // Non-fatal: pg_stat_activity may be restricted on managed databases.
@@ -184,8 +221,9 @@ export class HealthController {
     } catch (err) {
       stellarRpcStatus = 'error';
       stellarStatus    = 'error';
-      stellarError     = `Stellar RPC unreachable: ${err instanceof Error ? err.message : String(err)}`;
-      this.logger.error(`Health check: ${stellarError}`);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      stellarError     = `Stellar RPC unreachable`;
+      this.logger.error(`Health check: Stellar RPC unreachable: ${errorMsg}`);
     }
 
     // #474 — Stellar network status check. Reachability (above) doesn't
@@ -203,18 +241,20 @@ export class HealthController {
       };
       if (!net.healthy) {
         stellarStatus = 'error';
-        const netMsg = !net.passphraseMatches
+        const netMsg = `Stellar network not operational`;
+        stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
+        const detailedMsg = !net.passphraseMatches
           ? 'Stellar RPC is serving a different network than the configured STELLAR_NETWORK'
           : `Stellar network not operational: RPC health is "${net.rpcHealth}"`;
-        stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
-        this.logger.error(`Health check: ${netMsg}`);
+        this.logger.error(`Health check: ${detailedMsg}`);
       }
     } catch (err) {
       stellarNetwork = { status: 'error' };
       stellarStatus = 'error';
-      const netMsg = `Stellar network status check failed: ${err instanceof Error ? err.message : String(err)}`;
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const netMsg = `Stellar network status check failed`;
       stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
-      this.logger.error(`Health check: ${netMsg}`);
+      this.logger.error(`Health check: Stellar network status check failed: ${errorMsg}`);
     }
 
     try {
@@ -233,12 +273,13 @@ export class HealthController {
       );
       if (Number(keeperBalanceXlm) < minBalance) {
         stellarStatus = 'error';
-        stellarError  = `Keeper balance ${keeperBalanceXlm} XLM is below the minimum floor of ${minBalance} XLM`;
-        this.logger.error(`Health check: ${stellarError}`);
+        stellarError  = `Keeper balance insufficient`;
+        this.logger.error(`Health check: Keeper balance ${keeperBalanceXlm} XLM is below the minimum floor of ${minBalance} XLM`);
       }
     } catch (err) {
       stellarStatus = 'error';
-      this.logger.error(`Health check Stellar keeper/Horizon failed: ${err instanceof Error ? err.message : String(err)}`);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Health check Stellar keeper/Horizon failed: ${errorMsg}`);
     }
 
     // #403 — Redis/message queue connectivity check.
@@ -252,8 +293,8 @@ export class HealthController {
       const pong = await this.redis.ping();
       if (pong !== 'PONG') {
         queueStatus = 'error';
-        queueError  = `Redis PING returned unexpected response: ${pong}`;
-        this.logger.error(`Health check: ${queueError}`);
+        queueError  = `Redis connectivity issue`;
+        this.logger.error(`Health check: Redis PING returned unexpected response: ${pong}`);
       } else {
         // #421 — Report waiting job counts for known Bull queues so ops can
         // detect build-up before processing latency becomes user-visible.
@@ -268,8 +309,9 @@ export class HealthController {
       }
     } catch (err) {
       queueStatus = 'error';
-      queueError  = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Health check Redis failed: ${queueError}`);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      queueError  = this.sanitizeErrorMessage(err);
+      this.logger.error(`Health check Redis failed: ${errorMsg}`);
     }
 
     // Background worker (cron consumer) heartbeat check.
@@ -323,16 +365,17 @@ export class HealthController {
           const res = await fetch(OPEN_METEO_HEALTH_URL, { signal: controller.signal });
           if (!res.ok) {
             openMeteoStatus = 'error';
-            openMeteoError  = `Open-Meteo responded with HTTP ${res.status}`;
-            this.logger.error(`Health check: ${openMeteoError}`);
+            openMeteoError  = `External API unavailable`;
+            this.logger.error(`Health check: Open-Meteo responded with HTTP ${res.status}`);
           }
         } finally {
           clearTimeout(timeout);
         }
       } catch (err) {
         openMeteoStatus = 'error';
-        openMeteoError  = err instanceof Error ? err.message : String(err);
-        this.logger.error(`Health check Open-Meteo failed: ${openMeteoError}`);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        openMeteoError  = this.sanitizeErrorMessage(err);
+        this.logger.error(`Health check Open-Meteo failed: ${errorMsg}`);
       }
 
       // AviationStack reachability check.
@@ -349,16 +392,17 @@ export class HealthController {
           const res = await fetch(AVIATIONSTACK_HEALTH_URL, { signal: controller.signal });
           if (res.status >= 500) {
             aviationStackStatus = 'error';
-            aviationStackError  = `AviationStack responded with HTTP ${res.status}`;
-            this.logger.error(`Health check: ${aviationStackError}`);
+            aviationStackError  = `External API unavailable`;
+            this.logger.error(`Health check: AviationStack responded with HTTP ${res.status}`);
           }
         } finally {
           clearTimeout(timeout);
         }
       } catch (err) {
         aviationStackStatus = 'error';
-        aviationStackError  = err instanceof Error ? err.message : String(err);
-        this.logger.error(`Health check AviationStack failed: ${aviationStackError}`);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        aviationStackError  = this.sanitizeErrorMessage(err);
+        this.logger.error(`Health check AviationStack failed: ${errorMsg}`);
       }
 
       this.externalApiCache = {
@@ -571,9 +615,9 @@ export class HealthController {
       },
     };
 
-    const healthy = 
-      dbStatus === 'ok' && 
-      stellarStatus === 'ok' && 
+    const healthy =
+      dbStatus === 'ok' &&
+      stellarStatus === 'ok' &&
       queueStatus === 'ok' &&
       openMeteoStatus === 'ok' &&
       aviationStackStatus === 'ok';
@@ -584,6 +628,7 @@ export class HealthController {
       service:   'parashield-api',
       version:   this.config.get<string>('npm_package_version') ?? process.env.npm_package_version ?? 'unknown',
       responseTimeMs: Date.now() - startTime,
+      uptimeMs: Math.round(process.uptime() * 1000),
       versions: {
         database: this.config.get<string>('DATABASE_VERSION') ?? 'PostgreSQL',
         redis: this.config.get<string>('REDIS_VERSION') ?? 'Redis',
@@ -592,10 +637,13 @@ export class HealthController {
       checks: checks as any,
     };
 
+    const statusFormat = this.getStatusFormat(req.headers['accept']);
+    const responseBody = this.transformStatusFormat(body, statusFormat);
+
     if (!healthy) {
-      throw new HttpException(body, HttpStatus.SERVICE_UNAVAILABLE);
+      throw new HttpException(responseBody, HttpStatus.SERVICE_UNAVAILABLE);
     }
 
-    return body;
+    return responseBody as HealthResponseDto;
   }
 }

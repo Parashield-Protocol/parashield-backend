@@ -347,6 +347,35 @@ export class OracleService {
     };
   }
 
+  private async executeWithRateLimitBackoff<T>(
+    fn: () => Promise<T>,
+    maxRetries: number = 3,
+    initialDelayMs: number = 1000,
+  ): Promise<T> {
+    let lastError: any;
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (error: any) {
+        lastError = error;
+        const status = error.response?.status;
+        if (status === 429) {
+          const retryAfter = error.response?.headers?.['retry-after'] ?? String(Math.pow(2, attempt));
+          const delayMs = parseInt(retryAfter) * 1000;
+          this.logger.warn(
+            `Rate limited (429). Attempt ${attempt + 1}/${maxRetries}. Retrying in ${delayMs}ms`,
+          );
+          if (attempt < maxRetries - 1) {
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+          }
+        } else {
+          throw error;
+        }
+      }
+    }
+    throw lastError;
+  }
+
   /** Fetch rainfall in mm for a lat/lng coordinate without persisting it. */
   async fetchRainfallReading(
     lat: number,
@@ -372,9 +401,11 @@ export class OracleService {
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
 
     const res = await this.openMeteoBreaker.execute(() =>
-      axios.get<{
-        daily: { precipitation_sum: (number | null)[]; time: string[] };
-      }>(url, { timeout: 10_000 }),
+      this.executeWithRateLimitBackoff(() =>
+        axios.get<{
+          daily: { precipitation_sum: (number | null)[]; time: string[] };
+        }>(url, { timeout: 10_000 }),
+      ),
     );
 
     // Validate upstream response structure (#560).
@@ -483,9 +514,11 @@ export class OracleService {
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
     const res = await this.openMeteoBreaker.execute(() =>
-      axios.get<{
-        daily: { temperature_2m_max: (number | null)[]; time: string[] };
-      }>(url, { timeout: 10_000 }),
+      this.executeWithRateLimitBackoff(() =>
+        axios.get<{
+          daily: { temperature_2m_max: (number | null)[]; time: string[] };
+        }>(url, { timeout: 10_000 }),
+      ),
     );
 
     // Validate upstream response structure (#560).
@@ -575,14 +608,16 @@ export class OracleService {
     }
     const url = `https://api.aviationstack.com/v1/flights?flight_iata=${flightNumber}&flight_date=${date}`;
     const res = await this.aviationStackBreaker.execute(() =>
-      axios.get<{
-        data?: Array<{ departure?: { delay?: number | null } | null } | null>;
-      }>(url, {
-        timeout: 10_000,
-        headers: {
-          'Authorization': `Bearer ${apiKey}`
-        }
-      }),
+      this.executeWithRateLimitBackoff(() =>
+        axios.get<{
+          data?: Array<{ departure?: { delay?: number | null } | null } | null>;
+        }>(url, {
+          timeout: 10_000,
+          headers: {
+            'Authorization': `Bearer ${apiKey}`
+          }
+        }),
+      ),
     );
     const key = `flight:${flightNumber}:${date}`;
 
