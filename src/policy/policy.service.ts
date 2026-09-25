@@ -110,6 +110,11 @@ export class PolicyService {
     const denominator = BigInt(10000 * 30);
     const floored = numerator / denominator;
     const remainder = numerator % denominator;
+    // #598 — ceiling (round-up) is used instead of standard rounding to protect
+    // the insurance pool from under-collection. Standard rounding would round
+    // down for remainders < 0.5, allowing the pool to collect less than the
+    // actuarial cost of coverage. Ceiling ensures the pool always collects at
+    // least the full computed premium, keeping it solvent for payouts.
     return Number(remainder > 0n ? floored + 1n : floored);
   }
 

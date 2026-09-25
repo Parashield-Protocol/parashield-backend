@@ -113,7 +113,7 @@ export class ClaimsController {
   @ApiResponse({ status: 200, description: 'Returns claim details', schema: { $ref: getSchemaPath(ResponseDto) } })
   @ApiErrorResponse(403, 'Claim belongs to a different wallet.', undefined, 'Claim belongs to a different wallet')
   @ApiErrorResponse(404, 'No claim found for the given ID.', undefined, 'Claim not found')
-  async getClaim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
+  async getClaim(@Param('id', ParseUUIDPipe) id: string, @Req() req: AuthenticatedRequest) {
     const claim = await this.claims.getClaim(id);
     if (!claim) {
       throw new NotFoundException({ message: 'Claim not found', errorCode: ErrorCode.CLAIM_NOT_FOUND });
