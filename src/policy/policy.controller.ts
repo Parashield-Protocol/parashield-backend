@@ -451,6 +451,8 @@ export class PolicyController {
       subscriber.next({ data: { policyId: id, status: policyData.status, timestamp: Date.now() } });
 
       const unsubscribe = this.statusEvents.subscribeToPolicyStatus(id, (event) => {
+        subscriber.next({ data: event });
+      }, authedWallet);
         if (!subscriber.closed) {
           subscriber.next({ data: event });
         }

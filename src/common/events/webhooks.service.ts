@@ -28,6 +28,7 @@ export interface WebhookDeliveryResult {
 // each attempt (1 s → 2 s → 4 s by default).
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
+const WEBHOOK_TIMEOUT_MS = 10_000;
 
 // #606 — AES-256-GCM parameters for encrypting webhook secrets at rest.
 // SHA-256 of WEBHOOK_SECRET_KEY always yields the 32-byte key AES-256 requires.
@@ -99,6 +100,9 @@ export class WebhooksService {
   // #606 — signing secrets are encrypted at rest with AES-256-GCM when
   // WEBHOOK_SECRET_KEY is configured.
   async registerWebhook(dto: { url: string; events: WebhookEvent[]; secret?: string }) {
+    if (!dto.url || !dto.url.startsWith('https://')) {
+      throw new BadRequestException('Webhook URL must start with https://');
+    }
     const storedSecret = dto.secret ? this.encryptSecret(dto.secret) : dto.secret;
     const registration = await this.prisma.webhookRegistration.create({
       data: { url: dto.url, secret: storedSecret, events: dto.events },
@@ -281,14 +285,22 @@ export class WebhooksService {
       headers['X-Webhook-Signature'] = this.signPayload(payload, secret);
     }
 
-    const response = await fetch(registration.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
 
-    if (!response.ok) {
-      throw new Error(`Webhook responded with ${response.status}`);
+    try {
+      const response = await fetch(registration.url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Webhook responded with ${response.status}`);
+      }
+    } finally {
+      clearTimeout(timeout);
     }
 
     // #613 — Verify response signature if the endpoint provides one.
