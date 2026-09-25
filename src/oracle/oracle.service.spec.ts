@@ -769,6 +769,24 @@ describe("OracleService.fetchRainfall", () => {
       );
     });
 
+    it("places a float timestamp just below a boundary in the earlier bucket (#521)", () => {
+      // 2026-06-27T11:00:00.000Z is exactly a boundary; subtract a tiny float
+      // fraction so the raw ms product is 1 ULP above the boundary — without
+      // Math.trunc this would slip into the 11:00 bucket instead of 10:00.
+      const boundarySeconds = Date.parse("2026-06-27T11:00:00.000Z") / 1000;
+      const justBefore = boundarySeconds - 0.0001; // 10:59:59.9999
+      expect(service.bucketStartFor(justBefore).toISOString()).toBe(
+        "2026-06-27T10:00:00.000Z",
+      );
+    });
+
+    it("places a float timestamp at the boundary in the new bucket (#521)", () => {
+      const boundarySeconds = Date.parse("2026-06-27T11:00:00.000Z") / 1000;
+      expect(service.bucketStartFor(boundarySeconds).toISOString()).toBe(
+        "2026-06-27T11:00:00.000Z",
+      );
+    });
+
     it("upserts on (key, source, bucketStart) so a repeated cron run cannot insert twice", async () => {
       await service.persistReading(reading);
       await service.persistReading({ ...reading, timestamp: reading.timestamp + 900 });

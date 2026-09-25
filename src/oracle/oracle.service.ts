@@ -147,7 +147,10 @@ export class OracleService {
     timestampSeconds: number,
     bucketMs: number = ORACLE_BUCKET_MS,
   ): Date {
-    const ms = timestampSeconds * 1000;
+    // Truncate to whole seconds before converting to ms so that a float input
+    // very close to a bucket boundary (e.g. 1719576599.9999) maps to the same
+    // bucket as its integer counterpart rather than slipping into the next one.
+    const ms = Math.trunc(timestampSeconds) * 1000;
     return new Date(Math.floor(ms / bucketMs) * bucketMs);
   }
 
