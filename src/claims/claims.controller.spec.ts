@@ -26,11 +26,12 @@ describe('ClaimsController', () => {
   describe('submitClaim', () => {
     it('submits a claim for the authenticated wallet', async () => {
       mockClaims.submitClaim.mockResolvedValue('claim-1');
+      mockClaims.getClaim.mockResolvedValue({ id: 'claim-1' } as any);
 
       const result = await controller.submitClaim({ policyId: 'policy-1' } as any, reqWith(WALLET));
 
       expect(mockClaims.submitClaim).toHaveBeenCalledWith(WALLET, 'policy-1');
-      expect(result).toEqual({ success: true, data: { claimId: 'claim-1' } });
+      expect(result).toEqual({ success: true, data: { claimId: 'claim-1', claim: { id: 'claim-1' } } });
     });
 
     it('throws Unauthorized when there is no authenticated wallet', async () => {
