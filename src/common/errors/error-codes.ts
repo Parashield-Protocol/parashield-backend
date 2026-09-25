@@ -21,11 +21,32 @@ export enum ErrorCode {
   CONFLICT              = 'CONFLICT',
   GONE                  = 'GONE',
 
+  // ── Claims (#591) ─────────────────────────────────────────────────────────
+  CLAIM_NOT_FOUND           = 'CLAIM_NOT_FOUND',
+  CLAIM_ALREADY_EXISTS      = 'CLAIM_ALREADY_EXISTS',
+  CLAIM_CLAIMANT_MISMATCH   = 'CLAIM_CLAIMANT_MISMATCH',
+  CLAIM_WALLET_MISMATCH     = 'CLAIM_WALLET_MISMATCH',
+  CLAIM_POLICY_NOT_FOUND    = 'CLAIM_POLICY_NOT_FOUND',
+  CLAIM_POLICY_NOT_OWNED    = 'CLAIM_POLICY_NOT_OWNED',
+  CLAIM_POLICY_NOT_ACTIVE   = 'CLAIM_POLICY_NOT_ACTIVE',
+  CLAIM_POLICY_EXPIRED      = 'CLAIM_POLICY_EXPIRED',
+
   // ── Rate limiting ─────────────────────────────────────────────────────────
   TOO_MANY_REQUESTS     = 'TOO_MANY_REQUESTS',
 
   // ── Service availability ──────────────────────────────────────────────────
   SERVICE_UNAVAILABLE   = 'SERVICE_UNAVAILABLE',
+}
+
+/**
+ * Reads a specific ErrorCode from an HttpException body of the form
+ * `{ message, errorCode }` (#591). Returns undefined for anything else so the
+ * caller can fall back to the status-derived code.
+ */
+export function errorCodeFromBody(raw: string | object): ErrorCode | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const code = (raw as Record<string, unknown>)['errorCode'];
+  return Object.values(ErrorCode).find((c) => c === code);
 }
 
 /** Maps an HTTP status code to its canonical ErrorCode. */

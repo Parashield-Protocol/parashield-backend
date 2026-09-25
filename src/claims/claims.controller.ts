@@ -18,6 +18,7 @@ import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
+import { ErrorCode } from '../common/errors/error-codes';
 
 @ApiTags('claims')
 @Controller('claims')
@@ -43,7 +44,7 @@ export class ClaimsController {
       throw new UnauthorizedException('Not authenticated');
     }
     if (dto.claimant && dto.claimant !== authedWallet) {
-      throw new ForbiddenException('Claimant does not match authenticated wallet');
+      throw new ForbiddenException({ message: 'Claimant does not match authenticated wallet', errorCode: ErrorCode.CLAIM_CLAIMANT_MISMATCH });
     }
     const claimId = await this.claims.submitClaim(authedWallet, dto.policyId);
     return { success: true, data: { claimId } };
@@ -78,7 +79,7 @@ export class ClaimsController {
     }
     const targetWallet = wallet || authedWallet;
     if (targetWallet !== authedWallet) {
-      throw new ForbiddenException('Wallet address does not match authenticated user');
+      throw new ForbiddenException({ message: 'Wallet address does not match authenticated user', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
     const result = await this.claims.getClaimsByWallet(
       targetWallet,
@@ -113,11 +114,11 @@ export class ClaimsController {
   async getClaim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const claim = await this.claims.getClaim(id);
     if (!claim) {
-      throw new NotFoundException('Claim not found');
+      throw new NotFoundException({ message: 'Claim not found', errorCode: ErrorCode.CLAIM_NOT_FOUND });
     }
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (claim.claimant !== authedWallet) {
-      throw new ForbiddenException('Claim belongs to a different wallet');
+      throw new ForbiddenException({ message: 'Claim belongs to a different wallet', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
     return { success: true, data: claim };
   }
@@ -154,7 +155,7 @@ export class ClaimsController {
     }
     const targetWallet = wallet || authedWallet;
     if (targetWallet !== authedWallet) {
-      throw new ForbiddenException('Cannot read claims for another wallet');
+      throw new ForbiddenException({ message: 'Cannot read claims for another wallet', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
     const result = await this.claims.getClaimsByWallet(
       targetWallet,

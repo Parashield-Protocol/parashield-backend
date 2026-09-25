@@ -193,6 +193,15 @@ describe('ClaimsService', () => {
       await expect(service.submitClaim(CLAIMANT, POLICY_ID)).rejects.toThrow(ConflictException);
     });
 
+    it('#591 — attaches a machine-readable errorCode when the policy is not active', async () => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue({ ...ACTIVE_POLICY, status: 'EXPIRED' });
+
+      await expect(service.submitClaim(CLAIMANT, POLICY_ID)).rejects.toMatchObject({
+        response: { errorCode: 'CLAIM_POLICY_NOT_ACTIVE' },
+      });
+    });
+
     it('#177 — throws ForbiddenException when the caller does not own the policy', async () => {
       const STRANGER = 'GBSTRANGERWALLET000000000000000000000000000000000000000';
       mockPrismaService.claim.findFirst.mockResolvedValue(null);
@@ -449,7 +458,7 @@ describe('ClaimsService', () => {
         confidence: 90,
       });
       mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
-      mockStellarService.invokeContract.mockResolvedValue('tx-hash-abc');
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
       const result = await service.autoProcess(POLICY_ID);
       expect(result).toBe('Paid');
@@ -470,7 +479,7 @@ describe('ClaimsService', () => {
         confidence: 90,
       });
       mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
-      mockStellarService.invokeContract.mockResolvedValue('tx-hash-xyz');
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
       await service.autoProcess(POLICY_ID);
 
@@ -519,7 +528,7 @@ describe('ClaimsService', () => {
         confidence: 90,
       });
       mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
-      mockStellarService.invokeContract.mockResolvedValue('tx-hash-paid');
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
       const result = await service.autoProcess(POLICY_ID);
       expect(result).toBe('Paid');
@@ -531,7 +540,7 @@ describe('ClaimsService', () => {
           data: expect.objectContaining({
             status:    'PAID',
             triggerMet: true,
-            txHash:    'tx-hash-paid',
+            txHash:    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
           }),
         }),
       );
@@ -560,7 +569,7 @@ describe('ClaimsService', () => {
         confidence: 90,
       });
       mockPolicyService.getProductById.mockResolvedValue(GT_PRODUCT);
-      mockStellarService.invokeContract.mockResolvedValue('tx-gt');
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
 
       const result = await service.autoProcess(POLICY_ID);
       expect(result).toBe('Paid');
@@ -568,6 +577,25 @@ describe('ClaimsService', () => {
         expect.any(String),
         'process_claim',
         expect.any(Array),
+      );
+    });
+
+    it('#593 — treats a malformed contract response as a failed payout', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-bad-hash', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(200_000_000),
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT);
+      mockStellarService.invokeContract.mockResolvedValue('not-a-tx-hash');
+
+      const result = await service.autoProcess(POLICY_ID);
+      expect(result).toBe('Rejected');
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
       );
     });
 
@@ -677,7 +705,7 @@ describe('ClaimsService', () => {
         value:      BigInt(40_000_000), // < 50 threshold -> trigger met
         confidence: 90,
       });
-      mockStellarService.invokeContract.mockResolvedValue('tx-hash-cached');
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
       mockPrismaService.claim.update.mockResolvedValue({});
       mockPrismaService.policy.update.mockResolvedValue({});
 

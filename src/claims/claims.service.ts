@@ -9,6 +9,7 @@ import { transition } from '../policy/policy-status.machine';
 import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
+import { ErrorCode } from '../common/errors/error-codes';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -285,6 +286,12 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         'process_claim',
         [nativeToScVal(policyId, { type: 'string' })],
       );
+      // #593 — never trust the contract-invocation result: a Stellar transaction
+      // hash is exactly 64 hex characters. Anything else is treated as a failed
+      // payout so it is never persisted as a PAID txHash.
+      if (typeof txHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txHash)) {
+        throw new Error('Unexpected Soroban response: invalid transaction hash');
+      }
       this.logger.log(`Soroban payout initiated: txHash=${txHash} claimId=${claim.id}`);
     } catch (err) {
       // #165 — payout failure: mark claim FAILED and revert the atomic policy gate so
@@ -494,22 +501,25 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     // policy by watching for ConflictException vs ForbiddenException.
     const policy = await this.prisma.policy.findUnique({ where: { id: policyId } });
     if (!policy) {
-      throw new NotFoundException(`Policy ${policyId} not found`);
+      throw new NotFoundException({ message: `Policy ${policyId} not found`, errorCode: ErrorCode.CLAIM_POLICY_NOT_FOUND });
     }
     // #177 — the JWT-authenticated wallet must own the policy being claimed
     // against; otherwise any authenticated wallet could file a claim on
     // someone else's policy.
     if (policy.policyholder !== claimant) {
-      throw new ForbiddenException(`Wallet ${claimant} does not own policy ${policyId}`);
+      throw new ForbiddenException({ message: `Wallet ${claimant} does not own policy ${policyId}`, errorCode: ErrorCode.CLAIM_POLICY_NOT_OWNED });
     }
     if (policy.status !== PolicyStatus.ACTIVE) {
-      throw new ConflictException(`Policy ${policyId} is not active`);
+      throw new ConflictException({ message: `Policy ${policyId} is not active`, errorCode: ErrorCode.CLAIM_POLICY_NOT_ACTIVE });
     }
 
     // Expired check — policy.endTime is the authoritative reference, not the
     // lazily-updated status column (the EXPIRED cron runs at best once an hour).
     if (new Date() > policy.endTime) {
-      throw new ConflictException(`Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`);
+      throw new ConflictException({
+        message: `Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`,
+        errorCode: ErrorCode.CLAIM_POLICY_EXPIRED,
+      });
     }
 
     // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
@@ -524,7 +534,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       this.logger.warn(
         `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
       );
-      throw new ConflictException('Claim already exists for this policy');
+      throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
     }
 
     const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
@@ -550,7 +560,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Claim already exists for this policy');
+        throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
       }
       throw error;
     }

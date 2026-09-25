@@ -3,7 +3,7 @@ import {
   HttpException, HttpStatus, Logger,
 } from '@nestjs/common';
 import { Request, Response } from 'express';
-import { errorCodeFromStatus } from '../errors/error-codes';
+import { errorCodeFromBody, errorCodeFromStatus } from '../errors/error-codes';
 
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
@@ -50,7 +50,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     // { statusCode, message } body the frontend had to special-case.
     const body: Record<string, unknown> = {
       success:    false,
-      errorCode:  errorCodeFromStatus(status),
+      errorCode:  errorCodeFromBody(rawResponse) ?? errorCodeFromStatus(status),
       error:      message,
       statusCode: status,
       path:       req.url,

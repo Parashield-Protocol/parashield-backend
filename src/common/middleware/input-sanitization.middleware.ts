@@ -5,6 +5,9 @@ import { Request, Response, NextFunction } from 'express';
 // this depth is left untouched.
 const MAX_SANITIZATION_DEPTH = 10;
 
+// Keys that can be used for prototype pollution; dropped from request bodies.
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
 /**
  * InputSanitizationMiddleware (#380) — sanitizes user-provided strings in
  * JSON/urlencoded request bodies before they reach validation pipes, DTOs,
@@ -12,6 +15,7 @@ const MAX_SANITIZATION_DEPTH = 10;
  *
  * For every string it:
  *  - trims leading/trailing whitespace
+ *  - drops `__proto__`, `constructor` and `prototype` keys (#590)
  *  - escapes `<` and `>` so markup/script tags cannot survive into stored
  *    values and reflected responses (XSS)
  *
@@ -59,6 +63,7 @@ function sanitize(value: unknown, depth = 0): unknown {
 
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
+      if (FORBIDDEN_KEYS.has(key)) continue;
       result[key] = sanitize(item, depth + 1);
     }
     return result;
