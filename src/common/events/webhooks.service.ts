@@ -35,6 +35,11 @@ const WEBHOOK_TIMEOUT_MS = 10_000;
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12;
 
+// #624 — Maximum webhook payload size (1 MB). Payloads exceeding this
+// limit are rejected before being sent to avoid memory exhaustion on
+// the sender and HTTP 413 / connection issues on the receiver.
+const MAX_WEBHOOK_PAYLOAD_BYTES = 1_048_576;
+
 @Injectable()
 export class WebhooksService {
   private readonly logger = new Logger(WebhooksService.name);
@@ -251,7 +256,12 @@ export class WebhooksService {
 
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        // #625 — exponential backoff with full jitter. The delay is
+        // randomized between 0 and the exponential ceiling to spread
+        // retries across time and prevent thundering-herd effects when
+        // many webhooks fail simultaneously.
+        const exponentialDelay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        const delayMs = Math.floor(Math.random() * exponentialDelay);
         this.logger.warn(
           `Retrying webhook ${registration.id} → ${registration.url} ` +
           `(attempt ${attempt}/${MAX_RETRY_ATTEMPTS}, backoff ${delayMs} ms): ${lastError?.message}`,
@@ -276,6 +286,15 @@ export class WebhooksService {
   }
 
   private async deliverWebhook(registration: WebhookRegistration, payload: unknown): Promise<void> {
+    // #624 — reject oversized payloads before attempting delivery to
+    // prevent memory exhaustion and receiver-side HTTP 413 errors.
+    const payloadStr = JSON.stringify(payload);
+    if (Buffer.byteLength(payloadStr, 'utf8') > MAX_WEBHOOK_PAYLOAD_BYTES) {
+      throw new Error(
+        `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
+      );
+    }
+
     const secret = registration.secret;
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -292,7 +311,7 @@ export class WebhooksService {
       const response = await fetch(registration.url, {
         method: 'POST',
         headers,
-        body: JSON.stringify(payload),
+        body: payloadStr,
         signal: controller.signal,
       });
 

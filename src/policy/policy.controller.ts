@@ -136,7 +136,9 @@ export class PolicyController {
     // always the one actually used, making the param redundant and confusing.
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
-      throw new BadRequestException('Not authenticated');
+      throw new BadRequestException(
+        'Not authenticated. Please log in with a valid JWT token or Stellar wallet signature.',
+      );
     }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
@@ -213,7 +215,9 @@ export class PolicyController {
   async buyPolicy(@Req() req: AuthenticatedRequest, @Body() dto: BuyPolicyDto) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (dto.walletAddress !== authedWallet) {
-      throw new ForbiddenException('Wallet address does not match authenticated user');
+      throw new ForbiddenException(
+        `Wallet address in request (${dto.walletAddress}) does not match the authenticated wallet (${authedWallet}). Ensure you are signed in with the correct Stellar wallet.`,
+      );
     }
     // #487 — look up the one product we need instead of loading the whole
     // (paginated) active catalogue on every quote. getProductById only
@@ -285,10 +289,14 @@ export class PolicyController {
   async confirmPolicy(@Body() dto: ConfirmPolicyDto, @Req() req: AuthenticatedRequest) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
-      throw new UnauthorizedException('Not authenticated');
+      throw new UnauthorizedException(
+        'Not authenticated. Please log in with a valid JWT token or Stellar wallet signature.',
+      );
     }
     if (dto.walletAddress !== authedWallet) {
-      throw new ForbiddenException('Wallet address does not match authenticated user');
+      throw new ForbiddenException(
+        `Wallet address in request (${dto.walletAddress}) does not match the authenticated wallet (${authedWallet}). Ensure you are signed in with the correct Stellar wallet.`,
+      );
     }
     const result = await this.policy.confirmAndCreatePolicy(dto, authedWallet);
     return { success: true, data: result };

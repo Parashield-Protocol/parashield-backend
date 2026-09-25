@@ -53,6 +53,18 @@ export interface CancellationResult extends PolicySummary {
   refundAmountXlm: string;
 }
 
+// #622 — simple in-memory TTL cache for product catalog queries.
+// Products change infrequently and the list is read on every
+// unauthenticated GET /products request; caching avoids a DB round-trip
+// on every hit while staying simple (no Redis dependency for this).
+const PRODUCT_CACHE_TTL_MS = 30_000;
+interface ProductCacheEntry {
+  data: ProductSummary[];
+  total: number;
+  expiresAt: number;
+}
+const productCache = new Map<string, ProductCacheEntry>();
+
 export interface PremiumValidationResult {
   valid: boolean;
   reason?: string;
@@ -574,6 +586,18 @@ export class PolicyService {
   ): Promise<{ data: ProductSummary[]; total: number; page: number; limit: number }> {
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
+
+    // #622 — serve from cache when the query fits the default page (first
+    // page, default limit). Non-default pages always hit the DB because
+    // caching every possible pagination combination is not worthwhile.
+    const cacheKey = `${page}:${take}`;
+    const now = Date.now();
+    const cached = productCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
+      return { data: cached.data, total: cached.total, page, limit: take };
+    }
+
     this.logger.log(`get_active_products: page=${page} limit=${limit}`);
 
     const [dbProducts, total] = await this.prisma.$transaction([
@@ -599,6 +623,9 @@ export class PolicyService {
       maxDuration: product.maxDuration,
       status:      product.status,
     }));
+
+    // #622 — store in cache with TTL
+    productCache.set(cacheKey, { data, total, expiresAt: now + PRODUCT_CACHE_TTL_MS });
 
     this.logger.log(`get_active_products: ${data.length}/${total} products (page ${page})`);
     return { data, total, page, limit: take };
@@ -822,6 +849,8 @@ export class PolicyService {
   // through the API.
 
   async createProduct(dto: CreateProductDto): Promise<ProductSummary> {
+    // #622 — invalidate product cache after admin mutation
+    productCache.clear();
     const product = await this.prisma.product.create({
       data: {
         name:         dto.name,
@@ -841,6 +870,8 @@ export class PolicyService {
   }
 
   async updateProduct(id: string, dto: UpdateProductDto): Promise<ProductSummary> {
+    // #622 — invalidate product cache after admin mutation
+    productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
@@ -866,6 +897,8 @@ export class PolicyService {
 
   /** Deactivate a product (soft delete — existing policies still reference it). */
   async deactivateProduct(id: string): Promise<ProductSummary> {
+    // #622 — invalidate product cache after admin mutation
+    productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
