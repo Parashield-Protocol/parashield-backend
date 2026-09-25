@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { ConflictException, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ClaimsService } from './claims.service';
 import { StellarService } from '../stellar/stellar.service';
@@ -67,7 +67,7 @@ describe('ClaimsService', () => {
     $transaction: jest.fn(),
   };
 
-  const POLICY_ID = 'test-policy-uuid';
+  const POLICY_ID = '3f2b8c1e-5a4d-4e7f-9b6a-1c2d3e4f5a6b';
   const CLAIMANT  = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
 
   const ACTIVE_POLICY = {
@@ -177,6 +177,11 @@ describe('ClaimsService', () => {
           }),
         }),
       );
+    });
+
+    it('should throw BadRequestException without a DB lookup when policyId is not a UUID', async () => {
+      await expect(service.submitClaim(CLAIMANT, 'not-a-uuid')).rejects.toThrow(BadRequestException);
+      expect(mockPrismaService.policy.findUnique).not.toHaveBeenCalled();
     });
 
     it('should throw NotFoundException when policy does not exist', async () => {

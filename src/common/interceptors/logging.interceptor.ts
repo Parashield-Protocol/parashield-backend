@@ -9,10 +9,13 @@ import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import { Request, Response } from 'express';
 
+const HEALTH_PATH_PREFIX = '/api/v1/health';
+
 /**
  * LoggingInterceptor — logs every incoming request and its response time.
  *
  * Logs at the start of each request and on completion via tap().
+ * Health check requests are not logged.
  * Useful for monitoring slow endpoints and tracking API usage patterns.
  */
 @Injectable()
@@ -23,6 +26,13 @@ export class LoggingInterceptor implements NestInterceptor {
     const ctx     = context.switchToHttp();
     const request = ctx.getRequest<Request>();
     const { method, url } = request;
+
+    // Load balancer probes poll the health endpoint every few seconds; skip
+    // them so they don't drown out real request logs.
+    if (url.startsWith(HEALTH_PATH_PREFIX)) {
+      return next.handle();
+    }
+
     const startTime = Date.now();
 
     this.logger.log(`→ ${method} ${url}`);

@@ -517,6 +517,13 @@ describe("PolicyService.calculatePremium", () => {
       expect(service.calculatePremium(1000, 500, 30)).toBe(50);
     });
 
+    it("rejects out-of-range inputs", () => {
+      expect(() => service.calculatePremium(1_000_000_001, 500, 30)).toThrow(BadRequestException);
+      expect(() => service.calculatePremium(1000, 10001, 30)).toThrow(BadRequestException);
+      expect(() => service.calculatePremium(1000, 500, 366)).toThrow(BadRequestException);
+      expect(() => service.calculatePremium(1000, 500, 0)).toThrow(BadRequestException);
+    });
+
     it("rounds up when result is not a whole number", () => {
       // coverage=10, rate=100, duration=30 → 10*100*30 / 300000 = 0.1 → ceil = 1
       expect(service.calculatePremium(10, 100, 30)).toBe(1);

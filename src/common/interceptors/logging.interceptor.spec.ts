@@ -39,6 +39,19 @@ describe('LoggingInterceptor', () => {
     });
   });
 
+  it('does not log health check requests', (done) => {
+    const context = mockContext('GET', '/api/v1/health?deep=true', 200);
+    const next = { handle: () => of('response') };
+
+    interceptor.intercept(context, next).subscribe({
+      complete: () => {
+        expect(logger.log).not.toHaveBeenCalled();
+        expect(logger.warn).not.toHaveBeenCalled();
+        done();
+      },
+    });
+  });
+
   it('logs error response with warn level and inferred status', (done) => {
     const context = mockContext('POST', '/api/v1/circles', 500);
     const error = Object.assign(new Error('Internal Server Error'), { status: 502 });

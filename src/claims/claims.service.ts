@@ -1,4 +1,4 @@
-import { Injectable, Logger, ConflictException, NotFoundException, BadGatewayException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, ConflictException, NotFoundException, BadGatewayException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -43,6 +43,12 @@ export interface StuckPolicyRecoverySummary {
 // + one Soroban call), so this is far outside any legitimate in-flight window.
 const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 
+// #583 — minimum spacing between Soroban contract calls so a burst of policies
+// (e.g. a worker batch) doesn't trip the Stellar RPC rate limit.
+const CONTRACT_CALL_MIN_INTERVAL_MS = 250;
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -52,6 +58,7 @@ const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 @Injectable()
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
+  private nextContractCallAt = 0;
 
   constructor(
     private readonly stellar: StellarService,
@@ -62,6 +69,17 @@ export class ClaimsService {
     private readonly statusEvents: StatusEventsService,
     private readonly webhooks: WebhooksService,
   ) {}
+
+  // #583 — reserves the next call slot synchronously, then waits for it, so
+  // concurrent callers are spaced CONTRACT_CALL_MIN_INTERVAL_MS apart.
+  private async waitForContractCallSlot(): Promise<void> {
+    const now = Date.now();
+    const slot = Math.max(now, this.nextContractCallAt);
+    this.nextContractCallAt = slot + CONTRACT_CALL_MIN_INTERVAL_MS;
+    if (slot > now) {
+      await new Promise<void>((resolve) => setTimeout(resolve, slot - now));
+    }
+  }
 
   // #350 — builds an auditLog.create() operation to append to a
   // $transaction([...]) array alongside the status-changing write itself,
@@ -280,6 +298,7 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
 
     let txHash: string;
     try {
+      await this.waitForContractCallSlot();
       txHash = await this.stellar.invokeContract(
         contractId,
         'process_claim',
@@ -487,6 +506,11 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
   async submitClaim(claimant: string, policyId: string): Promise<string> {
     this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant}`);
 
+    // Policy ids are UUIDs — reject any other format before hitting the DB.
+    if (!UUID_PATTERN.test(policyId)) {
+      throw new BadRequestException('policyId must be a valid UUID');
+    }
+
     // #371 — Resolve policy and validate ownership FIRST, before any status
     // or duplicate-claim probes. Running the duplicate guard with only a
     // policyId before ownership checks would let an authenticated stranger
@@ -558,6 +582,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     try {
+      await this.waitForContractCallSlot();
       const txHash = await this.stellar.invokeContract(
         contractId,
         'submit_claim',
