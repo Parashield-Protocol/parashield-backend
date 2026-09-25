@@ -63,6 +63,11 @@ export interface OracleKeyValidationResult {
   reason?: string;
 }
 
+// Sanity bounds for calculatePremium inputs. Rate is in basis points (10000 = 100%).
+const MAX_PREMIUM_COVERAGE_XLM  = 1_000_000_000;
+const MAX_PREMIUM_RATE_BPS      = 10_000;
+const MAX_PREMIUM_DURATION_DAYS = 365;
+
 /**
  * PolicyService — reads policy and product data from the Policy Engine contract.
  * Persists purchased policies to the local PostgreSQL database via PrismaService
@@ -89,6 +94,18 @@ export class PolicyService {
    *   premium = ceil(coverage * rate * duration / (10000 * 30))
    */
   calculatePremium(coverageXlm: number, premiumRate: number, durationDays: number): number {
+    // BigInt cannot overflow, but unbounded inputs make the arithmetic
+    // needlessly expensive and can yield a premium that no longer fits in a
+    // Number. Reject out-of-range values before converting.
+    if (!Number.isInteger(coverageXlm) || coverageXlm < 1 || coverageXlm > MAX_PREMIUM_COVERAGE_XLM) {
+      throw new BadRequestException(`coverageXlm must be an integer between 1 and ${MAX_PREMIUM_COVERAGE_XLM}`);
+    }
+    if (!Number.isInteger(premiumRate) || premiumRate < 1 || premiumRate > MAX_PREMIUM_RATE_BPS) {
+      throw new BadRequestException(`premiumRate must be an integer between 1 and ${MAX_PREMIUM_RATE_BPS} basis points`);
+    }
+    if (!Number.isInteger(durationDays) || durationDays < 1 || durationDays > MAX_PREMIUM_DURATION_DAYS) {
+      throw new BadRequestException(`durationDays must be an integer between 1 and ${MAX_PREMIUM_DURATION_DAYS}`);
+    }
     const numerator = BigInt(coverageXlm) * BigInt(premiumRate) * BigInt(durationDays);
     const denominator = BigInt(10000 * 30);
     const floored = numerator / denominator;

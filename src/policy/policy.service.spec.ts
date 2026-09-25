@@ -201,6 +201,38 @@ describe("PolicyService.calculatePremium", () => {
       expect(result.valid).toBe(false);
       expect(result.reason).toContain("flight:flightNumber:YYYY-MM-DD");
     });
+
+    describe("rainfall period alignment at month boundaries (#592)", () => {
+      const key = "rainfall:-0.0917,34.7679:2026-06";
+      const check = (start: string, end: string, k = key) =>
+        service.validateOracleKey(k, cropProduct, new Date(start), new Date(end));
+
+      it("accepts a window inside the key month", () => {
+        expect(check("2026-06-01T00:00:00.000Z", "2026-06-30T00:00:00.000Z").valid).toBe(true);
+      });
+
+      it("rejects a window that ends exactly when the key month starts", () => {
+        expect(check("2026-05-01T00:00:00.000Z", "2026-06-01T00:00:00.000Z").valid).toBe(false);
+      });
+
+      it("accepts a window that ends one millisecond into the key month", () => {
+        expect(check("2026-05-01T00:00:00.000Z", "2026-06-01T00:00:00.001Z").valid).toBe(true);
+      });
+
+      it("rejects a window that starts exactly when the next month starts", () => {
+        expect(check("2026-07-01T00:00:00.000Z", "2026-07-31T00:00:00.000Z").valid).toBe(false);
+      });
+
+      it("accepts a window that starts on the last millisecond of the key month", () => {
+        expect(check("2026-06-30T23:59:59.999Z", "2026-07-15T00:00:00.000Z").valid).toBe(true);
+      });
+
+      it("handles the December to January year rollover", () => {
+        const dec = "rainfall:-0.0917,34.7679:2026-12";
+        expect(check("2026-12-15T00:00:00.000Z", "2027-01-10T00:00:00.000Z", dec).valid).toBe(true);
+        expect(check("2027-01-01T00:00:00.000Z", "2027-01-31T00:00:00.000Z", dec).valid).toBe(false);
+      });
+    });
   });
 
   describe("validatePoolCapacity", () => {
@@ -515,6 +547,13 @@ describe("PolicyService.calculatePremium", () => {
     it("returns the same result as float for exact multiples", () => {
       // coverage=1000, rate=500, duration=30 → 1000*500*30 / 300000 = 50 exactly
       expect(service.calculatePremium(1000, 500, 30)).toBe(50);
+    });
+
+    it("rejects out-of-range inputs", () => {
+      expect(() => service.calculatePremium(1_000_000_001, 500, 30)).toThrow(BadRequestException);
+      expect(() => service.calculatePremium(1000, 10001, 30)).toThrow(BadRequestException);
+      expect(() => service.calculatePremium(1000, 500, 366)).toThrow(BadRequestException);
+      expect(() => service.calculatePremium(1000, 500, 0)).toThrow(BadRequestException);
     });
 
     it("rounds up when result is not a whole number", () => {

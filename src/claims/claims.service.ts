@@ -1,14 +1,15 @@
-import { Injectable, Logger, ConflictException, NotFoundException, BadGatewayException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, ConflictException, NotFoundException, BadGatewayException, ForbiddenException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
 import { OracleService } from '../oracle/oracle.service';
-import { PolicyService, ProductSummary } from '../policy/policy.service';
+import { PolicyService, ProductSummary, PolicySummary } from '../policy/policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { transition } from '../policy/policy-status.machine';
 import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
+import { ErrorCode } from '../common/errors/error-codes';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -43,6 +44,12 @@ export interface StuckPolicyRecoverySummary {
 // + one Soroban call), so this is far outside any legitimate in-flight window.
 const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 
+// #589 — per-wallet claim totals are cached briefly so paginated history
+// requests don't run a COUNT on every page. Entries are dropped whenever a
+// claim is created for the wallet, so the total never lags a new claim.
+const CLAIM_COUNT_CACHE_TTL_MS = 30_000;
+const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -52,6 +59,7 @@ const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 @Injectable()
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
+  private readonly claimCountCache = new Map<string, { total: number; expiresAt: number }>();
 
   constructor(
     private readonly stellar: StellarService,
@@ -62,6 +70,17 @@ export class ClaimsService {
     private readonly statusEvents: StatusEventsService,
     private readonly webhooks: WebhooksService,
   ) {}
+
+  // #583 — reserves the next call slot synchronously, then waits for it, so
+  // concurrent callers are spaced CONTRACT_CALL_MIN_INTERVAL_MS apart.
+  private async waitForContractCallSlot(): Promise<void> {
+    const now = Date.now();
+    const slot = Math.max(now, this.nextContractCallAt);
+    this.nextContractCallAt = slot + CONTRACT_CALL_MIN_INTERVAL_MS;
+    if (slot > now) {
+      await new Promise<void>((resolve) => setTimeout(resolve, slot - now));
+    }
+  }
 
   // #350 — builds an auditLog.create() operation to append to a
   // $transaction([...]) array alongside the status-changing write itself,
@@ -161,6 +180,7 @@ export class ClaimsService {
       },
     });
 
+    this.claimCountCache.delete(policy.policyholder);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     // Fetch latest oracle reading for this policy's oracle key
@@ -199,8 +219,8 @@ export class ClaimsService {
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
-        this.prisma.policy.update({
-          where: { id: policyId },
+        this.prisma.policy.updateMany({
+          where: { id: policyId, status: PolicyStatus.PROCESSING },
           data:  { status: PolicyStatus.ACTIVE },
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Product not found'),
@@ -231,8 +251,8 @@ export class ClaimsService {
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
-        this.prisma.policy.update({
-          where: { id: policyId },
+        this.prisma.policy.updateMany({
+          where: { id: policyId, status: PolicyStatus.PROCESSING },
           data:  { status: PolicyStatus.ACTIVE },
         }),
 this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
@@ -280,11 +300,18 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
 
     let txHash: string;
     try {
+      await this.waitForContractCallSlot();
       txHash = await this.stellar.invokeContract(
         contractId,
         'process_claim',
         [nativeToScVal(policyId, { type: 'string' })],
       );
+      // #593 — never trust the contract-invocation result: a Stellar transaction
+      // hash is exactly 64 hex characters. Anything else is treated as a failed
+      // payout so it is never persisted as a PAID txHash.
+      if (typeof txHash !== 'string' || !/^[0-9a-fA-F]{64}$/.test(txHash)) {
+        throw new Error('Unexpected Soroban response: invalid transaction hash');
+      }
       this.logger.log(`Soroban payout initiated: txHash=${txHash} claimId=${claim.id}`);
     } catch (err) {
       // #165 — payout failure: mark claim FAILED and revert the atomic policy gate so
@@ -295,8 +322,8 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
-        this.prisma.policy.update({
-          where: { id: policyId },
+        this.prisma.policy.updateMany({
+          where: { id: policyId, status: PolicyStatus.PROCESSING },
           data:  { status: PolicyStatus.ACTIVE },
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'On-chain payout failed'),
@@ -487,6 +514,11 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
   async submitClaim(claimant: string, policyId: string): Promise<string> {
     this.logger.log(`submit_claim: policy=${policyId} claimant=${claimant.slice(0, 4)}...${claimant.slice(-4)}`);
 
+    // Policy ids are UUIDs — reject any other format before hitting the DB.
+    if (!UUID_PATTERN.test(policyId)) {
+      throw new BadRequestException('policyId must be a valid UUID');
+    }
+
     // #371 — Resolve policy and validate ownership FIRST, before any status
     // or duplicate-claim probes. Running the duplicate guard with only a
     // policyId before ownership checks would let an authenticated stranger
@@ -494,22 +526,25 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     // policy by watching for ConflictException vs ForbiddenException.
     const policy = await this.prisma.policy.findUnique({ where: { id: policyId } });
     if (!policy) {
-      throw new NotFoundException(`Policy ${policyId} not found`);
+      throw new NotFoundException({ message: `Policy ${policyId} not found`, errorCode: ErrorCode.CLAIM_POLICY_NOT_FOUND });
     }
     // #177 — the JWT-authenticated wallet must own the policy being claimed
     // against; otherwise any authenticated wallet could file a claim on
     // someone else's policy.
     if (policy.policyholder !== claimant) {
-      throw new ForbiddenException(`Wallet ${claimant} does not own policy ${policyId}`);
+      throw new ForbiddenException({ message: `Wallet ${claimant} does not own policy ${policyId}`, errorCode: ErrorCode.CLAIM_POLICY_NOT_OWNED });
     }
     if (policy.status !== PolicyStatus.ACTIVE) {
-      throw new ConflictException(`Policy ${policyId} is not active`);
+      throw new ConflictException({ message: `Policy ${policyId} is not active`, errorCode: ErrorCode.CLAIM_POLICY_NOT_ACTIVE });
     }
 
     // Expired check — policy.endTime is the authoritative reference, not the
     // lazily-updated status column (the EXPIRED cron runs at best once an hour).
     if (new Date() > policy.endTime) {
-      throw new ConflictException(`Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`);
+      throw new ConflictException({
+        message: `Policy ${policyId} coverage period ended at ${policy.endTime.toISOString()}`,
+        errorCode: ErrorCode.CLAIM_POLICY_EXPIRED,
+      });
     }
 
     // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
@@ -524,7 +559,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       this.logger.warn(
         `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
       );
-      throw new ConflictException('Claim already exists for this policy');
+      throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
     }
 
     const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
@@ -550,14 +585,16 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         error instanceof Prisma.PrismaClientKnownRequestError &&
         error.code === 'P2002'
       ) {
-        throw new ConflictException('Claim already exists for this policy');
+        throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
       }
       throw error;
     }
 
+    this.claimCountCache.delete(claimant);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     try {
+      await this.waitForContractCallSlot();
       const txHash = await this.stellar.invokeContract(
         contractId,
         'submit_claim',
@@ -595,15 +632,30 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     const safePage = Math.max(1, page);
     const safeLimit = Math.min(Math.max(1, limit), 100);
     this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${safePage} limit=${safeLimit}`);
-    const [claims, total] = await this.prisma.$transaction([
-      this.prisma.claim.findMany({
-        where: { claimant: walletAddress },
-        orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-        skip: (safePage - 1) * safeLimit,
-        take: safeLimit,
-      }),
-      this.prisma.claim.count({ where: { claimant: walletAddress } }),
-    ]);
+    const findClaims = this.prisma.claim.findMany({
+      where: { claimant: walletAddress },
+      orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
+      skip: (safePage - 1) * safeLimit,
+      take: safeLimit,
+    });
+
+    // #589 — reuse a recent total instead of running COUNT on every request
+    const cached = this.claimCountCache.get(walletAddress);
+    let claims: Awaited<typeof findClaims>;
+    let total: number;
+    if (cached && cached.expiresAt > Date.now()) {
+      claims = await findClaims;
+      total = cached.total;
+    } else {
+      [claims, total] = await this.prisma.$transaction([
+        findClaims,
+        this.prisma.claim.count({ where: { claimant: walletAddress } }),
+      ]);
+      if (this.claimCountCache.size >= CLAIM_COUNT_CACHE_MAX_ENTRIES) {
+        this.claimCountCache.clear();
+      }
+      this.claimCountCache.set(walletAddress, { total, expiresAt: Date.now() + CLAIM_COUNT_CACHE_TTL_MS });
+    }
 
     const summaries = claims.map((claim) => ({
       id:             claim.id,
@@ -629,12 +681,15 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     };
   }
 
-  async getClaim(claimId: string): Promise<ClaimSummary | null> {
+  async getClaim(claimId: string): Promise<(ClaimSummary & { policy?: PolicySummary }) | null> {
     this.logger.log(`get_claim: ${claimId}`);
-    const claim = await this.prisma.claim.findUnique({ where: { id: claimId } });
+    const claim = await this.prisma.claim.findUnique({
+      where: { id: claimId },
+      include: { policy: true },
+    });
     if (!claim) return null;
 
-    return {
+    const summary: ClaimSummary & { policy?: PolicySummary } = {
       id:             claim.id,
       policyId:       claim.policyId,
       claimant:       claim.claimant,
@@ -649,5 +704,21 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       txHash:         claim.txHash,
       createdAt:      Math.floor(claim.createdAt.getTime() / 1000),
     };
+
+    if (claim.policy) {
+      summary.policy = {
+        id:             claim.policy.id,
+        productId:      claim.policy.productId,
+        policyholder:   claim.policy.policyholder,
+        coverage:       claim.policy.coverageXlm.toString(),
+        premiumPaid:    claim.policy.premiumPaid.toString(),
+        oracleKey:      claim.policy.oracleKey,
+        startTime:      Math.floor(claim.policy.startTime.getTime() / 1000),
+        endTime:        Math.floor(claim.policy.endTime.getTime() / 1000),
+        status:         claim.policy.status,
+      };
+    }
+
+    return summary;
   }
 }

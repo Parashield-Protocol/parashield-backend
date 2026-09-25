@@ -29,8 +29,13 @@ describe('InputSanitizationMiddleware', () => {
     expect(run({ url })).toEqual({ url });
   });
 
-  it('escapes double and single quotes (#581)', () => {
-    expect(run({ v: 'a"b\'c' })).toEqual({ v: 'a&quot;b&#39;c' });
+  it('drops prototype-polluting keys at any depth (#590)', () => {
+    const body = JSON.parse('{"__proto__":{"polluted":true},"constructor":{"x":1},"prototype":1,"ok":{"__proto__":{"a":1},"name":"x"}}');
+    const out = run(body) as Record<string, unknown>;
+    expect(Object.keys(out)).toEqual(['ok']);
+    expect(out.ok).toEqual({ name: 'x' });
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it('leaves non-plain objects and non-string primitives alone', () => {

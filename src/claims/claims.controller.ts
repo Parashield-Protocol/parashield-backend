@@ -1,4 +1,4 @@
-import { Body, Controller, ForbiddenException, Get, Param, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import {
@@ -18,6 +18,7 @@ import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
+import { ErrorCode } from '../common/errors/error-codes';
 
 @ApiTags('claims')
 @Controller('claims')
@@ -33,7 +34,7 @@ export class ClaimsController {
   // (60 req/60s) configured in app.module.ts, to slow down abuse of claim payouts.
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @ApiOperation({ summary: 'Submit a manual claim for a policy' })
-  @ApiResponse({ status: 201, description: 'Claim submitted successfully', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { claimId: { type: 'string' } } } } }, ], }, })
+  @ApiResponse({ status: 201, description: 'Claim submitted successfully', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { claimId: { type: 'string' }, claim: { type: 'object', description: 'Initial claim details' } } } } }, ], }, })
   @ApiErrorResponse(403, 'Claimant field does not match the authenticated wallet address.', undefined, 'Claimant does not match authenticated wallet')
   @ApiErrorResponse(409, 'An active claim already exists for this policy.', undefined, 'An active claim already exists for this policy')
   @ApiErrorResponse(429, 'Rate limit exceeded — claim submission allows 5 req / 60 s.', undefined, 'Too many requests. Please try again later.')
@@ -43,10 +44,11 @@ export class ClaimsController {
       throw new UnauthorizedException('Not authenticated');
     }
     if (dto.claimant && dto.claimant !== authedWallet) {
-      throw new ForbiddenException('Claimant does not match authenticated wallet');
+      throw new ForbiddenException({ message: 'Claimant does not match authenticated wallet', errorCode: ErrorCode.CLAIM_CLAIMANT_MISMATCH });
     }
     const claimId = await this.claims.submitClaim(authedWallet, dto.policyId);
-    return { success: true, data: { claimId } };
+    const claim = await this.claims.getClaim(claimId);
+    return { success: true, data: { claimId, claim } };
   }
 
   /** GET /api/v1/claims?wallet=... — get claim history for the authenticated wallet */
@@ -78,7 +80,7 @@ export class ClaimsController {
     }
     const targetWallet = wallet || authedWallet;
     if (targetWallet !== authedWallet) {
-      throw new ForbiddenException('Wallet address does not match authenticated user');
+      throw new ForbiddenException({ message: 'Wallet address does not match authenticated user', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
     const result = await this.claims.getClaimsByWallet(
       targetWallet,
@@ -95,8 +97,9 @@ export class ClaimsController {
   @ApiOperation({ summary: 'Trigger automatic claim evaluation for a policy (operator only)' })
   @ApiParam({ name: 'policyId', description: 'Policy UUID to evaluate' })
   @ApiResponse({ status: 201, description: 'Claim evaluation triggered', schema: { allOf: [ { $ref: getSchemaPath(ResponseDto) }, { properties: { data: { type: 'object', properties: { result: { type: 'string' } } } } } ] } })
+  @ApiErrorResponse(400, 'policyId is not a valid UUID.', undefined, 'Validation failed (uuid is expected)')
   @ApiErrorResponse(401, 'Operator API key (x-api-key) or admin bearer token required.', undefined, 'Missing or invalid operator API key')
-  async autoProcess(@Param('policyId') policyId: string) {
+  async autoProcess(@Param('policyId', ParseUUIDPipe) policyId: string) {
     const result = await this.claims.autoProcess(policyId);
     return { success: true, data: { result } };
   }
@@ -113,11 +116,11 @@ export class ClaimsController {
   async getClaim(@Param('id') id: string, @Req() req: AuthenticatedRequest) {
     const claim = await this.claims.getClaim(id);
     if (!claim) {
-      throw new NotFoundException('Claim not found');
+      throw new NotFoundException({ message: 'Claim not found', errorCode: ErrorCode.CLAIM_NOT_FOUND });
     }
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (claim.claimant !== authedWallet) {
-      throw new ForbiddenException('Claim belongs to a different wallet');
+      throw new ForbiddenException({ message: 'Claim belongs to a different wallet', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
     return { success: true, data: claim };
   }
@@ -148,7 +151,19 @@ export class ClaimsController {
     @Query('limit') limit: string,
     @Req() req: AuthenticatedRequest,
   ) {
-    // #579 — deprecated alias; GET /claims?wallet=... is the canonical endpoint.
-    return this.getClaimsByWalletQuery(wallet, page, limit, req);
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
+    }
+    const targetWallet = wallet || authedWallet;
+    if (targetWallet !== authedWallet) {
+      throw new ForbiddenException({ message: 'Cannot read claims for another wallet', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
+    }
+    const result = await this.claims.getClaimsByWallet(
+      targetWallet,
+      page ? parseInt(page, 10) || 1 : 1,
+      limit ? parseInt(limit, 10) || 20 : 20,
+    );
+    return { success: true, ...result };
   }
 }
