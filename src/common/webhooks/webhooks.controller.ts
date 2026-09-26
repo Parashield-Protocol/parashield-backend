@@ -31,10 +31,11 @@ export class WebhooksController {
       '|-------|-------------|---------|\n' +
       '| `policy.status.change` | A policy status transition (e.g. ACTIVE → CLAIMED) | `{ policyId, fromStatus, toStatus, timestamp }` |\n' +
       '| `claim.status.change` | A claim status transition (e.g. PROCESSING → PAID) | `{ claimId, fromStatus, toStatus, timestamp }` |\n\n' +
-      '**Signature verification:** If a `secret` is provided, each delivery includes an `X-Webhook-Signature` header ' +
-      'containing an HMAC-SHA256 digest of the JSON payload, base64-encoded. Verify with:\n' +
+      '**Signature verification:** If a `secret` is provided, each delivery includes `X-Webhook-Timestamp` and ' +
+      '`X-Webhook-Signature` headers. The signature is an HMAC-SHA256 digest of ' +
+      '`<timestamp>.<raw JSON payload>`, base64-encoded. Reject timestamps outside your replay window. Verify with:\n' +
       '```\n' +
-      'crypto.createHmac("sha256", secret).update(rawBody).digest("base64")\n' +
+      'crypto.createHmac("sha256", secret).update(`${timestamp}.${rawBody}`).digest("base64")\n' +
       '```\n\n' +
       '**Retry behaviour:** Failed deliveries are automatically retried up to 3 times using exponential backoff ' +
       '(delays: 1 s → 2 s → 4 s). If all attempts fail the error is logged and the event is dropped.',

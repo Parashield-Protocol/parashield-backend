@@ -301,7 +301,9 @@ export class WebhooksService {
     };
 
     if (secret) {
-      headers['X-Webhook-Signature'] = this.signPayload(payload, secret);
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      headers['X-Webhook-Timestamp'] = timestamp;
+      headers['X-Webhook-Signature'] = this.signPayload(payload, secret, timestamp);
     }
 
     const controller = new AbortController();
@@ -344,9 +346,9 @@ export class WebhooksService {
     }
   }
 
-  private signPayload(payload: unknown, secret: string): string {
+  private signPayload(payload: unknown, secret: string, timestamp: string): string {
     const payloadStr = JSON.stringify(payload);
-    return crypto.createHmac('sha256', secret).update(payloadStr).digest('base64');
+    return crypto.createHmac('sha256', secret).update(`${timestamp}.${payloadStr}`).digest('base64');
   }
 
   private sleep(ms: number): Promise<void> {

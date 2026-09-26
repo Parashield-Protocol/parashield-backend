@@ -61,8 +61,12 @@ describe('WebhooksService', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(url).toBe('https://a.test');
-    const expected = crypto.createHmac('sha256', 'topsecret').update(JSON.stringify(event)).digest('base64');
-    expect((init.headers as Record<string, string>)['X-Webhook-Signature']).toBe(expected);
+    const headers = init.headers as Record<string, string>;
+    expect(headers['X-Webhook-Timestamp']).toMatch(/^\d+$/);
+    const expected = crypto.createHmac('sha256', 'topsecret')
+      .update(`${headers['X-Webhook-Timestamp']}.${JSON.stringify(event)}`)
+      .digest('base64');
+    expect(headers['X-Webhook-Signature']).toBe(expected);
   });
 
   it('does not reject when loading registrations fails (callers fire-and-forget)', async () => {
@@ -125,8 +129,11 @@ describe('WebhooksService', () => {
       await service.notifyClaimStatusChange(event);
 
       const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-      const expected = crypto.createHmac('sha256', 'sig-secret').update(JSON.stringify(event)).digest('base64');
-      expect((init.headers as Record<string, string>)['X-Webhook-Signature']).toBe(expected);
+      const headers = init.headers as Record<string, string>;
+      const expected = crypto.createHmac('sha256', 'sig-secret')
+        .update(`${headers['X-Webhook-Timestamp']}.${JSON.stringify(event)}`)
+        .digest('base64');
+      expect(headers['X-Webhook-Signature']).toBe(expected);
     });
   });
 
