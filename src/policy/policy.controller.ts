@@ -7,6 +7,7 @@ import {
   Sse,
   MessageEvent,
   Param,
+  ParseUUIDPipe,
   Query,
   Body,
   HttpCode,
@@ -377,7 +378,7 @@ export class PolicyController {
     },
   })
   @ApiErrorResponse(404, 'No product found for the given ID.', undefined, 'Product not found')
-  async updateProduct(@Param('id') id: string, @Body() dto: UpdateProductDto) {
+  async updateProduct(@Param('id', new ParseUUIDPipe()) id: string, @Body() dto: UpdateProductDto) {
     const product = await this.policy.updateProduct(id, dto);
     return { success: true, data: product };
   }
@@ -400,7 +401,7 @@ export class PolicyController {
     },
   })
   @ApiErrorResponse(404, 'No product found for the given ID.', undefined, 'Product not found')
-  async deactivateProduct(@Param('id') id: string) {
+  async deactivateProduct(@Param('id', new ParseUUIDPipe()) id: string) {
     const product = await this.policy.deactivateProduct(id);
     return { success: true, data: product };
   }
