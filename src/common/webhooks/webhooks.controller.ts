@@ -1,4 +1,5 @@
-import { Controller, Post, Body, Get } from '@nestjs/common';
+import { Body, Controller, Get, Post, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiExtraModels, getSchemaPath } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../swagger/api-error-responses';
 import { WebhooksService } from '../events/webhooks.service';
@@ -31,6 +32,7 @@ export class WebhooksController {
       '|-------|-------------|---------|\n' +
       '| `policy.status.change` | A policy status transition (e.g. ACTIVE → CLAIMED) | `{ policyId, fromStatus, toStatus, timestamp }` |\n' +
       '| `claim.status.change` | A claim status transition (e.g. PROCESSING → PAID) | `{ claimId, fromStatus, toStatus, timestamp }` |\n\n' +
+      '**Registration:** The response includes the registration ID in both the response body and the `X-Webhook-Id` header.\n\n' +
       '**Signature verification:** If a `secret` is provided, each delivery includes an `X-Webhook-Signature` header ' +
       'containing an HMAC-SHA256 digest of the JSON payload, base64-encoded. Verify with:\n' +
       '```\n' +
@@ -42,12 +44,13 @@ export class WebhooksController {
   @ApiBearerAuth()
   @ApiResponse({ status: 201, description: 'Webhook registered successfully', schema: { $ref: getSchemaPath(WebhookRegistrationResponseDto) } })
   @ApiErrorResponse(400, 'Request body failed validation (missing url, unsupported event type, etc.).', undefined, 'url must be a URL address; events must contain only supported event types')
-  async register(@Body() dto: RegisterWebhookDto) {
+  async register(@Body() dto: RegisterWebhookDto, @Res({ passthrough: true }) response: Response) {
     const result = await this.webhooks.registerWebhook({
       url: dto.url,
       events: dto.events,
       secret: dto.secret,
     });
+    response.setHeader('X-Webhook-Id', result.id);
     return { success: true, data: result };
   }
 
