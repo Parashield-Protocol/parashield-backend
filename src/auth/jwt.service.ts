@@ -57,7 +57,8 @@ export class JwtService {
       audience: this.audience,
     };
     const token = jwt.sign(payload, this.secret, options);
-    this.logger.log(`JWT issued for wallet: ${walletAddress}`);
+    // #543 — the wallet address is not logged here; the controller that
+    // issues the token records the login once.
     return token;
   }
 
@@ -75,7 +76,7 @@ export class JwtService {
       audience: this.audience,
     };
     const token = jwt.sign(payload, this.secret, options);
-    this.logger.log(`JWT issued for wallet: ${walletAddress} (role=${role})`);
+    this.logger.log(`JWT issued (role=${role})`);
     return token;
   }
 

@@ -4,6 +4,7 @@ import { Throttle } from '@nestjs/throttler';
 import { ConfigService } from '@nestjs/config';
 import Redis from 'ioredis';
 import { Request } from 'express';
+import { createHash, timingSafeEqual } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { HealthResponseDto, HealthChecksDto, DatabaseCheckDto, StellarCheckDto, StellarNetworkCheckDto, QueueCheckDto, ExternalApisDto, ExternalApiCheckDto, DatabasePoolDto, DatabaseThroughputDto, RedisMemoryDto, WorkerHeartbeatDto, DatabaseReplicationDto } from './dto/health-response.dto';
@@ -86,6 +87,52 @@ export class HealthController {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
+  /**
+   * #544 — an unreachable Redis can leave commands queued indefinitely rather
+   * than rejecting, which would hang the endpoint. Every Redis call is bounded
+   * so a failure surfaces as queue status 'error' within the probe timeout.
+   */
+  private async withTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out`)), HEALTH_CHECK_RPC_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * #546 — detailed health output (pool sizes, Redis memory, worker names,
+   * replication lag, versions) is only for callers presenting the operator
+   * API key; everyone else gets overall and per-component status.
+   */
+  private isAdminRequest(req: Request | undefined): boolean {
+    const configuredKey =
+      this.config.get<string>('ORACLE_OPERATOR_API_KEY') ?? this.config.get<string>('ADMIN_API_KEY');
+    const header = req?.headers?.['x-api-key'] ?? req?.headers?.['x-admin-api-key'];
+    const provided = Array.isArray(header) ? header[0] : header;
+    if (!configuredKey || !provided) return false;
+    const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
+    return timingSafeEqual(digest(provided), digest(configuredKey));
+  }
+
+  private toPublicChecks(checks: any): any {
+    return {
+      database: { status: checks.database.status },
+      stellar: { status: checks.stellar.status },
+      queue: { status: checks.queue.status },
+      externalApis: {
+        openMeteo: { status: checks.externalApis.openMeteo.status },
+        ...(checks.externalApis.aviationStack
+          ? { aviationStack: { status: checks.externalApis.aviationStack.status } }
+          : {}),
+      },
+    };
+  }
+
   private sanitizeErrorMessage(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('password') || message.includes('connection') || message.includes('credentials')) {
@@ -159,420 +206,435 @@ export class HealthController {
     let aviationStackError: string | undefined;
     let aviationStackConfigured: boolean | undefined;
 
-    try {
-      await this.prisma.$queryRaw`SELECT 1`;
-    } catch (err) {
-      dbStatus = 'error';
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      dbError = this.sanitizeErrorMessage(err);
-      this.logger.error(`Health check DB query failed: ${errorMsg}`);
-    }
-
-    // #444/#471 — connection pool health: query pg_stat_activity so load
-    // balancers can alert on pool exhaustion before queries start queuing or
-    // timing out. `active` is compared against the pool's configured max size
-    // to compute a utilization percentage; crossing the warning threshold
-    // marks the database check degraded so it surfaces the same way other
-    // dependency failures do, instead of only being visible as raw counts an
-    // operator has to interpret themselves.
-    try {
-      const rows = await this.prisma.$queryRaw<Array<{ state: string; count: bigint }>>`
-        SELECT state, COUNT(*)::int AS count
-        FROM pg_stat_activity
-        WHERE datname = current_database()
-        GROUP BY state
-      `;
-      const active  = Number(rows.find(r => r.state === 'active')?.count  ?? 0);
-      const idle    = Number(rows.find(r => r.state === 'idle')?.count    ?? 0);
-      const waiting = Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0);
-
-      const maxConnections = Number(
-        this.config.get<string>('DATABASE_CONNECTION_LIMIT') ?? DEFAULT_DB_POOL_MAX_CONNECTIONS,
-      );
-      const warnPercent = Number(
-        this.config.get<string>('DB_POOL_EXHAUSTION_WARN_PERCENT') ?? DEFAULT_DB_POOL_EXHAUSTION_WARN_PERCENT,
-      );
-      const utilizationPercent = maxConnections > 0 ? Math.round((active / maxConnections) * 100) : 0;
-      const exhausted = utilizationPercent >= warnPercent;
-
-      dbPool = { active, idle, waiting, max: maxConnections, utilizationPercent, exhausted };
-
-      if (exhausted) {
-        dbStatus = 'error';
-        const poolMsg = `Connection pool exhausted`;
-        dbError = dbError ? `${dbError}; ${poolMsg}` : poolMsg;
-        this.logger.error(`Health check: Connection pool utilization ${utilizationPercent}% (${active}/${maxConnections} active) meets or exceeds the exhaustion warning threshold of ${warnPercent}%`);
-      }
-    } catch {
-      // Non-fatal: pg_stat_activity may be restricted on managed databases.
-    }
-
-    // #441 — Direct Stellar RPC (Soroban) connectivity check.
-    // getLatestLedger is the lightest available probe: it requires no
-    // authentication, touches no account state, and always succeeds when
-    // the RPC node is reachable. We record latency so ops can distinguish
-    // a slow node from a fully unreachable one. A failure here is fatal
-    // (stellarStatus → 'error') because contract invocations — claims,
-    // policy submissions, oracle writes — all depend on the Soroban RPC.
-    try {
-      const rpcProbe = await this.stellar.checkRpcConnectivity(HEALTH_CHECK_RPC_TIMEOUT_MS);
-      stellarRpcLatencyMs = rpcProbe.latencyMs;
-      stellarRpcLedger    = rpcProbe.ledger;
-    } catch (err) {
-      stellarRpcStatus = 'error';
-      stellarStatus    = 'error';
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      stellarError     = `Stellar RPC unreachable`;
-      this.logger.error(`Health check: Stellar RPC unreachable: ${errorMsg}`);
-    }
-
-    // #474 — Stellar network status check. Reachability (above) doesn't
-    // tell us the network is actually operational: an RPC node can answer
-    // getLatestLedger while it has stopped ingesting ledgers (network halt,
-    // node fallen behind) or while pointed at the wrong network. Either way
-    // every contract call would fail, so both mark stellar as degraded.
-    try {
-      const net = await this.stellar.checkNetworkStatus(HEALTH_CHECK_RPC_TIMEOUT_MS);
-      stellarNetwork = {
-        status: net.healthy ? 'ok' : 'error',
-        rpcHealth: net.rpcHealth,
-        protocolVersion: net.protocolVersion,
-        passphraseMatches: net.passphraseMatches,
-      };
-      if (!net.healthy) {
-        stellarStatus = 'error';
-        const netMsg = `Stellar network not operational`;
-        stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
-        const detailedMsg = !net.passphraseMatches
-          ? 'Stellar RPC is serving a different network than the configured STELLAR_NETWORK'
-          : `Stellar network not operational: RPC health is "${net.rpcHealth}"`;
-        this.logger.error(`Health check: ${detailedMsg}`);
-      }
-    } catch (err) {
-      stellarNetwork = { status: 'error' };
-      stellarStatus = 'error';
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      const netMsg = `Stellar network status check failed`;
-      stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
-      this.logger.error(`Health check: Stellar network status check failed: ${errorMsg}`);
-    }
-
-    try {
-      keeperBalanceXlm = await this.stellar.getAccountBalance(
-        this.stellar.keeperPublicKey,
-        HEALTH_CHECK_RPC_TIMEOUT_MS,
-      );
-
-      // #191 — RPC reachability alone isn't enough: a keeper account
-      // drained of XLM would still answer this call successfully (with a
-      // low/zero balance) while every real claim/policy submission fails
-      // to cover its transaction fee. Flag degraded once balance drops
-      // below a configurable floor, not just on outright RPC failure.
-      const minBalance = Number(
-        this.config.get<string>('KEEPER_MIN_BALANCE_XLM') ?? DEFAULT_KEEPER_MIN_BALANCE_XLM,
-      );
-      if (Number(keeperBalanceXlm) < minBalance) {
-        stellarStatus = 'error';
-        stellarError  = `Keeper balance insufficient`;
-        this.logger.error(`Health check: Keeper balance ${keeperBalanceXlm} XLM is below the minimum floor of ${minBalance} XLM`);
-      }
-    } catch (err) {
-      stellarStatus = 'error';
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      this.logger.error(`Health check Stellar keeper/Horizon failed: ${errorMsg}`);
-    }
-
-    // #403 — Redis/message queue connectivity check.
-    // Background workers (claims, oracle) rely on Redis for job queuing and
-    // distributed throttle storage; a silent Redis failure means those jobs
-    // stop processing without any observable API-layer error. A PING here
-    // surfaces the failure in the health endpoint so load balancers and
-    // on-call alerts can react before users notice stuck claims or policies.
+    // #545 — the four dependency groups below are independent, so they run in
+    // parallel; each group keeps its own checks in their original order.
     let queueDepths: Record<string, number> | undefined;
-    try {
-      const pong = await this.redis.ping();
-      if (pong !== 'PONG') {
-        queueStatus = 'error';
-        queueError  = `Redis connectivity issue`;
-        this.logger.error(`Health check: Redis PING returned unexpected response: ${pong}`);
-      } else {
-        // #421 — Report waiting job counts for known Bull queues so ops can
-        // detect build-up before processing latency becomes user-visible.
-        const queueNames = (this.config.get<string>('HEALTH_QUEUE_NAMES') ?? 'claims,oracle')
-          .split(',')
-          .map(n => n.trim())
-          .filter(Boolean);
-        const depths = await Promise.all(
-          queueNames.map(async (name) => [name, await this.redis.llen(`bull:${name}:wait`)] as [string, number]),
-        );
-        queueDepths = Object.fromEntries(depths);
-      }
-    } catch (err) {
-      queueStatus = 'error';
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      queueError  = this.sanitizeErrorMessage(err);
-      this.logger.error(`Health check Redis failed: ${errorMsg}`);
-    }
-
-    // Background worker (cron consumer) heartbeat check.
-    // This repo's "consumers" are @Cron jobs (ClaimsWorker, OracleWorker,
-    // AuthCleanupWorker), not a real Bull/BullMQ queue — the queueDepths
-    // probe above reads `bull:*:wait` lists that nothing in this codebase
-    // ever writes to, so it can't detect a stuck or crashed worker. Each
-    // worker instead writes a heartbeat to Redis at the end of every
-    // successful tick (see WORKER_HEARTBEATS); a missing key means the
-    // worker hasn't completed a run within ~2x its expected interval.
     let workerHeartbeats: Record<string, { status: 'ok' | 'stale'; lastRunAt?: string }> | undefined;
-    try {
-      const workerNames = Object.keys(WORKER_HEARTBEATS) as Array<keyof typeof WORKER_HEARTBEATS>;
-      const values = await this.redis.mget(...workerNames.map((name) => WORKER_HEARTBEATS[name].key));
-      workerHeartbeats = Object.fromEntries(
-        workerNames.map((name, i) => {
-          const lastRunAt = values[i] ?? undefined;
-          return [name, lastRunAt ? { status: 'ok' as const, lastRunAt } : { status: 'stale' as const }];
-        }),
-      );
-      const staleWorkers = workerNames.filter((name) => workerHeartbeats![name].status === 'stale');
-      if (staleWorkers.length > 0) {
-        queueStatus = 'error';
-        const staleMsg = `Stale worker heartbeat(s): ${staleWorkers.join(', ')}`;
-        queueError  = queueError ? `${queueError}; ${staleMsg}` : staleMsg;
-        this.logger.error(`Health check: ${staleMsg}`);
-      }
-    } catch (err) {
-      this.logger.warn(`Failed to fetch worker heartbeats: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // #554 — External API checks are cached for 30s so load balancers polling
-    // every 5-10s don't trigger redundant outbound HTTP calls.
-    const now = Date.now();
-    if (this.externalApiCache && (now - this.externalApiCache.timestamp) < EXTERNAL_API_CACHE_TTL_MS) {
-      openMeteoStatus = this.externalApiCache.openMeteoStatus;
-      openMeteoError = this.externalApiCache.openMeteoError;
-      aviationStackStatus = this.externalApiCache.aviationStackStatus;
-      aviationStackError = this.externalApiCache.aviationStackError;
-      aviationStackConfigured = this.externalApiCache.aviationStackConfigured;
-    } else {
-      // #426 — Open-Meteo reachability check.
-      // Open-Meteo is a free API with no authentication requirement. A minimal
-      // forecast request (1-day window at lat/lng 0,0) confirms HTTP reachability
-      // without consuming any quota. Any non-2xx response or network error is
-      // flagged as degraded — oracle rainfall and temperature feeds will fail.
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
-        try {
-          const res = await fetch(OPEN_METEO_HEALTH_URL, { signal: controller.signal });
-          if (!res.ok) {
-            openMeteoStatus = 'error';
-            openMeteoError  = `External API unavailable`;
-            this.logger.error(`Health check: Open-Meteo responded with HTTP ${res.status}`);
-          }
-        } finally {
-          clearTimeout(timeout);
-        }
-      } catch (err) {
-        openMeteoStatus = 'error';
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        openMeteoError  = this.sanitizeErrorMessage(err);
-        this.logger.error(`Health check Open-Meteo failed: ${errorMsg}`);
-      }
-
-      // AviationStack reachability check.
-      // Key-gated API: if no key is configured we still probe the endpoint
-      // (with an empty access_key) so a 401/403 response confirms the API
-      // itself is reachable, distinct from key misconfiguration which is
-      // surfaced separately via the `configured` flag. Any network error or
-      // 5xx/timeout is flagged as degraded — flight delay oracle reads will fail.
-      aviationStackConfigured = !!this.config.get<string>('AVIATIONSTACK_API_KEY');
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
-        try {
-          const res = await fetch(AVIATIONSTACK_HEALTH_URL, { signal: controller.signal });
-          if (res.status >= 500) {
-            aviationStackStatus = 'error';
-            aviationStackError  = `External API unavailable`;
-            this.logger.error(`Health check: AviationStack responded with HTTP ${res.status}`);
-          }
-        } finally {
-          clearTimeout(timeout);
-        }
-      } catch (err) {
-        aviationStackStatus = 'error';
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        aviationStackError  = this.sanitizeErrorMessage(err);
-        this.logger.error(`Health check AviationStack failed: ${errorMsg}`);
-      }
-
-      this.externalApiCache = {
-        timestamp: now,
-        openMeteoStatus,
-        openMeteoError,
-        aviationStackStatus,
-        aviationStackError,
-        aviationStackConfigured,
-      };
-    }
-
-    // #466/#559 — Redis memory usage monitoring, cached for 30s to avoid
-    // re-parsing INFO output on every health check.
     let redisMemory: { used: string; peak: string; maxmemory: string; usagePercent?: number } | undefined;
-    try {
-      const now = Date.now();
-      let used: string, peak: string, maxmemory: string, usedBytes: number, maxBytes: number;
-
-      if (this.redisMemoryCache && (now - this.redisMemoryCache.timestamp) < EXTERNAL_API_CACHE_TTL_MS) {
-        ({ used, peak, maxmemory, usedBytes, maxBytes } = this.redisMemoryCache);
-      } else {
-        const memInfo = await this.redis.info('memory');
-        const lines = memInfo.split('\r\n');
-        used = lines.find(l => l.startsWith('used_memory_human:'))?.split(':')[1] || 'unknown';
-        peak = lines.find(l => l.startsWith('used_memory_peak_human:'))?.split(':')[1] || 'unknown';
-        maxmemory = lines.find(l => l.startsWith('maxmemory_human:'))?.split(':')[1] || 'unknown';
-        usedBytes = parseInt(lines.find(l => l.startsWith('used_memory:'))?.split(':')[1] || '0');
-        maxBytes = parseInt(lines.find(l => l.startsWith('maxmemory:'))?.split(':')[1] || '0');
-        this.redisMemoryCache = { timestamp: now, used, peak, maxmemory, usedBytes, maxBytes };
-      }
-
-      redisMemory = { used, peak, maxmemory };
-      if (maxBytes > 0) {
-        redisMemory.usagePercent = Math.round((usedBytes / maxBytes) * 100);
-      }
-    } catch (err) {
-      this.logger.warn(`Failed to fetch Redis memory info: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // #463 — Database transaction throughput monitoring
-    // Track database transaction rate to detect performance degradation.
-    // pg_stat_database provides commit/rollback counters; delta between
-    // health checks gives throughput. Performance issues surface as
-    // declining commit rates or rising rollback ratios.
     let dbThroughput: { commits: number; rollbacks: number; conflicts: number } | undefined;
-    try {
-      const now = Date.now();
-      if (this.dbThroughputCache && now - this.dbThroughputCache.timestamp < DB_THROUGHPUT_CACHE_TTL_MS) {
-        dbThroughput = this.dbThroughputCache.value;
-      } else {
-        const [stats] = await this.prisma.$queryRaw<Array<{ xact_commit: bigint; xact_rollback: bigint; conflicts: bigint }>>`
-          SELECT xact_commit, xact_rollback, conflicts FROM pg_stat_database WHERE datname = current_database()`;
-        if (stats) {
-          dbThroughput = { commits: Number(stats.xact_commit), rollbacks: Number(stats.xact_rollback), conflicts: Number(stats.conflicts) };
-          this.dbThroughputCache = { timestamp: now, value: dbThroughput };
-        }
-      }
-    } catch (err) {
-      this.logger.warn(`Failed to fetch database throughput stats: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // Replication lag monitoring — detect stale reads before they affect
-    // claim/policy decisions. We query pg_stat_replication (primary-side view)
-    // for streaming standbys' write/replay lag. On standby nodes we fall back
-    // to pg_last_wal_receive_lsn vs pg_last_wal_replay_lsn. On a non-replicated
-    // primary with no connected standbys both queries succeed but return no rows,
-    // which we surface as lagBytes=0, standbyCount=0 (healthy — no replication
-    // means no lag, but the operator should be aware). The check is non-fatal
-    // (pg_stat_replication may be restricted on managed databases) but will
-    // mark dbStatus='error' when lag exceeds DB_REPLICATION_LAG_WARN_BYTES.
     let dbReplication: DatabaseReplicationDto | undefined;
-    try {
-      const lagWarnBytes = Number(
-        this.config.get<string>('DB_REPLICATION_LAG_WARN_BYTES') ?? DEFAULT_REPLICATION_LAG_WARN_BYTES,
-      );
 
-      // pg_stat_replication is only populated on the primary and only when at
-      // least one standby is streaming. write_lag / replay_lag are INTERVAL
-      // values (PostgreSQL ≥ 10); we extract epoch seconds via EXTRACT.
-      const replicationRows = await this.prisma.$queryRaw<
-        Array<{
-          write_lag_seconds: number | null;
-          replay_lag_seconds: number | null;
-          sent_lsn: string;
-          write_lsn: string;
-          replay_lsn: string;
-          lag_bytes: bigint;
-        }>
-      >`
-        SELECT
-          EXTRACT(EPOCH FROM write_lag)::float   AS write_lag_seconds,
-          EXTRACT(EPOCH FROM replay_lag)::float  AS replay_lag_seconds,
-          sent_lsn::text,
-          write_lsn::text,
-          replay_lsn::text,
-          (pg_wal_lsn_diff(sent_lsn, replay_lsn))::bigint AS lag_bytes
-        FROM pg_stat_replication
-      `;
-
-      if (replicationRows.length > 0) {
-        // Aggregate across all standbys: take the worst (max) lag.
-        const maxLagBytes = replicationRows.reduce(
-          (max, row) => Math.max(max, Number(row.lag_bytes ?? 0)),
-          0,
-        );
-        const maxLagSeconds = replicationRows.reduce(
-          (max, row) => Math.max(max, Number(row.replay_lag_seconds ?? row.write_lag_seconds ?? 0)),
-          0,
-        );
-        const lagExceedsThreshold = maxLagBytes > lagWarnBytes;
-
-        dbReplication = {
-          lagBytes:            maxLagBytes,
-          lagSeconds:          maxLagSeconds,
-          standbyCount:        replicationRows.length,
-          lagExceedsThreshold,
-        };
-
-        if (lagExceedsThreshold) {
+    await Promise.all([
+      // Database
+      (async () => {
+        try {
+          await this.prisma.$queryRaw`SELECT 1`;
+        } catch (err) {
           dbStatus = 'error';
-          const lagMB = (maxLagBytes / (1024 * 1024)).toFixed(1);
-          dbError = dbError
-            ? `${dbError}; Replication lag ${lagMB} MB exceeds threshold of ${(lagWarnBytes / (1024 * 1024)).toFixed(1)} MB`
-            : `Replication lag ${lagMB} MB exceeds threshold of ${(lagWarnBytes / (1024 * 1024)).toFixed(1)} MB`;
-          this.logger.error(`Health check: ${dbError}`);
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          dbError = this.sanitizeErrorMessage(err);
+          this.logger.error(`Health check DB query failed: ${errorMsg}`);
         }
-      } else {
-        // No streaming standbys connected — either a standalone primary or a
-        // standby where pg_stat_replication is empty. Try the standby-side view.
-        const standbyRows = await this.prisma.$queryRaw<
-          Array<{ receive_lsn: string | null; replay_lsn: string | null; lag_bytes: bigint | null }>
-        >`
-          SELECT
-            pg_last_wal_receive_lsn()::text  AS receive_lsn,
-            pg_last_wal_replay_lsn()::text   AS replay_lsn,
-            pg_wal_lsn_diff(
-              COALESCE(pg_last_wal_receive_lsn(), '0/0'),
-              COALESCE(pg_last_wal_replay_lsn(),  '0/0')
-            )::bigint AS lag_bytes
-        `;
 
-        const standbyLagBytes = Number(standbyRows[0]?.lag_bytes ?? 0);
-        const lagExceedsThreshold = standbyLagBytes > lagWarnBytes;
+        // #444/#471 — connection pool health: query pg_stat_activity so load
+        // balancers can alert on pool exhaustion before queries start queuing or
+        // timing out. `active` is compared against the pool's configured max size
+        // to compute a utilization percentage; crossing the warning threshold
+        // marks the database check degraded so it surfaces the same way other
+        // dependency failures do, instead of only being visible as raw counts an
+        // operator has to interpret themselves.
+        try {
+          const rows = await this.prisma.$queryRaw<Array<{ state: string; count: bigint }>>`
+            SELECT state, COUNT(*)::int AS count
+            FROM pg_stat_activity
+            WHERE datname = current_database()
+            GROUP BY state
+          `;
+          const active  = Number(rows.find(r => r.state === 'active')?.count  ?? 0);
+          const idle    = Number(rows.find(r => r.state === 'idle')?.count    ?? 0);
+          const waiting = Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0);
 
-        dbReplication = {
-          lagBytes:            standbyLagBytes,
-          lagSeconds:          null,
-          standbyCount:        0,
-          lagExceedsThreshold,
-        };
+          const maxConnections = Number(
+            this.config.get<string>('DATABASE_CONNECTION_LIMIT') ?? DEFAULT_DB_POOL_MAX_CONNECTIONS,
+          );
+          const warnPercent = Number(
+            this.config.get<string>('DB_POOL_EXHAUSTION_WARN_PERCENT') ?? DEFAULT_DB_POOL_EXHAUSTION_WARN_PERCENT,
+          );
+          const utilizationPercent = maxConnections > 0 ? Math.round((active / maxConnections) * 100) : 0;
+          const exhausted = utilizationPercent >= warnPercent;
 
-        if (lagExceedsThreshold) {
-          dbStatus = 'error';
-          const lagMB = (standbyLagBytes / (1024 * 1024)).toFixed(1);
-          dbError = dbError
-            ? `${dbError}; Standby replication lag ${lagMB} MB exceeds threshold`
-            : `Standby replication lag ${lagMB} MB exceeds threshold`;
-          this.logger.error(`Health check: ${dbError}`);
+          dbPool = { active, idle, waiting, max: maxConnections, utilizationPercent, exhausted };
+
+          if (exhausted) {
+            dbStatus = 'error';
+            const poolMsg = `Connection pool exhausted`;
+            dbError = dbError ? `${dbError}; ${poolMsg}` : poolMsg;
+            this.logger.error(`Health check: Connection pool utilization ${utilizationPercent}% (${active}/${maxConnections} active) meets or exceeds the exhaustion warning threshold of ${warnPercent}%`);
+          }
+        } catch {
+          // Non-fatal: pg_stat_activity may be restricted on managed databases.
         }
-      }
-    } catch (err) {
-      // Non-fatal: pg_stat_replication and pg_last_wal_receive_lsn may be
-      // restricted on managed databases (RDS, Cloud SQL, etc.) or not
-      // applicable (SQLite/test environments). Log and continue.
-      const code = (err as { code?: string })?.code;
-      const message = err instanceof Error ? err.message : String(err);
-      if (code === '42501') this.logger.warn(`Database replication stats unavailable due to insufficient privileges: ${message}`);
-      else this.logger.warn(`Failed to fetch database replication stats: ${message}`);
-    }
+
+        // #463 — Database transaction throughput monitoring
+        // Track database transaction rate to detect performance degradation.
+        // pg_stat_database provides commit/rollback counters; delta between
+        // health checks gives throughput. Performance issues surface as
+        // declining commit rates or rising rollback ratios.
+        try {
+          const now = Date.now();
+          if (this.dbThroughputCache && now - this.dbThroughputCache.timestamp < DB_THROUGHPUT_CACHE_TTL_MS) {
+            dbThroughput = this.dbThroughputCache.value;
+          } else {
+            const [stats] = await this.prisma.$queryRaw<Array<{ xact_commit: bigint; xact_rollback: bigint; conflicts: bigint }>>`
+              SELECT xact_commit, xact_rollback, conflicts FROM pg_stat_database WHERE datname = current_database()`;
+            if (stats) {
+              dbThroughput = { commits: Number(stats.xact_commit), rollbacks: Number(stats.xact_rollback), conflicts: Number(stats.conflicts) };
+              this.dbThroughputCache = { timestamp: now, value: dbThroughput };
+            }
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to fetch database throughput stats: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // Replication lag monitoring — detect stale reads before they affect
+        // claim/policy decisions. We query pg_stat_replication (primary-side view)
+        // for streaming standbys' write/replay lag. On standby nodes we fall back
+        // to pg_last_wal_receive_lsn vs pg_last_wal_replay_lsn. On a non-replicated
+        // primary with no connected standbys both queries succeed but return no rows,
+        // which we surface as lagBytes=0, standbyCount=0 (healthy — no replication
+        // means no lag, but the operator should be aware). The check is non-fatal
+        // (pg_stat_replication may be restricted on managed databases) but will
+        // mark dbStatus='error' when lag exceeds DB_REPLICATION_LAG_WARN_BYTES.
+        try {
+          const lagWarnBytes = Number(
+            this.config.get<string>('DB_REPLICATION_LAG_WARN_BYTES') ?? DEFAULT_REPLICATION_LAG_WARN_BYTES,
+          );
+
+          // pg_stat_replication is only populated on the primary and only when at
+          // least one standby is streaming. write_lag / replay_lag are INTERVAL
+          // values (PostgreSQL ≥ 10); we extract epoch seconds via EXTRACT.
+          const replicationRows = await this.prisma.$queryRaw<
+            Array<{
+              write_lag_seconds: number | null;
+              replay_lag_seconds: number | null;
+              sent_lsn: string;
+              write_lsn: string;
+              replay_lsn: string;
+              lag_bytes: bigint;
+            }>
+          >`
+            SELECT
+              EXTRACT(EPOCH FROM write_lag)::float   AS write_lag_seconds,
+              EXTRACT(EPOCH FROM replay_lag)::float  AS replay_lag_seconds,
+              sent_lsn::text,
+              write_lsn::text,
+              replay_lsn::text,
+              (pg_wal_lsn_diff(sent_lsn, replay_lsn))::bigint AS lag_bytes
+            FROM pg_stat_replication
+          `;
+
+          if (replicationRows.length > 0) {
+            // Aggregate across all standbys: take the worst (max) lag.
+            const maxLagBytes = replicationRows.reduce(
+              (max, row) => Math.max(max, Number(row.lag_bytes ?? 0)),
+              0,
+            );
+            const maxLagSeconds = replicationRows.reduce(
+              (max, row) => Math.max(max, Number(row.replay_lag_seconds ?? row.write_lag_seconds ?? 0)),
+              0,
+            );
+            const lagExceedsThreshold = maxLagBytes > lagWarnBytes;
+
+            dbReplication = {
+              lagBytes:            maxLagBytes,
+              lagSeconds:          maxLagSeconds,
+              standbyCount:        replicationRows.length,
+              lagExceedsThreshold,
+            };
+
+            if (lagExceedsThreshold) {
+              dbStatus = 'error';
+              const lagMB = (maxLagBytes / (1024 * 1024)).toFixed(1);
+              dbError = dbError
+                ? `${dbError}; Replication lag ${lagMB} MB exceeds threshold of ${(lagWarnBytes / (1024 * 1024)).toFixed(1)} MB`
+                : `Replication lag ${lagMB} MB exceeds threshold of ${(lagWarnBytes / (1024 * 1024)).toFixed(1)} MB`;
+              this.logger.error(`Health check: ${dbError}`);
+            }
+          } else {
+            // No streaming standbys connected — either a standalone primary or a
+            // standby where pg_stat_replication is empty. Try the standby-side view.
+            const standbyRows = await this.prisma.$queryRaw<
+              Array<{ receive_lsn: string | null; replay_lsn: string | null; lag_bytes: bigint | null }>
+            >`
+              SELECT
+                pg_last_wal_receive_lsn()::text  AS receive_lsn,
+                pg_last_wal_replay_lsn()::text   AS replay_lsn,
+                pg_wal_lsn_diff(
+                  COALESCE(pg_last_wal_receive_lsn(), '0/0'),
+                  COALESCE(pg_last_wal_replay_lsn(),  '0/0')
+                )::bigint AS lag_bytes
+            `;
+
+            const standbyLagBytes = Number(standbyRows[0]?.lag_bytes ?? 0);
+            const lagExceedsThreshold = standbyLagBytes > lagWarnBytes;
+
+            dbReplication = {
+              lagBytes:            standbyLagBytes,
+              lagSeconds:          null,
+              standbyCount:        0,
+              lagExceedsThreshold,
+            };
+
+            if (lagExceedsThreshold) {
+              dbStatus = 'error';
+              const lagMB = (standbyLagBytes / (1024 * 1024)).toFixed(1);
+              dbError = dbError
+                ? `${dbError}; Standby replication lag ${lagMB} MB exceeds threshold`
+                : `Standby replication lag ${lagMB} MB exceeds threshold`;
+              this.logger.error(`Health check: ${dbError}`);
+            }
+          }
+        } catch (err) {
+          // Non-fatal: pg_stat_replication and pg_last_wal_receive_lsn may be
+          // restricted on managed databases (RDS, Cloud SQL, etc.) or not
+          // applicable (SQLite/test environments). Log and continue.
+          const code = (err as { code?: string })?.code;
+          const message = err instanceof Error ? err.message : String(err);
+          if (code === '42501') this.logger.warn(`Database replication stats unavailable due to insufficient privileges: ${message}`);
+          else this.logger.warn(`Failed to fetch database replication stats: ${message}`);
+        }
+      })(),
+      // Stellar
+      (async () => {
+        // #441 — Direct Stellar RPC (Soroban) connectivity check.
+        // getLatestLedger is the lightest available probe: it requires no
+        // authentication, touches no account state, and always succeeds when
+        // the RPC node is reachable. We record latency so ops can distinguish
+        // a slow node from a fully unreachable one. A failure here is fatal
+        // (stellarStatus → 'error') because contract invocations — claims,
+        // policy submissions, oracle writes — all depend on the Soroban RPC.
+        try {
+          const rpcProbe = await this.stellar.checkRpcConnectivity(HEALTH_CHECK_RPC_TIMEOUT_MS);
+          stellarRpcLatencyMs = rpcProbe.latencyMs;
+          stellarRpcLedger    = rpcProbe.ledger;
+        } catch (err) {
+          stellarRpcStatus = 'error';
+          stellarStatus    = 'error';
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          stellarError     = `Stellar RPC unreachable`;
+          this.logger.error(`Health check: Stellar RPC unreachable: ${errorMsg}`);
+        }
+
+        // #474 — Stellar network status check. Reachability (above) doesn't
+        // tell us the network is actually operational: an RPC node can answer
+        // getLatestLedger while it has stopped ingesting ledgers (network halt,
+        // node fallen behind) or while pointed at the wrong network. Either way
+        // every contract call would fail, so both mark stellar as degraded.
+        try {
+          const net = await this.stellar.checkNetworkStatus(HEALTH_CHECK_RPC_TIMEOUT_MS);
+          stellarNetwork = {
+            status: net.healthy ? 'ok' : 'error',
+            rpcHealth: net.rpcHealth,
+            protocolVersion: net.protocolVersion,
+            passphraseMatches: net.passphraseMatches,
+          };
+          if (!net.healthy) {
+            stellarStatus = 'error';
+            const netMsg = `Stellar network not operational`;
+            stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
+            const detailedMsg = !net.passphraseMatches
+              ? 'Stellar RPC is serving a different network than the configured STELLAR_NETWORK'
+              : `Stellar network not operational: RPC health is "${net.rpcHealth}"`;
+            this.logger.error(`Health check: ${detailedMsg}`);
+          }
+        } catch (err) {
+          stellarNetwork = { status: 'error' };
+          stellarStatus = 'error';
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          const netMsg = `Stellar network status check failed`;
+          stellarError = stellarError ? `${stellarError}; ${netMsg}` : netMsg;
+          this.logger.error(`Health check: Stellar network status check failed: ${errorMsg}`);
+        }
+
+        try {
+          keeperBalanceXlm = await this.stellar.getAccountBalance(
+            this.stellar.keeperPublicKey,
+            HEALTH_CHECK_RPC_TIMEOUT_MS,
+          );
+
+          // #191 — RPC reachability alone isn't enough: a keeper account
+          // drained of XLM would still answer this call successfully (with a
+          // low/zero balance) while every real claim/policy submission fails
+          // to cover its transaction fee. Flag degraded once balance drops
+          // below a configurable floor, not just on outright RPC failure.
+          const minBalance = Number(
+            this.config.get<string>('KEEPER_MIN_BALANCE_XLM') ?? DEFAULT_KEEPER_MIN_BALANCE_XLM,
+          );
+          if (Number(keeperBalanceXlm) < minBalance) {
+            stellarStatus = 'error';
+            stellarError  = `Keeper balance insufficient`;
+            this.logger.error(`Health check: Keeper balance ${keeperBalanceXlm} XLM is below the minimum floor of ${minBalance} XLM`);
+          }
+        } catch (err) {
+          stellarStatus = 'error';
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          this.logger.error(`Health check Stellar keeper/Horizon failed: ${errorMsg}`);
+        }
+      })(),
+      // Redis / queue
+      (async () => {
+        // #403 — Redis/message queue connectivity check.
+        // Background workers (claims, oracle) rely on Redis for job queuing and
+        // distributed throttle storage; a silent Redis failure means those jobs
+        // stop processing without any observable API-layer error. A PING here
+        // surfaces the failure in the health endpoint so load balancers and
+        // on-call alerts can react before users notice stuck claims or policies.
+        try {
+          const pong = await this.withTimeout(this.redis.ping(), 'Redis PING');
+          if (pong !== 'PONG') {
+            queueStatus = 'error';
+            queueError  = `Redis connectivity issue`;
+            this.logger.error(`Health check: Redis PING returned unexpected response: ${pong}`);
+          } else {
+            // #421 — Report waiting job counts for known Bull queues so ops can
+            // detect build-up before processing latency becomes user-visible.
+            const queueNames = (this.config.get<string>('HEALTH_QUEUE_NAMES') ?? 'claims,oracle')
+              .split(',')
+              .map(n => n.trim())
+              .filter(Boolean);
+            const depths = await Promise.all(
+              queueNames.map(async (name) => [name, await this.withTimeout(this.redis.llen(`bull:${name}:wait`), 'Redis LLEN')] as [string, number]),
+            );
+            queueDepths = Object.fromEntries(depths);
+          }
+        } catch (err) {
+          queueStatus = 'error';
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          queueError  = this.sanitizeErrorMessage(err);
+          this.logger.error(`Health check Redis failed: ${errorMsg}`);
+        }
+
+        // Background worker (cron consumer) heartbeat check.
+        // This repo's "consumers" are @Cron jobs (ClaimsWorker, OracleWorker,
+        // AuthCleanupWorker), not a real Bull/BullMQ queue — the queueDepths
+        // probe above reads `bull:*:wait` lists that nothing in this codebase
+        // ever writes to, so it can't detect a stuck or crashed worker. Each
+        // worker instead writes a heartbeat to Redis at the end of every
+        // successful tick (see WORKER_HEARTBEATS); a missing key means the
+        // worker hasn't completed a run within ~2x its expected interval.
+        try {
+          const workerNames = Object.keys(WORKER_HEARTBEATS) as Array<keyof typeof WORKER_HEARTBEATS>;
+          const values = await this.withTimeout(this.redis.mget(...workerNames.map((name) => WORKER_HEARTBEATS[name].key)), 'Redis MGET');
+          workerHeartbeats = Object.fromEntries(
+            workerNames.map((name, i) => {
+              const lastRunAt = values[i] ?? undefined;
+              return [name, lastRunAt ? { status: 'ok' as const, lastRunAt } : { status: 'stale' as const }];
+            }),
+          );
+          const staleWorkers = workerNames.filter((name) => workerHeartbeats![name].status === 'stale');
+          if (staleWorkers.length > 0) {
+            queueStatus = 'error';
+            const staleMsg = `Stale worker heartbeat(s): ${staleWorkers.join(', ')}`;
+            queueError  = queueError ? `${queueError}; ${staleMsg}` : staleMsg;
+            this.logger.error(`Health check: ${staleMsg}`);
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to fetch worker heartbeats: ${err instanceof Error ? err.message : String(err)}`);
+        }
+
+        // #466/#559 — Redis memory usage monitoring, cached for 30s to avoid
+        // re-parsing INFO output on every health check.
+        try {
+          const now = Date.now();
+          let used: string, peak: string, maxmemory: string, usedBytes: number, maxBytes: number;
+
+          if (this.redisMemoryCache && (now - this.redisMemoryCache.timestamp) < EXTERNAL_API_CACHE_TTL_MS) {
+            ({ used, peak, maxmemory, usedBytes, maxBytes } = this.redisMemoryCache);
+          } else {
+            const memInfo = await this.withTimeout(this.redis.info('memory'), 'Redis INFO');
+            const lines = memInfo.split('\r\n');
+            used = lines.find(l => l.startsWith('used_memory_human:'))?.split(':')[1] || 'unknown';
+            peak = lines.find(l => l.startsWith('used_memory_peak_human:'))?.split(':')[1] || 'unknown';
+            maxmemory = lines.find(l => l.startsWith('maxmemory_human:'))?.split(':')[1] || 'unknown';
+            usedBytes = parseInt(lines.find(l => l.startsWith('used_memory:'))?.split(':')[1] || '0');
+            maxBytes = parseInt(lines.find(l => l.startsWith('maxmemory:'))?.split(':')[1] || '0');
+            this.redisMemoryCache = { timestamp: now, used, peak, maxmemory, usedBytes, maxBytes };
+          }
+
+          redisMemory = { used, peak, maxmemory };
+          if (maxBytes > 0) {
+            redisMemory.usagePercent = Math.round((usedBytes / maxBytes) * 100);
+          }
+        } catch (err) {
+          this.logger.warn(`Failed to fetch Redis memory info: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      })(),
+      // External APIs
+      (async () => {
+        // #554 — External API checks are cached for 30s so load balancers polling
+        // every 5-10s don't trigger redundant outbound HTTP calls.
+        const now = Date.now();
+        if (this.externalApiCache && (now - this.externalApiCache.timestamp) < EXTERNAL_API_CACHE_TTL_MS) {
+          openMeteoStatus = this.externalApiCache.openMeteoStatus;
+          openMeteoError = this.externalApiCache.openMeteoError;
+          aviationStackStatus = this.externalApiCache.aviationStackStatus;
+          aviationStackError = this.externalApiCache.aviationStackError;
+          aviationStackConfigured = this.externalApiCache.aviationStackConfigured;
+        } else {
+          // #426 — Open-Meteo reachability check.
+          // Open-Meteo is a free API with no authentication requirement. A minimal
+          // forecast request (1-day window at lat/lng 0,0) confirms HTTP reachability
+          // without consuming any quota. Any non-2xx response or network error is
+          // flagged as degraded — oracle rainfall and temperature feeds will fail.
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+            try {
+              const res = await fetch(OPEN_METEO_HEALTH_URL, { signal: controller.signal });
+              if (!res.ok) {
+                openMeteoStatus = 'error';
+                openMeteoError  = `External API unavailable`;
+                this.logger.error(`Health check: Open-Meteo responded with HTTP ${res.status}`);
+              }
+            } finally {
+              clearTimeout(timeout);
+            }
+          } catch (err) {
+            openMeteoStatus = 'error';
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            openMeteoError  = this.sanitizeErrorMessage(err);
+            this.logger.error(`Health check Open-Meteo failed: ${errorMsg}`);
+          }
+
+          // AviationStack reachability check.
+          // Key-gated API: if no key is configured we still probe the endpoint
+          // (with an empty access_key) so a 401/403 response confirms the API
+          // itself is reachable, distinct from key misconfiguration which is
+          // surfaced separately via the `configured` flag. Any network error or
+          // 5xx/timeout is flagged as degraded — flight delay oracle reads will fail.
+          aviationStackConfigured = !!this.config.get<string>('AVIATIONSTACK_API_KEY');
+          try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), HEALTH_CHECK_RPC_TIMEOUT_MS);
+            try {
+              const res = await fetch(AVIATIONSTACK_HEALTH_URL, { signal: controller.signal });
+              if (res.status >= 500) {
+                aviationStackStatus = 'error';
+                aviationStackError  = `External API unavailable`;
+                this.logger.error(`Health check: AviationStack responded with HTTP ${res.status}`);
+              }
+            } finally {
+              clearTimeout(timeout);
+            }
+          } catch (err) {
+            aviationStackStatus = 'error';
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            aviationStackError  = this.sanitizeErrorMessage(err);
+            this.logger.error(`Health check AviationStack failed: ${errorMsg}`);
+          }
+
+          this.externalApiCache = {
+            timestamp: now,
+            openMeteoStatus,
+            openMeteoError,
+            aviationStackStatus,
+            aviationStackError,
+            aviationStackConfigured,
+          };
+        }
+      })(),
+    ]);
+
 
     const checks = {
       database: {
@@ -622,6 +684,8 @@ export class HealthController {
       openMeteoStatus === 'ok' &&
       aviationStackStatus === 'ok';
 
+    const detailed = this.isAdminRequest(req);
+
     const body: HealthResponseDto = {
       status:    healthy ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
@@ -629,13 +693,17 @@ export class HealthController {
       version:   this.config.get<string>('npm_package_version') ?? process.env.npm_package_version ?? 'unknown',
       responseTimeMs: Date.now() - startTime,
       uptimeMs: Math.round(process.uptime() * 1000),
-      versions: {
-        database: this.config.get<string>('DATABASE_VERSION') ?? 'PostgreSQL',
-        redis: this.config.get<string>('REDIS_VERSION') ?? 'Redis',
-        stellarSdk: this.config.get<string>('STELLAR_SDK_VERSION') ?? '13.0.0',
-      },
-      checks: checks as any,
-    };
+      ...(detailed
+        ? {
+            versions: {
+              database: this.config.get<string>('DATABASE_VERSION') ?? 'PostgreSQL',
+              redis: this.config.get<string>('REDIS_VERSION') ?? 'Redis',
+              stellarSdk: this.config.get<string>('STELLAR_SDK_VERSION') ?? '13.0.0',
+            },
+          }
+        : {}),
+      checks: (detailed ? checks : this.toPublicChecks(checks)) as any,
+    } as HealthResponseDto;
 
     const statusFormat = this.getStatusFormat(req.headers['accept']);
     const responseBody = this.transformStatusFormat(body, statusFormat);
