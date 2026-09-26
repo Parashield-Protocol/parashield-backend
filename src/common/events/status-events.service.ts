@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
+import { ConfigService } from '@nestjs/config';
 import type Redis from 'ioredis';
 import { PrismaService } from '../../prisma/prisma.service';
 
@@ -19,6 +20,7 @@ export interface PolicyStatusEvent {
 }
 
 const STATUS_EVENTS_CHANNEL = 'policy:status:events';
+const DEFAULT_MAX_LISTENERS = 1000;
 
 /**
  * StatusEventsService — pub/sub for policy status changes (#349).
@@ -42,10 +44,14 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     private readonly redis?: Redis,
     @Optional()
     private readonly prisma?: PrismaService,
+    @Optional()
+    private readonly config?: ConfigService,
   ) {
-    // Default is 10 — a popular policy with many open SSE connections
-    // shouldn't trigger Node's "possible memory leak" warning.
-    this.emitter.setMaxListeners(1000);
+    const configuredMaxListeners = Number(this.config?.get<string>('STATUS_EVENTS_MAX_LISTENERS'));
+    const maxListeners = Number.isSafeInteger(configuredMaxListeners) && configuredMaxListeners > 0
+      ? configuredMaxListeners
+      : DEFAULT_MAX_LISTENERS;
+    this.emitter.setMaxListeners(maxListeners);
   }
 
   setPolicyOwner(policyId: string, owner: string): void {
