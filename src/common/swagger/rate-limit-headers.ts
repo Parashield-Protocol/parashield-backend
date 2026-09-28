@@ -73,9 +73,10 @@ const RATE_LIMIT_429_RESPONSE = {
  * The global ThrottlerGuard (@nestjs/throttler, wired up via APP_GUARD in
  * app.module.ts) enforces 60 req / 60 s per IP by default and sets these
  * headers at runtime; a handful of endpoints override it with a tighter,
- * endpoint-specific window via @Throttle() (see auth.controller.ts and
- * claims.controller.ts), which is why the generic 429 injected below is
- * skipped for any operation that already documents its own.
+ * endpoint-specific window via @Throttle() (see auth.controller.ts,
+ * claims.controller.ts and webhooks.controller.ts), which is why the generic
+ * 429 injected below is skipped for any operation that already documents its
+ * own.
  */
 export function applyRateLimitHeaders(document: OpenAPIObject): void {
   for (const pathItem of Object.values(document.paths)) {
