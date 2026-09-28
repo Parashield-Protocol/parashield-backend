@@ -40,6 +40,7 @@ import { ProductResponseDto, PolicyResponseDto, CancellationResponseDto } from '
 import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
+import { AdminRoleGuard } from '../auth/admin-role.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { PolicyStatusEventDto } from '../common/events/dto/sse-event.dto';
@@ -335,13 +336,13 @@ export class PolicyController {
     return { success: true, data: result };
   }
 
-  // #347 — admin-only product management. Gated by OperatorAuthGuard, the
-  // same admin-key-or-admin-JWT guard already used for oracle/claims admin
-  // routes, rather than a new auth mechanism.
+  // #347 — admin-only product management. OperatorAuthGuard authenticates
+  // (admin API key or admin JWT); AdminRoleGuard then authorizes, so a
+  // non-admin JWT or the oracle-only operator key cannot manage products.
 
   /** POST /api/v1/admin/products — create a new insurance product */
   @Post('admin/products')
-  @UseGuards(OperatorAuthGuard)
+  @UseGuards(OperatorAuthGuard, AdminRoleGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: '[Admin] Create a new insurance product' })
   @ApiResponse({
@@ -354,6 +355,8 @@ export class PolicyController {
       ],
     },
   })
+  @ApiErrorResponse(401, 'Missing or invalid operator API key or admin bearer token.', undefined, 'Missing or invalid operator API key')
+  @ApiErrorResponse(403, 'Admin credentials required (admin JWT or ADMIN_API_KEY).', undefined, 'Admin credentials required')
   @HttpCode(HttpStatus.CREATED)
   async createProduct(@Body() dto: CreateProductDto) {
     const product = await this.policy.createProduct(dto);
@@ -362,7 +365,7 @@ export class PolicyController {
 
   /** PATCH /api/v1/admin/products/:id — update an insurance product */
   @Patch('admin/products/:id')
-  @UseGuards(OperatorAuthGuard)
+  @UseGuards(OperatorAuthGuard, AdminRoleGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: '[Admin] Update an insurance product' })
   @ApiParam({ name: 'id', description: 'Product UUID' })
@@ -376,6 +379,8 @@ export class PolicyController {
       ],
     },
   })
+  @ApiErrorResponse(401, 'Missing or invalid operator API key or admin bearer token.', undefined, 'Missing or invalid operator API key')
+  @ApiErrorResponse(403, 'Admin credentials required (admin JWT or ADMIN_API_KEY).', undefined, 'Admin credentials required')
   @ApiErrorResponse(404, 'No product found for the given ID.', undefined, 'Product not found')
   async updateProduct(@Param('id') id: string, @Body() dto: UpdateProductDto) {
     const product = await this.policy.updateProduct(id, dto);
@@ -384,7 +389,7 @@ export class PolicyController {
 
   /** DELETE /api/v1/admin/products/:id — deactivate an insurance product */
   @Delete('admin/products/:id')
-  @UseGuards(OperatorAuthGuard)
+  @UseGuards(OperatorAuthGuard, AdminRoleGuard)
   @HttpCode(HttpStatus.OK)
   @ApiBearerAuth()
   @ApiOperation({ summary: '[Admin] Deactivate an insurance product (soft delete)' })
@@ -399,6 +404,8 @@ export class PolicyController {
       ],
     },
   })
+  @ApiErrorResponse(401, 'Missing or invalid operator API key or admin bearer token.', undefined, 'Missing or invalid operator API key')
+  @ApiErrorResponse(403, 'Admin credentials required (admin JWT or ADMIN_API_KEY).', undefined, 'Admin credentials required')
   @ApiErrorResponse(404, 'No product found for the given ID.', undefined, 'Product not found')
   async deactivateProduct(@Param('id') id: string) {
     const product = await this.policy.deactivateProduct(id);
@@ -459,12 +466,10 @@ export class PolicyController {
       subscriber.next({ data: { policyId: id, status: policyData.status, timestamp: Date.now() } });
 
       const unsubscribe = this.statusEvents.subscribeToPolicyStatus(id, (event) => {
-        subscriber.next({ data: event });
-      }, authedWallet);
         if (!subscriber.closed) {
           subscriber.next({ data: event });
         }
-      });
+      }, authedWallet);
 
       // #491 — detect clients that went away without a clean close. The
       // periodic write fails once the peer is gone, and both that and a

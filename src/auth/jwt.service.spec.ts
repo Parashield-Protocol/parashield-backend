@@ -5,6 +5,13 @@ import { UnauthorizedException } from '@nestjs/common';
 import * as jwt from 'jsonwebtoken';
 
 describe('JwtService', () => {
+  const redisStub = () => ({
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+    exists: jest.fn().mockResolvedValue(0),
+  });
+
   const mockConfigService = (secret?: string) => ({
     get: jest.fn((key: string) => {
       if (key === 'JWT_SECRET') return secret;
@@ -14,12 +21,12 @@ describe('JwtService', () => {
 
   it('should throw an Error on initialization if JWT_SECRET is not set', async () => {
     expect(() => {
-      new JwtService(mockConfigService(undefined) as any);
+      new JwtService(mockConfigService(undefined) as any, redisStub() as any);
     }).toThrow('JWT_SECRET environment variable is required');
   });
 
   it('should initialize successfully if JWT_SECRET is set', () => {
-    const service = new JwtService(mockConfigService('my-secret-key') as any);
+    const service = new JwtService(mockConfigService('my-secret-key') as any, redisStub() as any);
     expect(service).toBeDefined();
   });
 
@@ -27,7 +34,7 @@ describe('JwtService', () => {
     let service: JwtService;
 
     beforeEach(() => {
-      service = new JwtService(mockConfigService('my-secret-key') as any);
+      service = new JwtService(mockConfigService('my-secret-key') as any, redisStub() as any);
     });
 
     it('should sign a token and verify it successfully', () => {
@@ -40,7 +47,7 @@ describe('JwtService', () => {
     });
 
     it('should expose the configured token expiry', () => {
-      expect(service.expiresIn).toBe('7d');
+      expect(service.expiresIn).toBe('1h');
     });
 
     it('should throw UnauthorizedException for an invalid token', () => {

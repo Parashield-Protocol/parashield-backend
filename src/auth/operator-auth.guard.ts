@@ -2,7 +2,7 @@ import { CanActivate, ExecutionContext, Injectable, InternalServerErrorException
 import { ConfigService } from '@nestjs/config';
 import { createHash, timingSafeEqual } from 'crypto';
 import { JwtService } from './jwt.service';
-import { AuthenticatedRequest } from './authenticated-request';
+import { ApiKeySource, AuthenticatedRequest } from './authenticated-request';
 import Redis from 'ioredis';
 
 interface FailureRecord {
@@ -36,8 +36,11 @@ export class OperatorAuthGuard implements CanActivate {
 
     await this.checkRateLimit(ip);
 
-    if (this.hasValidApiKey(request)) {
+    const apiKeySource = this.resolveApiKeySource(request);
+    if (apiKeySource) {
       await this.resetFailures(ip);
+      request.authVia = 'api-key';
+      request.apiKeySource = apiKeySource;
       return true;
     }
 
@@ -54,6 +57,7 @@ export class OperatorAuthGuard implements CanActivate {
         throw new UnauthorizedException('Admin bearer token required');
       }
       await this.resetFailures(ip);
+      request.authVia = 'jwt';
       request.wallet = payload.walletAddress;
       request.user = payload;
       return true;
@@ -118,46 +122,54 @@ export class OperatorAuthGuard implements CanActivate {
     return request.ip ?? request.socket?.remoteAddress ?? 'unknown';
   }
 
-  private hasValidApiKey(request: AuthenticatedRequest): boolean {
-    const configuredKey =
-      this.config.get<string>('ORACLE_OPERATOR_API_KEY') ??
-      this.config.get<string>('ADMIN_API_KEY');
+  /**
+   * Which configured key (if any) the request presented:
+   *  - 'admin'    → ADMIN_API_KEY, i.e. a credential trusted for admin routes
+   *  - 'operator' → ORACLE_OPERATOR_API_KEY, i.e. the oracle-feed key
+   * Returns null when no configured key matches.
+   */
+  private resolveApiKeySource(request: AuthenticatedRequest): ApiKeySource | null {
+    const adminKey    = this.config.get<string>('ADMIN_API_KEY');
+    const operatorKey = this.config.get<string>('ORACLE_OPERATOR_API_KEY');
 
-    if (!configuredKey) {
+    if (!adminKey && !operatorKey) {
       throw new InternalServerErrorException(
-        'Server misconfiguration: ORACLE_OPERATOR_API_KEY is not set',
+        'Server misconfiguration: ORACLE_OPERATOR_API_KEY or ADMIN_API_KEY is not set',
       );
     }
 
     const providedKey = this.getHeader(request, 'x-api-key') ?? this.getHeader(request, 'x-admin-api-key');
-    if (!providedKey) return false;
+    if (!providedKey) return null;
 
     // #379 — the current key always works; a rotated-out key keeps working
     // for the grace window so clients can switch without downtime.
-    if (this.constantTimeEqual(providedKey, configuredKey)) return true;
-    return this.acceptsRotatedOutKey(providedKey);
+    if (adminKey && this.constantTimeEqual(providedKey, adminKey)) return 'admin';
+    if (operatorKey && this.constantTimeEqual(providedKey, operatorKey)) return 'operator';
+    if (this.acceptsRotatedOutKey(providedKey, 'admin')) return 'admin';
+    if (this.acceptsRotatedOutKey(providedKey, 'operator')) return 'operator';
+    return null;
   }
 
   /**
    * #379 — API key rotation with grace period, zero downtime:
-   *   1. Move the old key into ORACLE_OPERATOR_API_KEY_PREVIOUS (and/or
-   *      ADMIN_API_KEY_PREVIOUS) and set the new value on the current variable,
-   *      then restart. Both keys authenticate during the grace window.
+   *   1. Move the old key into ADMIN_API_KEY_PREVIOUS (and/or
+   *      ORACLE_OPERATOR_API_KEY_PREVIOUS) and set the new value on the current
+   *      variable, then restart. Both keys authenticate during the grace window.
    *   2. Clients migrate to the new key.
    *   3. Remove the *_PREVIOUS variables (API_KEY_ROTATION_GRACE_MINUTES
    *      bounds how long step 1's overlap lasts; default 24h).
    */
-  private acceptsRotatedOutKey(providedKey: string): boolean {
-    const previousKeys = [
-      this.config.get<string>('ORACLE_OPERATOR_API_KEY_PREVIOUS'),
-      this.config.get<string>('ADMIN_API_KEY_PREVIOUS'),
-    ].filter((key): key is string => typeof key === 'string' && key.length > 0);
+  private acceptsRotatedOutKey(providedKey: string, source: ApiKeySource): boolean {
+    const previousKeys = (source === 'admin'
+      ? [this.config.get<string>('ADMIN_API_KEY_PREVIOUS')]
+      : [this.config.get<string>('ORACLE_OPERATOR_API_KEY_PREVIOUS')]
+    ).filter((key): key is string => typeof key === 'string' && key.length > 0);
 
     if (previousKeys.length === 0 || !this.isWithinGracePeriod()) return false;
 
     const matched = previousKeys.some((key) => this.constantTimeEqual(providedKey, key));
     if (matched) {
-      this.logger.warn('Authenticated with rotated-out API key during grace period');
+      this.logger.warn(`Authenticated with rotated-out ${source} API key during grace period`);
     }
     return matched;
   }

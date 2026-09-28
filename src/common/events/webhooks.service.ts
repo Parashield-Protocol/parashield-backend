@@ -307,8 +307,9 @@ export class WebhooksService {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
 
+    let response: Response;
     try {
-      const response = await fetch(registration.url, {
+      response = await fetch(registration.url, {
         method: 'POST',
         headers,
         body: payloadStr,

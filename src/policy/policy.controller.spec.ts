@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 import { PolicyService } from "./policy.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { OperatorAuthGuard } from "../auth/operator-auth.guard";
+import { AdminRoleGuard } from "../auth/admin-role.guard";
 import { AuthenticatedRequest } from "../auth/authenticated-request";
 import { StatusEventsService } from "../common/events/status-events.service";
 import { ForbiddenException, BadRequestException, NotFoundException, UnauthorizedException } from "@nestjs/common";
@@ -22,6 +23,9 @@ describe("PolicyController", () => {
     validatePoolCapacity: jest.fn(),
     calculatePremium: jest.fn(),
     confirmAndCreatePolicy: jest.fn(),
+    createProduct: jest.fn(),
+    updateProduct: jest.fn(),
+    deactivateProduct: jest.fn(),
   };
 
   const mockStatusEventsService = {
@@ -46,6 +50,8 @@ describe("PolicyController", () => {
       .overrideGuard(JwtAuthGuard)
       .useValue({ canActivate: () => true })
       .overrideGuard(OperatorAuthGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(AdminRoleGuard)
       .useValue({ canActivate: () => true })
       .compile();
 
@@ -478,6 +484,45 @@ describe("PolicyController", () => {
       const reflector = new Reflector();
       const guards = reflector.get<unknown[]>("__guards__", controller.getProducts);
       expect(guards).toBeUndefined();
+    });
+  });
+
+  // Product management is admin-only: OperatorAuthGuard authenticates the
+  // caller (admin key or admin JWT), then AdminRoleGuard authorizes — so a
+  // non-admin JWT or the oracle-only operator key cannot manage products.
+  describe("admin product endpoints authorization", () => {
+    const reflector = new Reflector();
+
+    function expectAdminGuards(handler: (...args: never[]) => unknown) {
+      const guards = reflector.get<unknown[]>("__guards__", handler);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(OperatorAuthGuard);
+      expect(guards).toContain(AdminRoleGuard);
+      expect(guards!.indexOf(OperatorAuthGuard)).toBeLessThan(
+        guards!.indexOf(AdminRoleGuard),
+      );
+    }
+
+    it("createProduct runs OperatorAuthGuard before AdminRoleGuard", () => {
+      expectAdminGuards(controller.createProduct);
+    });
+
+    it("updateProduct runs OperatorAuthGuard before AdminRoleGuard", () => {
+      expectAdminGuards(controller.updateProduct);
+    });
+
+    it("deactivateProduct runs OperatorAuthGuard before AdminRoleGuard", () => {
+      expectAdminGuards(controller.deactivateProduct);
+    });
+
+    it("returns the created product when the service succeeds", async () => {
+      const dto = { name: "Crop Insurance" } as any;
+      mockPolicyService.createProduct.mockResolvedValue({ id: "prod-1" });
+
+      const result = await controller.createProduct(dto);
+
+      expect(mockPolicyService.createProduct).toHaveBeenCalledWith(dto);
+      expect(result).toEqual({ success: true, data: { id: "prod-1" } });
     });
   });
 

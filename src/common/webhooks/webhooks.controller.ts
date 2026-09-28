@@ -1,4 +1,5 @@
 import { Controller, Post, Body, Get } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiExtraModels, getSchemaPath } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../swagger/api-error-responses';
 import { WebhooksService } from '../events/webhooks.service';
@@ -11,6 +12,14 @@ import {
   ClaimStatusChangePayloadDto,
 } from './dto/webhook.dto';
 
+/**
+ * Registrations are cheap to create but expensive to serve — every status
+ * event fans out to every active row — so POST /register gets a much tighter
+ * window than the app-wide 60 req / 60 s default. UserThrottlerGuard keys the
+ * counter on the caller's wallet when a JWT is present, falling back to IP.
+ */
+const REGISTER_THROTTLE = { default: { limit: 10, ttl: 60000 } };
+
 @Controller('webhooks')
 @ApiTags('webhooks')
 @ApiExtraModels(RegisterWebhookDto, WebhookRegistrationResponseDto, WebhookListItemDto, PolicyStatusChangePayloadDto, ClaimStatusChangePayloadDto)
@@ -20,8 +29,14 @@ export class WebhooksController {
     private readonly prisma: PrismaService,
   ) {}
 
-  /** POST /api/v1/webhooks/register — register a webhook endpoint */
+  /**
+   * POST /api/v1/webhooks/register — register a webhook endpoint
+   *
+   * Rate limited: 10 registrations / 60 s per IP (per authenticated wallet
+   * when a JWT is presented).
+   */
   @Post('register')
+  @Throttle(REGISTER_THROTTLE)
   @ApiOperation({
     summary: 'Register a webhook for real-time event notifications',
     description:
@@ -42,6 +57,7 @@ export class WebhooksController {
   @ApiBearerAuth()
   @ApiResponse({ status: 201, description: 'Webhook registered successfully', schema: { $ref: getSchemaPath(WebhookRegistrationResponseDto) } })
   @ApiErrorResponse(400, 'Request body failed validation (missing url, unsupported event type, etc.).', undefined, 'url must be a URL address; events must contain only supported event types')
+  @ApiErrorResponse(429, 'Rate limit exceeded — webhook registration allows 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async register(@Body() dto: RegisterWebhookDto) {
     const result = await this.webhooks.registerWebhook({
       url: dto.url,
