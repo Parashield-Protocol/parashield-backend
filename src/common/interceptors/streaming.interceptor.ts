@@ -6,7 +6,7 @@ import {
   StreamableFile,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
-import { switchMap } from 'rxjs/operators';
+import { map, switchMap } from 'rxjs/operators';
 import { PassThrough } from 'stream';
 import { Request, Response } from 'express';
 
@@ -24,17 +24,17 @@ import { Request, Response } from 'express';
  *   • Request header:  Accept: application/x-ndjson
  *   • Query parameter: ?stream=true
  *
- * When neither condition is present the interceptor is a no-op and the
- * standard JSON response path is used unchanged.
+ * When neither condition is present the interceptor keeps the standard JSON
+ * response path unchanged.
  *
  * The NDJSON format uses one JSON line per item:
  *   {"id":"...","status":"ACTIVE",...}\n
  *   {"id":"...","status":"ACTIVE",...}\n
  *   ...
  *
- * Clients that need the full metadata envelope (success, total, page, limit)
- * can either use the standard (non-streaming) response or read the custom
- * response headers:
+ * Pagination metadata is exposed as response headers on *every* list response,
+ * streaming or not, so clients never have to parse the wrapper object just to
+ * get count info:
  *   X-Total-Count  — total number of items in the list
  *   X-Page         — page number returned (when applicable)
  *   X-Limit        — page size (when applicable)
@@ -56,11 +56,20 @@ export class StreamingInterceptor implements NestInterceptor {
       request.query['stream'] === 'true';
 
     if (!wantsStream) {
-      return next.handle();
+      // JSON path: same pagination headers as the NDJSON path, so
+      // X-Total-Count is present whether or not the client asked to stream.
+      return next.handle().pipe(
+        map((payload: unknown) => {
+          this.applyPaginationHeaders(response, payload);
+          return payload;
+        }),
+      );
     }
 
     return next.handle().pipe(
       switchMap((payload: unknown) => {
+        this.applyPaginationHeaders(response, payload);
+
         // Only stream responses that carry a data array.
         // Non-list responses (single objects, errors) pass through unchanged.
         if (
@@ -76,22 +85,8 @@ export class StreamingInterceptor implements NestInterceptor {
 
         const envelope  = payload as Record<string, unknown>;
         const items     = envelope['data'] as unknown[];
-        const total     = envelope['total'];
-        const page      = envelope['page'];
-        const limit     = envelope['limit'];
 
-        // Expose pagination metadata via response headers so NDJSON clients
-        // don't have to parse a wrapper object just to get count info.
         response.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
-        if (total !== undefined) {
-          response.setHeader('X-Total-Count', String(total));
-        }
-        if (page !== undefined) {
-          response.setHeader('X-Page', String(page));
-        }
-        if (limit !== undefined) {
-          response.setHeader('X-Limit', String(limit));
-        }
 
         // Build a PassThrough stream and write each item as a JSON line.
         const passThrough = new PassThrough();
@@ -119,5 +114,28 @@ export class StreamingInterceptor implements NestInterceptor {
         });
       }),
     );
+  }
+
+  /**
+   * Mirrors the envelope's pagination fields onto response headers. Missing
+   * fields are simply skipped (headers must not be sent with an empty value),
+   * and a `total` of 0 is still reported so clients can tell "empty page"
+   * from "header absent".
+   */
+  private applyPaginationHeaders(response: Response, payload: unknown): void {
+    if (payload === null || typeof payload !== 'object') return;
+
+    const envelope = payload as Record<string, unknown>;
+    const headers: Array<[string, unknown]> = [
+      ['X-Total-Count', envelope['total']],
+      ['X-Page',        envelope['page']],
+      ['X-Limit',       envelope['limit']],
+    ];
+
+    for (const [header, value] of headers) {
+      if (value !== undefined && value !== null) {
+        response.setHeader(header, String(value));
+      }
+    }
   }
 }
