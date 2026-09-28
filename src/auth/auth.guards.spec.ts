@@ -10,17 +10,18 @@ import { AuthenticatedRequest } from './authenticated-request';
 describe('Auth guards', () => {
   const secret = 'test-secret';
   let jwtService: JwtService;
-  let redis: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
+  let redis: { get: jest.Mock; set: jest.Mock; del: jest.Mock; exists: jest.Mock };
 
   beforeEach(() => {
     redis = {
       get: jest.fn().mockResolvedValue(null),
       set: jest.fn().mockResolvedValue('OK'),
       del: jest.fn().mockResolvedValue(1),
+      exists: jest.fn().mockResolvedValue(0),
     };
     jwtService = new JwtService({
       get: jest.fn((key: string) => key === 'JWT_SECRET' ? secret : undefined),
-    } as unknown as ConfigService);
+    } as unknown as ConfigService, redis as any);
   });
 
   function contextFor(request: Partial<AuthenticatedRequest>): ExecutionContext {
@@ -31,7 +32,7 @@ describe('Auth guards', () => {
     } as unknown as ExecutionContext;
   }
 
-  it('verifies bearer JWTs and sets req.wallet', () => {
+  it('verifies bearer JWTs and sets req.wallet', async () => {
     const token = jwtService.sign('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ');
     const request = {
       headers: { authorization: `Bearer ${token}` },
@@ -39,11 +40,11 @@ describe('Auth guards', () => {
 
     const guard = new JwtAuthGuard(jwtService);
 
-    expect(guard.canActivate(contextFor(request))).toBe(true);
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
     expect(request.wallet).toBe('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ');
   });
 
-  it('sets req.user.walletAddress after successful JWT verification', () => {
+  it('sets req.user.walletAddress after successful JWT verification', async () => {
     const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
     const token = jwtService.sign(walletAddress);
     const request = {
@@ -51,12 +52,12 @@ describe('Auth guards', () => {
     } as Partial<AuthenticatedRequest>;
 
     const guard = new JwtAuthGuard(jwtService);
-    guard.canActivate(contextFor(request));
+    await guard.canActivate(contextFor(request));
 
     expect(request.user?.walletAddress).toBe(walletAddress);
   });
 
-  it('populates req.user with full JWT payload including role and admin', () => {
+  it('populates req.user with full JWT payload including role and admin', async () => {
     const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
     const token = jwtService.signWithRole(walletAddress, 'admin', true);
     const request = {
@@ -64,20 +65,20 @@ describe('Auth guards', () => {
     } as Partial<AuthenticatedRequest>;
 
     const guard = new JwtAuthGuard(jwtService);
-    guard.canActivate(contextFor(request));
+    await guard.canActivate(contextFor(request));
 
     expect(request.user?.walletAddress).toBe(walletAddress);
     expect(request.user?.role).toBe('admin');
     expect(request.user?.admin).toBe(true);
   });
 
-  it('rejects requests without JWTs on JWT-protected routes', () => {
+  it('rejects requests without JWTs on JWT-protected routes', async () => {
     const guard = new JwtAuthGuard(jwtService);
 
-    expect(() => guard.canActivate(contextFor({ headers: {} }))).toThrow(UnauthorizedException);
+    await expect(guard.canActivate(contextFor({ headers: {} }))).rejects.toThrow(UnauthorizedException);
   });
 
-  it('rejects expired JWTs', () => {
+  it('rejects expired JWTs', async () => {
     const expiredToken = jwt.sign(
       { walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ' },
       secret,
@@ -89,10 +90,10 @@ describe('Auth guards', () => {
 
     const guard = new JwtAuthGuard(jwtService);
 
-    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
+    await expect(guard.canActivate(contextFor(request))).rejects.toThrow(UnauthorizedException);
   });
 
-  it('rejects JWTs signed with the wrong secret', () => {
+  it('rejects JWTs signed with the wrong secret', async () => {
     const wrongToken = jwt.sign(
       { walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ' },
       'wrong-secret',
@@ -103,7 +104,7 @@ describe('Auth guards', () => {
 
     const guard = new JwtAuthGuard(jwtService);
 
-    expect(() => guard.canActivate(contextFor(request))).toThrow(UnauthorizedException);
+    await expect(guard.canActivate(contextFor(request))).rejects.toThrow(UnauthorizedException);
   });
 
   it('allows operator API keys for oracle fetch routes', async () => {
@@ -117,13 +118,52 @@ describe('Auth guards', () => {
     const guard = new OperatorAuthGuard(config, jwtService, redis as any);
 
     await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.authVia).toBe('api-key');
+    expect(request.apiKeySource).toBe('operator');
+  });
+
+  // The oracle key authenticates, but it must not silently count as an admin
+  // credential — AdminRoleGuard reads apiKeySource to tell them apart.
+  it('authenticates ADMIN_API_KEY when both keys are configured, tagged as admin', async () => {
+    const config = {
+      get: jest.fn((key: string) =>
+        key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret'
+        : key === 'ADMIN_API_KEY' ? 'admin-secret'
+        : undefined),
+    } as unknown as ConfigService;
+    const request = {
+      headers: { 'x-admin-api-key': 'admin-secret' },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.authVia).toBe('api-key');
+    expect(request.apiKeySource).toBe('admin');
+  });
+
+  it('tags a rotated-out key with the source it was rotated from', async () => {
+    const config = {
+      get: jest.fn((key: string) =>
+        key === 'ORACLE_OPERATOR_API_KEY' ? 'current-operator'
+        : key === 'ADMIN_API_KEY_PREVIOUS' ? 'old-admin-secret'
+        : undefined),
+    } as unknown as ConfigService;
+    const request = {
+      headers: { 'x-api-key': 'old-admin-secret' },
+    } as Partial<AuthenticatedRequest>;
+
+    const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+
+    await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    expect(request.apiKeySource).toBe('admin');
   });
 
   it('allows admin JWTs for oracle fetch routes', async () => {
-    const token = jwt.sign(
-      { walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ', role: 'admin' },
-      secret,
-      { expiresIn: '7d' },
+    const token = jwtService.signWithRole(
+      'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+      'admin',
+      true,
     );
     const config = {
       get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'dummy-key' : undefined),
@@ -136,6 +176,8 @@ describe('Auth guards', () => {
 
     await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
     expect(request.wallet).toBe('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ');
+    expect(request.authVia).toBe('jwt');
+    expect(request.apiKeySource).toBeUndefined();
   });
 
   // #182 — the guard's whole job is telling a wrong/missing key and a

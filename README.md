@@ -36,6 +36,8 @@ ParaShield supports two authentication schemes:
 
 Operator-only oracle fetch endpoints require either `x-api-key: <ORACLE_OPERATOR_API_KEY>` or an admin JWT. Public endpoints such as `/api/v1/products`, `/api/v1/oracle/latest/:key`, `/api/v1/health`, and `/docs` do not run wallet-header middleware.
 
+Admin product management (`POST`/`PATCH`/`DELETE /api/v1/admin/products`) is authenticated by `OperatorAuthGuard` and then authorized by `AdminRoleGuard`: it accepts an admin JWT (`role: admin`), `ADMIN_API_KEY`, or — only when `ADMIN_API_KEY` is unset — `ORACLE_OPERATOR_API_KEY`. Configuring both keys keeps oracle-feed automation out of product management.
+
 ### API key rotation
 
 Operator/admin API keys can be rotated without downtime:
