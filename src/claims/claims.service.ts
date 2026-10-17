@@ -50,6 +50,13 @@ const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 const CLAIM_COUNT_CACHE_TTL_MS = 30_000;
 const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
 
+// #603 — minimum spacing between Soroban contract invocations from this
+// instance, so a burst of claims can't flood the RPC endpoint.
+const CONTRACT_CALL_MIN_INTERVAL_MS = 100;
+
+// #603 — policy ids are UUIDs (Prisma @default(uuid())).
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -60,6 +67,7 @@ const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
   private readonly claimCountCache = new Map<string, { total: number; expiresAt: number }>();
+  private nextContractCallAt = 0;
 
   constructor(
     private readonly stellar: StellarService,
