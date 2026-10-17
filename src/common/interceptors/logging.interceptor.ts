@@ -10,6 +10,8 @@ import { tap } from 'rxjs/operators';
 import { Request, Response } from 'express';
 
 /** Query parameters whose values must never appear in logs. */
+const HEALTH_PATH_PREFIX = '/api/v1/health';
+
 const SENSITIVE_PARAMS = new Set([
   'wallet', 'secret', 'token', 'key', 'apikey', 'api_key',
   'authorization', 'password', 'seed', 'private_key',

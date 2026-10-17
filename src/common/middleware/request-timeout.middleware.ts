@@ -1,5 +1,6 @@
 import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
+import { buildProblemDetails } from '../errors/problem-details';
 
 // #409 — configurable request timeout. Long-running requests can exhaust
 // worker threads; responding with 408 lets the client retry instead of
@@ -38,14 +39,20 @@ export class RequestTimeoutMiddleware implements NestMiddleware {
       this.logger.warn(
         `Request timeout after ${this.timeoutMs}ms: ${req.method} ${req.url}`,
       );
-      res.status(408).json({
-        statusCode: 408,
-        error: 'Request Timeout',
-        message: 'The request exceeded the maximum allowed processing time.',
-      });
+      res.setHeader('Content-Type', 'application/problem+json');
+      res.status(408).json(
+        buildProblemDetails({
+          status: 408,
+          message: 'The request exceeded the maximum allowed processing time.',
+          error: 'Request Timeout',
+          path: req.originalUrl || req.url,
+          correlationId: (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined,
+        }),
+      );
       // Destroy the socket so the connection slot is released immediately.
       req.socket?.destroy();
     }, this.timeoutMs);
+
 
     // Guard against double response: if the handler completes after the
     // timeout already sent a 408, suppress the late write (#693).

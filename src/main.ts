@@ -313,28 +313,48 @@ async function bootstrap() {
       'paginated JSON envelope for large result sets — see that endpoint\'s own `stream` parameter ' +
       'description for details; pagination metadata is then returned via the `X-Total-Count`, `X-Page`, ' +
       'and `X-Limit` response headers instead of the JSON body.\n\n' +
-      '## Error Response Structure\n\n' +
-      'All error responses follow a consistent envelope format for reliable parsing:\n\n' +
+      '## Error Response Structure (RFC 7807 Problem Details)\n\n' +
+      'All error responses are returned with `Content-Type: application/problem+json` conforming to ' +
+      '[RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807). Legacy envelope fields remain ' +
+      'present for backward compatibility:\n\n' +
       '```json\n' +
       '{\n' +
+      '  "type": "https://parashield.io/errors/not-found",\n' +
+      '  "title": "Not Found",\n' +
+      '  "status": 404,\n' +
+      '  "detail": "Policy not found",\n' +
+      '  "instance": "/api/v1/policies/abc123",\n' +
       '  "success": false,\n' +
       '  "errorCode": "NOT_FOUND",\n' +
       '  "error": "Policy not found",\n' +
+      '  "message": "Policy not found",\n' +
       '  "statusCode": 404,\n' +
       '  "path": "/api/v1/policies/abc123",\n' +
       '  "timestamp": "2024-01-15T10:30:00.000Z"\n' +
       '}\n' +
       '```\n\n' +
-      '### Error Response Fields\n\n' +
+      '### Standard RFC 7807 Members\n\n' +
+      '| Member | Type | Description |\n' +
+      '|---|---|---|\n' +
+      '| `type` | `string (URI)` | Stable URI reference identifying the error type |\n' +
+      '| `title` | `string` | Short human-readable summary of the problem type |\n' +
+      '| `status` | `number` | HTTP status code |\n' +
+      '| `detail` | `string` | Human-readable explanation specific to this occurrence |\n' +
+      '| `instance` | `string (URI)` | Relative or absolute URI identifying the specific request path |\n' +
+      '| `errors` | `array` | (Extension) Validation failure details from class-validator |\n' +
+      '| `correlationId` | `string` | (Extension) Request correlation ID when available |\n\n' +
+      '### Backward Compatibility Fields (Deprecated)\n\n' +
       '| Field | Type | Description |\n' +
       '|-------|------|-------------|\n' +
-      '| `success` | `boolean` | Always `false` for errors |\n' +
-      '| `errorCode` | `string` | Stable machine-readable code (see table below) - key off this, not `error` |\n' +
-      '| `error` | `string` or `object` | Human-readable message, or validation error details for 400s. May change between versions |\n' +
-      '| `statusCode` | `number` | HTTP status code |\n' +
-      '| `path` | `string` | The request path that produced the error |\n' +
+      '| `success` | `boolean` | Always `false` for errors (Deprecated: use `status`) |\n' +
+      '| `errorCode` | `string` | Stable machine-readable code (Deprecated: use `type`) |\n' +
+      '| `error` | `string` or `object` | Error message string (Deprecated: use `detail`) |\n' +
+      '| `message` | `string` | Human-readable message (Deprecated: use `detail`) |\n' +
+      '| `statusCode` | `number` | HTTP status code (Deprecated: use `status`) |\n' +
+      '| `path` | `string` | Request path (Deprecated: use `instance`) |\n' +
       '| `timestamp` | `string` | ISO-8601 UTC timestamp |\n' +
-      '| `retryAfter` | `number` | (Optional) Seconds to wait before retrying - present only on 429 responses |\n\n' +
+      '| `retryAfter` | `number` | (Optional) Seconds to wait before retrying on 429 responses |\n\n' +
+
       '### Error Codes Reference\n\n' +
       '| `errorCode` | HTTP Status | When It Occurs |\n' +
       '|-------------|-------------|----------------|\n' +

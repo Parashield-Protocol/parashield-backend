@@ -203,32 +203,53 @@ BASE_URL=http://localhost:3001/api/v1 k6 run loadtest/k6/pool-stress.js
 
 ---
 
-## Error handling
+## Error handling (RFC 7807 Problem Details)
 
-
-All error responses follow the same envelope shape regardless of endpoint:
+All error responses use `Content-Type: application/problem+json` conforming to [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807). Legacy fields remain present in the response body for backward compatibility, but are deprecated:
 
 ```json
 {
+  "type": "https://parashield.io/errors/not-found",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Policy not found",
+  "instance": "/api/v1/policies/abc123",
   "success": false,
   "errorCode": "NOT_FOUND",
   "error": "Policy not found",
+  "message": "Policy not found",
   "statusCode": 404,
   "path": "/api/v1/policies/abc123",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
 ```
 
+### RFC 7807 Members
+
+| Member | Type | Description |
+|---|---|---|
+| `type` | `string (URI)` | Stable URI reference identifying the error type. |
+| `title` | `string` | Short human-readable summary of problem type. |
+| `status` | `number` | HTTP status code. |
+| `detail` | `string` | Human-readable explanation specific to this occurrence. |
+| `instance` | `string (URI)` | Request path that generated the error. |
+| `errors` | `array` | (Extension) Validation error details on 400 validation failures. |
+| `correlationId` | `string` | (Extension) Request correlation ID when header is provided. |
+
+### Legacy Fields (Deprecated)
+
 | Field | Type | Description |
 |---|---|---|
-| `success` | `boolean` | Always `false` for errors. |
-| `errorCode` | `string` | Stable machine-readable code (see table below). Key off this, not `error`. |
-| `error` | `string` \| `object` | Human-readable message, or NestJS validation error details for 400s. May change between versions. |
-| `statusCode` | `number` | Mirrors the HTTP status code. |
-| `path` | `string` | The request path that produced the error. |
+| `success` | `boolean` | Always `false` for errors (Deprecated: use `status`). |
+| `errorCode` | `string` | Stable machine-readable code (Deprecated: use `type`). |
+| `error` | `string` \| `object` | Error message string (Deprecated: use `detail`). |
+| `message` | `string` | Human-readable message (Deprecated: use `detail`). |
+| `statusCode` | `number` | Mirrors the HTTP status code (Deprecated: use `status`). |
+| `path` | `string` | The request path (Deprecated: use `instance`). |
 | `timestamp` | `string` | ISO-8601 UTC timestamp. |
 
 ### Error codes
+
 
 | `errorCode` | HTTP status | When it occurs |
 |---|---|---|
