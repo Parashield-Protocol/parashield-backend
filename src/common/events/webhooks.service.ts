@@ -3,7 +3,7 @@ import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
 
-type WebhookEvent = 'policy.status.change' | 'claim.status.change';
+type WebhookEvent = 'policy.status.change' | 'claim.status.change' | 'policy.oracle_key.change';
 
 export interface WebhookRegistration {
   id: string;
@@ -221,6 +221,56 @@ export class WebhooksService {
         } catch (err) {
           this.logger.error(
             `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
+  }
+
+  async notifyPolicyOracleKeyChange(event: {
+    policyId: string;
+    oldOracleKey: string;
+    newOracleKey: string;
+    actor?: string | null;
+    timestamp: number;
+    correlationId?: string | null;
+  }): Promise<WebhookDeliveryResult[]> {
+    const registrations = await this.getRegistrationsForEvent('policy.oracle_key.change');
+
+    const payload = {
+      policyId: event.policyId,
+      oldOracleKey: event.oldOracleKey,
+      newOracleKey: event.newOracleKey,
+      actor: event.actor ?? null,
+      timestamp: event.timestamp,
+      correlationId: event.correlationId ?? null,
+    };
+
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for policy oracle key change webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
           );
           return {
             registrationId: registration.id,

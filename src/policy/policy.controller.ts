@@ -38,6 +38,7 @@ import { PolicyService } from './policy.service';
 import { BuyPolicyDto } from './dto/buy-policy.dto';
 import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
+import { UpdatePolicyDto } from './dto/update-policy.dto';
 import { ProductResponseDto, PolicyResponseDto, CancellationResponseDto } from './dto/policy-response.dto';
 import { ResponseDto, PaginatedResponseDto } from '../common/dto/response.dto';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -335,6 +336,47 @@ export class PolicyController {
       throw new ForbiddenException('Policy belongs to a different wallet');
     }
     const result = await this.policy.cancelPolicy(id);
+    return { success: true, data: result };
+  }
+
+  /** PATCH /api/v1/policies/:id — update a policy (e.g. change oracleKey) (#717) */
+  @Patch('policies/:id')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Update a policy (e.g. change oracleKey)' })
+  @ApiParam({ name: 'id', description: 'Policy UUID' })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns the updated policy',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(ResponseDto) },
+        { properties: { data: { $ref: getSchemaPath(PolicyResponseDto) } } },
+      ],
+    },
+  })
+  @ApiErrorResponse(400, 'Invalid oracleKey format or period mismatch.', undefined, 'Invalid oracleKey format')
+  @ApiErrorResponse(401, 'Missing or invalid JWT.', undefined, 'Missing or invalid token')
+  @ApiErrorResponse(403, 'Policy belongs to a different wallet.', undefined, 'Policy belongs to a different wallet')
+  @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')
+  async updatePolicy(
+    @Param('id') id: string,
+    @Body() dto: UpdatePolicyDto,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
+    }
+    const policyData = await this.policy.getPolicy(id);
+    if (!policyData) {
+      throw new NotFoundException(`Policy ${id} not found`);
+    }
+    if (policyData.policyholder !== authedWallet) {
+      throw new ForbiddenException('Policy belongs to a different wallet');
+    }
+    const correlationId = (req.headers?.['x-correlation-id'] || req.headers?.['x-request-id']) as string | undefined;
+    const result = await this.policy.updatePolicy(id, dto, authedWallet, correlationId);
     return { success: true, data: result };
   }
 

@@ -8,8 +8,9 @@ import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { ConfigService } from '@nestjs/config';
 import { transition } from './policy-status.machine';
 import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
+import { UpdatePolicyDto } from './dto/update-policy.dto';
 import { WebhooksService } from '../common/events/webhooks.service';
-import { StatusEventsService } from '../common/events/status-events.service';
+import { StatusEventsService, PolicyOracleKeyChangeEvent } from '../common/events/status-events.service';
 
 const STROOPS_PER_XLM = 10_000_000n;
 
@@ -877,6 +878,124 @@ export class PolicyService {
       status:          updated!.status,
       claimsCount:     (updated as any)._count?.claims ?? 0,
       refundAmountXlm,
+    };
+  }
+
+  /**
+   * Update a policy (e.g. change oracleKey) (#717).
+   *
+   * If oracleKey is changing:
+   *  1. Validates the new key against product rules and temporal coverage.
+   *  2. Commits the update to the database.
+   *  3. AFTER the database update succeeds, emits a PolicyOracleKeyChangeEvent
+   *     and notifies webhooks.
+   *  4. If the database update fails/rolls back, no event is emitted.
+   *  5. If oracleKey is omitted or unchanged (no-op), no event is emitted.
+   */
+  async updatePolicy(
+    id: string,
+    dto: UpdatePolicyDto,
+    actor?: string | null,
+    correlationId?: string | null,
+  ): Promise<PolicySummary> {
+    const existing = await this.prisma.policy.findUnique({
+      where: { id },
+      include: {
+        product: true,
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Policy ${id} not found`);
+    }
+
+    const isOracleKeyProvided = dto.oracleKey !== undefined && dto.oracleKey !== null;
+    const isOracleKeyChanged = isOracleKeyProvided && dto.oracleKey !== existing.oracleKey;
+
+    if (!isOracleKeyChanged) {
+      return {
+        id:           String(existing.id),
+        productId:    existing.productId,
+        policyholder: existing.policyholder,
+        coverage:     existing.coverageXlm.toString(),
+        premiumPaid:  existing.premiumPaid.toString(),
+        oracleKey:    existing.oracleKey,
+        startTime:    Math.floor(existing.startTime.getTime() / 1000),
+        endTime:      Math.floor(existing.endTime.getTime() / 1000),
+        status:       existing.status,
+        claimsCount:  (existing as any)._count?.claims ?? 0,
+      };
+    }
+
+    const newOracleKey = dto.oracleKey!;
+
+    // Validate oracle key format and temporal coverage
+    const keyValidation = this.validateOracleKey(
+      newOracleKey,
+      this.mapProduct(existing.product),
+      existing.startTime,
+      existing.endTime,
+    );
+    if (!keyValidation.valid) {
+      throw new BadRequestException(keyValidation.reason);
+    }
+
+    // Commit change to DB
+    const updated = await this.prisma.policy.update({
+      where: { id },
+      data: {
+        oracleKey: newOracleKey,
+      },
+      include: {
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
+
+    const oldOracleKey = existing.oracleKey;
+    const timestamp = Date.now();
+
+    // Emit event ONLY AFTER database change is committed
+    const event: PolicyOracleKeyChangeEvent = {
+      policyId: String(updated.id),
+      oldOracleKey,
+      newOracleKey,
+      actor: actor ?? null,
+      timestamp,
+      correlationId: correlationId ?? null,
+    };
+
+    this.statusEvents.emitPolicyOracleKeyChange(event);
+    this.webhooks.notifyPolicyOracleKeyChange(event).catch((err) => {
+      this.logger.error(`Failed to dispatch oracle key change webhook for policy ${id}: ${err.message}`);
+    });
+
+    // Write audit log
+    await this.prisma.auditLog.create({
+      data: {
+        entityType: 'Policy',
+        entityId:   id,
+        fromStatus: existing.status,
+        toStatus:   existing.status,
+        reason:     `Oracle key changed from "${oldOracleKey}" to "${newOracleKey}" by ${actor ?? 'system'}`,
+      },
+    }).catch((err) => this.logger.error(`Failed to write audit log for policy ${id} oracle key update`, err));
+
+    return {
+      id:           String(updated.id),
+      productId:    updated.productId,
+      policyholder: updated.policyholder,
+      coverage:     updated.coverageXlm.toString(),
+      premiumPaid:  updated.premiumPaid.toString(),
+      oracleKey:    updated.oracleKey,
+      startTime:    Math.floor(updated.startTime.getTime() / 1000),
+      endTime:      Math.floor(updated.endTime.getTime() / 1000),
+      status:       updated.status,
+      claimsCount:  (updated as any)._count?.claims ?? 0,
     };
   }
 

@@ -63,6 +63,8 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | `GET` | `/api/v1/products` | List all active insurance products |
 | `GET` | `/api/v1/policies/me?wallet=<address>` | Get policies for a wallet address |
 | `GET` | `/api/v1/policies/:id` | Get a single policy by UUID |
+| `PATCH` | `/api/v1/policies/:id` | Update a policy (e.g. change oracleKey, emits status change event) |
+| `POST` | `/api/v1/policies/:id/cancel` | Cancel an active policy |
 | `POST` | `/api/v1/policies/buy` | Calculate premium and get a purchase quote |
 
 ### Claims
