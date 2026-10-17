@@ -15,6 +15,7 @@ import { HealthModule }  from './health/health.module';
 import { RedisModule }   from './redis/redis.module';
 import { VersioningInterceptor } from './common/interceptors/versioning.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { WebhooksModule } from './common/webhooks/webhooks.module';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
 
@@ -131,6 +132,10 @@ function validateConfig(config: Record<string, unknown>) {
     {
       provide: APP_INTERCEPTOR,
       useClass: LoggingInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: BigIntSerializerInterceptor,
     },
     {
       provide: APP_INTERCEPTOR,

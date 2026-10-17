@@ -39,7 +39,7 @@ export class JsonLogger extends ConsoleLogger {
       context,
       message:   typeof message === 'string' ? message : this.stringifyMessageForJson(message),
     };
-    return `${JSON.stringify(entry)}\n`;
+    return `${JSON.stringify(entry, (_key, val) => typeof val === 'bigint' ? val.toString() : val)}\n`;
   }
 
   private stringifyMessageForJson(message: unknown): string {
@@ -47,7 +47,7 @@ export class JsonLogger extends ConsoleLogger {
       return message.stack ?? message.message;
     }
     try {
-      return JSON.stringify(message);
+      return JSON.stringify(message, (_key, val) => typeof val === 'bigint' ? val.toString() : val);
     } catch {
       return String(message);
     }

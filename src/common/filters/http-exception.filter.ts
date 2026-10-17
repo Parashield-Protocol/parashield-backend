@@ -4,6 +4,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { errorCodeFromBody, errorCodeFromStatus } from '../errors/error-codes';
+import { serializeBigInt } from '../interceptors/bigint-serializer.interceptor';
 
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
@@ -61,7 +62,7 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       body['retryAfter'] = retryAfter;
     }
 
-    res.status(status).json(body);
+    res.status(status).json(serializeBigInt(body));
   }
 
   /**
@@ -82,11 +83,11 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     if (Array.isArray(obj['message'])) {
       return (obj['message'] as unknown[])
-        .map((m) => (typeof m === 'string' ? m : JSON.stringify(m)))
+        .map((m) => (typeof m === 'string' ? m : JSON.stringify(serializeBigInt(m))))
         .join('; ');
     }
 
-    return JSON.stringify(raw);
+    return JSON.stringify(serializeBigInt(raw));
   }
 
   /**

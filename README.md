@@ -283,6 +283,13 @@ For reference, successful responses use the complementary envelope:
 
 Monetary values are returned as strings in 7-decimal fixed-point format matching Stellar asset precision (e.g. `"10.0000000"`).
 
+### BigInt serialization & API contract change (#671)
+
+All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit timestamps or token amounts) are centrally serialized as decimal strings across all JSON responses, SSE streams, logging paths, and error envelopes.
+
+> [!NOTE]
+> **API Contract / Response-Shape Change**: Clients that previously parsed or expected numeric primitives for large integer or BigInt fields must now handle these fields as decimal strings (e.g. `"9223372036854775807"`). Requests accepting numeric IDs parse integer strings safely to `BigInt` and reject invalid, non-numeric, or floating-point input with HTTP 400 without `Number` precision degradation.
+
 ---
 
 ## Security & database configuration notes

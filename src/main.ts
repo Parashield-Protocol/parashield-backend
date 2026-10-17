@@ -77,6 +77,12 @@ async function bootstrap() {
   // by a client-supplied header. Defaults to trusting no proxies.
   app.set('trust proxy', parseTrustProxy(configService.get<string>('TRUST_PROXY')));
 
+  // #671 — Framework-level JSON replacer for Express so any direct res.json calls
+  // serialize BigInt values as decimal strings instead of throwing.
+  app.set('json replacer', (_key: string, value: unknown) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
+
   // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
   app.use(helmet());
 
