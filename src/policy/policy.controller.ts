@@ -419,6 +419,7 @@ export class PolicyController {
    */
   @Sse('policies/:id/events')
   @UseGuards(JwtAuthGuard)
+  @UseInterceptors(StreamingInterceptor)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Server-Sent Events stream of status changes for a policy',
