@@ -23,6 +23,12 @@ const SENSITIVE_BODY_FIELDS = new Set([
 ]);
 
 /**
+ * Health/probe paths that load balancers poll every few seconds. Logging them
+ * drowns out real traffic, so they are skipped entirely.
+ */
+const HEALTH_PATH_PREFIX = '/api/v1/health';
+
+/**
  * LoggingInterceptor — logs every incoming request and its response time.
  *
  * Logs at the start of each request and on completion via tap().
