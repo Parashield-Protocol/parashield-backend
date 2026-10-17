@@ -685,7 +685,15 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     this.logger.log(`get_claim: ${claimId}`);
     const claim = await this.prisma.claim.findUnique({
       where: { id: claimId },
-      include: { policy: true },
+      include: {
+        policy: {
+          include: {
+            _count: {
+              select: { claims: true },
+            },
+          },
+        },
+      },
     });
     if (!claim) return null;
 
@@ -716,6 +724,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         startTime:      Math.floor(claim.policy.startTime.getTime() / 1000),
         endTime:        Math.floor(claim.policy.endTime.getTime() / 1000),
         status:         claim.policy.status,
+        claimsCount:    (claim.policy as any)._count?.claims ?? 0,
       };
     }
 

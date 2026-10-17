@@ -46,6 +46,7 @@ export interface PolicySummary {
   startTime:      number;
   endTime:        number;
   status:         string;
+  claimsCount:    number;
 }
 
 export interface CancellationResult extends PolicySummary {
@@ -562,6 +563,11 @@ export class PolicyService {
     const [policies, total] = await this.prisma.$transaction([
       this.prisma.policy.findMany({
         where: { policyholder: address },
+        include: {
+          _count: {
+            select: { claims: true },
+          },
+        },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take,
         skip,
@@ -647,7 +653,14 @@ export class PolicyService {
   async getPolicy(policyId: string): Promise<PolicySummary | null> {
     this.logger.log(`get_policy: ${policyId}`);
     // Try database first
-    const dbPolicy = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    const dbPolicy = await this.prisma.policy.findUnique({
+      where: { id: policyId },
+      include: {
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
     if (dbPolicy) {
       return {
         id:           dbPolicy.id,
@@ -659,6 +672,7 @@ export class PolicyService {
         startTime:    Math.floor(dbPolicy.startTime.getTime() / 1000),
         endTime:      Math.floor(dbPolicy.endTime.getTime() / 1000),
         status:       dbPolicy.status,
+        claimsCount:  (dbPolicy as any)._count?.claims ?? 0,
       };
     }
     // #216 — DB is the source of truth for reads, but a policy created directly
@@ -714,6 +728,7 @@ export class PolicyService {
         startTime:    Number(onChain.start_time),
         endTime:      Number(onChain.end_time),
         status:       onChain.status,
+        claimsCount:  0,
       };
     } catch (err) {
       this.logger.warn(`get_policy on-chain fallback failed for ${policyId}: ${(err as Error).message}`);
@@ -739,6 +754,7 @@ export class PolicyService {
       startTime:    Math.floor(p.startTime.getTime() / 1000),
       endTime:      Math.floor(p.endTime.getTime() / 1000),
       status:       p.status,
+      claimsCount:  (p as any)._count?.claims ?? 0,
     }));
     return { data, total, page, limit: clampedLimit };
   }
@@ -841,7 +857,14 @@ export class PolicyService {
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
 
-    const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    const updated = await this.prisma.policy.findUnique({
+      where: { id: policyId },
+      include: {
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
     return {
       id:              updated!.id,
       productId:       updated!.productId,
@@ -852,6 +875,7 @@ export class PolicyService {
       startTime:       Math.floor(updated!.startTime.getTime() / 1000),
       endTime:         Math.floor(updated!.endTime.getTime() / 1000),
       status:          updated!.status,
+      claimsCount:     (updated as any)._count?.claims ?? 0,
       refundAmountXlm,
     };
   }

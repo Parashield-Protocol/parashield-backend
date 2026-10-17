@@ -65,6 +65,9 @@ export class PolicyResponseDto {
 
   @ApiProperty({ description: 'Stellar transaction hash for policy creation', nullable: true })
   txHash: string | null;
+
+  @ApiProperty({ description: 'Total number of claims submitted for this policy', example: 0 })
+  claimsCount: number;
 }
 
 export class CancellationResponseDto extends PolicyResponseDto {

@@ -57,6 +57,7 @@ describe('policy-response.dto', () => {
       dto.endTime = Math.floor(Date.now() / 1000) + 90 * 86400;
       dto.status = 'ACTIVE';
       dto.txHash = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+      dto.claimsCount = 0;
       return dto;
     }
 
@@ -72,6 +73,7 @@ describe('policy-response.dto', () => {
       expect(typeof dto.endTime).toBe('number');
       expect(dto.status).toBe('ACTIVE');
       expect(dto.txHash).toBe('abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789');
+      expect(dto.claimsCount).toBe(0);
 
       expect(typeof dto.id).toBe('string');
       expect(typeof dto.productId).toBe('string');
@@ -81,6 +83,7 @@ describe('policy-response.dto', () => {
       expect(typeof dto.oracleKey).toBe('string');
       expect(typeof dto.status).toBe('string');
       expect(typeof dto.txHash).toBe('string');
+      expect(typeof dto.claimsCount).toBe('number');
     });
 
     it('accepts null for txHash', () => {
