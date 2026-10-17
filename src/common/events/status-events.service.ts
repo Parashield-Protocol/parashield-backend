@@ -111,6 +111,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     const event: PolicyStatusEvent = { policyId, status, timestamp: Date.now() };
     this.logger.log(`Policy status event: ${policyId} → ${status}`);
     this.emitter.emit(`policy:${policyId}`, event);
+    this.emitter.emit('status', event);
 
     if (this.redis && typeof this.redis.publish === 'function') {
       const payload = JSON.stringify({
@@ -124,6 +125,26 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
+  }
+
+  onStatusChange(listener: (event: PolicyStatusEvent) => void): () => void {
+    this.emitter.on('status', listener);
+    return () => this.emitter.off('status', listener);
+  }
+
+  onOracleKeyChange(listener: (event: PolicyOracleKeyChangeEvent) => void): () => void {
+    this.emitter.on('policy:oracleKey', listener);
+    return () => this.emitter.off('policy:oracleKey', listener);
+  }
+
+  onProductUpdate(listener: (productId?: string) => void): () => void {
+    this.emitter.on('product:updated', listener);
+    return () => this.emitter.off('product:updated', listener);
+  }
+
+  emitProductUpdate(productId?: string): void {
+    this.logger.log(`Product update event: ${productId ?? 'global'}`);
+    this.emitter.emit('product:updated', productId);
   }
 
   emitPolicyOracleKeyChange(event: PolicyOracleKeyChangeEvent): void {

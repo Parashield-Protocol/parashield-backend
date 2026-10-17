@@ -1048,6 +1048,7 @@ export class PolicyService {
       },
     });
     this.logger.log(`Admin updated product ${product.id}`);
+    this.statusEvents.emitProductUpdate(product.id);
     return this.mapProduct(product);
   }
 
@@ -1064,6 +1065,7 @@ export class PolicyService {
       data: { status: ProductStatus.INACTIVE },
     });
     this.logger.log(`Admin deactivated product ${product.id}`);
+    this.statusEvents.emitProductUpdate(product.id);
     return this.mapProduct(product);
   }
 

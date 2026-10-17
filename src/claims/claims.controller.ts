@@ -104,6 +104,22 @@ export class ClaimsController {
     return { success: true, data: { result } };
   }
 
+  /** GET /api/v1/claims/policy/:policyId/state — get derived policy state (#714) */
+  @Get('policy/:policyId/state')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get cached derived policy state for claim evaluation' })
+  @ApiParam({ name: 'policyId', description: 'Policy UUID' })
+  @ApiResponse({ status: 200, description: 'Returns cached derived policy state', schema: { $ref: getSchemaPath(ResponseDto) } })
+  @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')
+  async getPolicyDerivedState(@Param('policyId', ParseUUIDPipe) policyId: string) {
+    const state = await this.claims.getDerivedPolicyState(policyId);
+    if (!state) {
+      throw new NotFoundException({ message: 'Policy not found', errorCode: ErrorCode.CLAIM_POLICY_NOT_FOUND });
+    }
+    return { success: true, data: state };
+  }
+
   /** GET /api/v1/claims/:id — get claim status by ID (owner only) */
   @Get(':id')
   @UseGuards(JwtAuthGuard)

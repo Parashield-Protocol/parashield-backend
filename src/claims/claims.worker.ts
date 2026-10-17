@@ -150,6 +150,8 @@ export class ClaimsWorker {
               this.logger.warn(
                 `Policy ${policy.id} status guard missed on EXPIRED transition — status changed underneath the worker`,
               );
+            } else {
+              await this.claims.invalidatePolicyStateCache(policy.id);
             }
           }
 

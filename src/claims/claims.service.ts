@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException, ConflictException, NotFoundException, BadGatewayException, ForbiddenException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, ConflictException, NotFoundException, BadGatewayException, ForbiddenException, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -10,6 +10,7 @@ import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { ErrorCode } from '../common/errors/error-codes';
+import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cache.service';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -50,6 +51,9 @@ const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 const CLAIM_COUNT_CACHE_TTL_MS = 30_000;
 const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
 
+const CONTRACT_CALL_MIN_INTERVAL_MS = 250;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -60,6 +64,7 @@ const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
   private readonly claimCountCache = new Map<string, { total: number; expiresAt: number }>();
+  private nextContractCallAt = 0;
 
   constructor(
     private readonly stellar: StellarService,
@@ -69,6 +74,8 @@ export class ClaimsService {
     private readonly prisma: PrismaService,
     private readonly statusEvents: StatusEventsService,
     private readonly webhooks: WebhooksService,
+    @Optional()
+    private readonly policyStateCache?: PolicyStateCacheService,
   ) {}
 
   // #583 — reserves the next call slot synchronously, then waits for it, so
@@ -166,6 +173,7 @@ export class ClaimsService {
     await this.auditOp('Policy', policyId, PolicyStatus.ACTIVE, PolicyStatus.PROCESSING, 'autoProcess claim evaluation started')
       .catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} PROCESSING gate`, err));
     this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.PROCESSING);
+    await this.policyStateCache?.invalidate(policyId);
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
@@ -194,6 +202,7 @@ export class ClaimsService {
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.REJECTED, 'No oracle reading available'),
       ]);
+      await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
 
@@ -233,6 +242,7 @@ export class ClaimsService {
         toStatus: ClaimStatus.FAILED,
         timestamp: Date.now(),
       });
+      await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
     // #245 — Guard against non-numeric threshold values. Product.threshold is a
@@ -265,6 +275,7 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         toStatus: ClaimStatus.FAILED,
         timestamp: Date.now(),
       });
+      await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
     const threshold  = BigInt(Math.round(rawThreshold * 1e7));
@@ -287,6 +298,7 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.REJECTED, 'Trigger condition not met'),
       ]);
+      await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
 
@@ -329,13 +341,14 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'On-chain payout failed'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: on-chain payout failed'),
       ]);
-this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
+      this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       this.webhooks.notifyClaimStatusChange({
         claimId: claim.id,
         fromStatus: ClaimStatus.PROCESSING,
         toStatus: ClaimStatus.FAILED,
         timestamp: Date.now(),
       });
+      await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
 
@@ -381,6 +394,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         toStatus: ClaimStatus.PAID,
         timestamp: Date.now(),
       });
+      await this.policyStateCache?.invalidate(policyId);
     }
 
     return 'Paid';
@@ -442,6 +456,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
           await this.auditOp('Policy', policy.id, PolicyStatus.PROCESSING, PolicyStatus.CLAIMED, `Recovered stuck PROCESSING: claim ${paidClaim.id} already PAID`)
             .catch((err) => this.logger.error(`Failed to write audit log for policy ${policy.id} recovery`, err));
           this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.CLAIMED);
+          await this.policyStateCache?.invalidate(policy.id);
           summary.markedClaimed++;
           this.logger.warn(`Recovered stuck policy ${policy.id} → CLAIMED (claim ${paidClaim.id} already PAID)`);
           continue;
@@ -489,6 +504,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         if (!reverted) { summary.skipped++; continue; }
 
         this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.ACTIVE);
+        await this.policyStateCache?.invalidate(policy.id);
         for (const c of inFlightClaims) {
           this.webhooks.notifyClaimStatusChange({
             claimId: c.id,
@@ -591,6 +607,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     }
 
     this.claimCountCache.delete(claimant);
+    await this.policyStateCache?.invalidate(policyId);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     try {
@@ -612,6 +629,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PENDING, ClaimStatus.PROCESSING, `Submitted on-chain, txHash=${txHash}`),
       ]);
+      await this.policyStateCache?.invalidate(policyId);
     } catch (err) {
       this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
       // Use FAILED (not REJECTED) for on-chain errors — REJECTED means trigger condition not met (#119)
@@ -622,6 +640,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PENDING, ClaimStatus.FAILED, 'On-chain submission failed'),
       ]);
+      await this.policyStateCache?.invalidate(policyId);
     }
 
     return claim.id;
@@ -681,7 +700,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     };
   }
 
-  async getClaim(claimId: string): Promise<(ClaimSummary & { policy?: PolicySummary }) | null> {
+  async getClaim(claimId: string): Promise<(ClaimSummary & { policy?: PolicySummary; derivedPolicyState?: DerivedPolicyState | null }) | null> {
     this.logger.log(`get_claim: ${claimId}`);
     const claim = await this.prisma.claim.findUnique({
       where: { id: claimId },
@@ -697,7 +716,12 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     });
     if (!claim) return null;
 
-    const summary: ClaimSummary & { policy?: PolicySummary } = {
+    let derivedPolicyState: DerivedPolicyState | null = null;
+    if (this.policyStateCache) {
+      derivedPolicyState = await this.policyStateCache.getDerivedPolicyState(claim.policyId);
+    }
+
+    const summary: ClaimSummary & { policy?: PolicySummary; derivedPolicyState?: DerivedPolicyState | null } = {
       id:             claim.id,
       policyId:       claim.policyId,
       claimant:       claim.claimant,
@@ -711,6 +735,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         : null,
       txHash:         claim.txHash,
       createdAt:      Math.floor(claim.createdAt.getTime() / 1000),
+      derivedPolicyState,
     };
 
     if (claim.policy) {
@@ -729,5 +754,24 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     }
 
     return summary;
+  }
+
+  /**
+   * Get cached derived policy state (#714).
+   */
+  async getDerivedPolicyState(policyId: string, now?: Date): Promise<DerivedPolicyState | null> {
+    if (!this.policyStateCache) {
+      return null;
+    }
+    return this.policyStateCache.getDerivedPolicyState(policyId, now);
+  }
+
+  /**
+   * Invalidate policy state cache (#714).
+   */
+  async invalidatePolicyStateCache(policyId: string): Promise<void> {
+    if (this.policyStateCache) {
+      await this.policyStateCache.invalidate(policyId);
+    }
   }
 }
