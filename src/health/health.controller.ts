@@ -488,6 +488,9 @@ export class HealthController {
           } else {
             // #421 — Report waiting job counts for known Bull queues so ops can
             // detect build-up before processing latency becomes user-visible.
+            // #695 — verify active Redis connectivity via PING before querying queue keys
+            await this.withTimeout(this.redis.ping(), 'Redis PING');
+
             const queueNames = (this.config.get<string>('HEALTH_QUEUE_NAMES') ?? 'claims,oracle')
               .split(',')
               .map(n => n.trim())

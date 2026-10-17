@@ -81,6 +81,16 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   async onModuleInit() {
+    // #696 — Handle SIGTERM / SIGINT signals gracefully
+    process.once('SIGTERM', async () => {
+      this.logger.log('SIGTERM signal received: disconnecting Prisma client...');
+      await this.onModuleDestroy();
+    });
+    process.once('SIGINT', async () => {
+      this.logger.log('SIGINT signal received: disconnecting Prisma client...');
+      await this.onModuleDestroy();
+    });
+
     const maxRetries = 5;
     let delayMs = 1000;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
