@@ -395,6 +395,10 @@ export class OracleService {
     const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
     const endDate = new Date(year, month, 0);
     const endStr = `${year}-${String(month).padStart(2, "0")}-${endDate.getDate()}`;
+    // Declared before the upstream-response validation below: that error path
+    // reports the key, and referencing it before its declaration was a TS2448
+    // compile error (and a ReferenceError at runtime).
+    const key = `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
 
     // Determine if the requested month is in the past relative to today.
     const today = new Date();
@@ -468,7 +472,6 @@ export class OracleService {
     const coverage = observedCount / daysInMonth;
     const confidence = Math.round(coverage * 95);
 
-    const key = `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
     for (const daily of observedReadings) {
       this.assertWithinBounds("rainfall", daily, key);
     }
@@ -513,6 +516,8 @@ export class OracleService {
     const startDate = `${year}-${String(month).padStart(2, "0")}-01`;
     const endDate = new Date(year, month, 0);
     const endStr = `${year}-${String(month).padStart(2, "0")}-${endDate.getDate()}`;
+    // Declared before the upstream-response validation below; see fetchRainfallReading.
+    const key = `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
 
     const today = new Date();
     const isPastMonth =
@@ -562,7 +567,6 @@ export class OracleService {
     const coverage = temps.length / expectedDays;
     const confidence = Math.round(coverage * 95);
 
-    const key = `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
     // Only validate observed data — an empty window legitimately yields 0 with
     // confidence 0 and is filtered by the worker's confidence gate.
     if (temps.length > 0) {
