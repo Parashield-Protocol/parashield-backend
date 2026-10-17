@@ -476,8 +476,19 @@ export class PolicyController {
       // periodic write fails once the peer is gone, and both that and a
       // normal disconnect fire 'close' on the request, which completes the
       // stream and runs the teardown below.
-      const heartbeat = setInterval(() => {
+      // #708 — re-validate policy authorization on heartbeat to reject revoked credentials.
+      const heartbeat = setInterval(async () => {
         if (!subscriber.closed) {
+          try {
+            const currentPolicy = await this.policy.getPolicy(id);
+            if (!currentPolicy || currentPolicy.policyholder !== authedWallet) {
+              subscriber.error(new ForbiddenException('Policy authorization revoked'));
+              cleanup();
+              return;
+            }
+          } catch {
+            /* ignore transient DB read errors during heartbeat */
+          }
           subscriber.next({ type: 'heartbeat', data: { timestamp: Date.now() } });
         }
       }, SSE_HEARTBEAT_INTERVAL_MS);
