@@ -35,11 +35,20 @@ export class OracleKeyValidationMiddleware implements NestMiddleware {
       key = pathKey;
     }
 
+    // Trim whitespace and reject empty or whitespace‑only keys
+    if (key !== undefined) {
+      key = key.trim();
+      if (key.length === 0) {
+        this.logger.warn('Rejected empty or whitespace‑only oracle key');
+        throw new BadRequestException('Invalid oracle key format. Expected ' + ORACLE_KEY_FORMAT_DESCRIPTION + '.');
+      }
+    }
+
     if (!key) {
       return next();
     }
 
-    if (!isValidOracleKeyFormat(key)) {
+    if (key !== undefined && !isValidOracleKeyFormat(key)) {
       this.logger.warn(`Rejected malformed oracle key: ${key}`);
       throw new BadRequestException(
         `Invalid oracle key format. Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,
