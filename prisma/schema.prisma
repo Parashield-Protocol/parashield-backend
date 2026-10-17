@@ -65,6 +65,9 @@ model Claim {
   @@index([policyId])
   @@index([claimant])
   @@index([status])
+  // #668 — Composite index for claims search queries that filter by claimant
+  // and sort by submittedAt (the most common query pattern).
+  @@index([claimant, submittedAt(sort: Desc)])
 }
 
 model OracleReading {

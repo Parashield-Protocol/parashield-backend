@@ -249,6 +249,10 @@ export class WebhooksService {
    *   - Attempt 2: wait RETRY_BASE_DELAY_MS * 2  (2 s)
    *   - Attempt 3: wait RETRY_BASE_DELAY_MS * 4  (4 s)
    *
+   * #667 — Uses exponential backoff with full jitter to prevent thundering
+   * herd when many webhooks fail simultaneously. The delay is randomized
+   * between 0 and the exponential ceiling.
+   *
    * Throws on the last attempt so callers can log the final failure.
    */
   private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
@@ -256,7 +260,7 @@ export class WebhooksService {
 
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        // #625 — exponential backoff with full jitter. The delay is
+        // #625/#667 — exponential backoff with full jitter. The delay is
         // randomized between 0 and the exponential ceiling to spread
         // retries across time and prevent thundering-herd effects when
         // many webhooks fail simultaneously.

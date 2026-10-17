@@ -161,6 +161,21 @@ async function bootstrap() {
     process.exit(1);
   }
 
+  // #670 — Reject wildcard origins in all environments, including development.
+  // A wildcard CORS origin allows any website to make authenticated requests
+  // to the API, which is a security risk even in development (e.g., when using
+  // cookies or tokens).
+  const corsOrigins = corsOrigin.split(',').map((o) => o.trim()).filter(Boolean);
+  const hasWildcard = corsOrigins.some((o) => o === '*' || o === 'null' || o.includes('*'));
+  if (hasWildcard) {
+    logger.error(
+      'Fatal Error: CORS_ORIGIN must not contain wildcards (*). ' +
+      'Specify exact origins instead, e.g. CORS_ORIGIN=http://localhost:3000. ' +
+      'See .env.example and the README "CORS configuration" section.',
+    );
+    process.exit(1);
+  }
+
   const operatorApiKey = configService.get<string>('ORACLE_OPERATOR_API_KEY');
   const adminApiKey = configService.get<string>('ADMIN_API_KEY');
   

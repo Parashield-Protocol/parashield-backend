@@ -35,10 +35,18 @@ function validateConfig(config: Record<string, unknown>) {
 
   if (!config['JWT_SECRET']) {
     errors.push('JWT_SECRET is required');
+  } else if ((config['JWT_SECRET'] as string).length < 32) {
+    errors.push('JWT_SECRET must be at least 32 bytes (256 bits) for production security');
   }
 
   if (!config['DATABASE_URL']) {
     errors.push('DATABASE_URL is required');
+  } else {
+    // #669 — Validate DATABASE_URL format
+    const dbUrl = config['DATABASE_URL'] as string;
+    if (!dbUrl.startsWith('postgresql://') && !dbUrl.startsWith('postgres://')) {
+      errors.push('DATABASE_URL must be a valid PostgreSQL connection string (postgresql:// or postgres://)');
+    }
   }
 
   if (!config['STELLAR_RPC_URL']) {
@@ -47,6 +55,13 @@ function validateConfig(config: Record<string, unknown>) {
 
   if (!config['KEEPER_SECRET_KEY']) {
     errors.push('KEEPER_SECRET_KEY is required');
+  }
+
+  // #669 — Validate API keys are present
+  const operatorApiKey = config['ORACLE_OPERATOR_API_KEY'] as string | undefined;
+  const adminApiKey = config['ADMIN_API_KEY'] as string | undefined;
+  if (!operatorApiKey && !adminApiKey) {
+    errors.push('At least one of ORACLE_OPERATOR_API_KEY or ADMIN_API_KEY is required');
   }
 
   const claimsContract = config['CLAIMS_PROCESSOR_CONTRACT'] as string | undefined;
@@ -61,6 +76,17 @@ function validateConfig(config: Record<string, unknown>) {
     errors.push(
       'POLICY_ENGINE_CONTRACT must be a valid Stellar contract ID (C...)',
     );
+  }
+
+  // #669 — Validate CORS_ORIGIN is set and has no wildcards
+  const corsOrigin = config['CORS_ORIGIN'] as string | undefined;
+  if (!corsOrigin) {
+    errors.push('CORS_ORIGIN is required');
+  } else {
+    const origins = corsOrigin.split(',').map((o) => o.trim()).filter(Boolean);
+    if (origins.some((o) => o === '*' || o === 'null' || o.includes('*'))) {
+      errors.push('CORS_ORIGIN must not contain wildcards (*)');
+    }
   }
 
   if (errors.length > 0) {
