@@ -547,6 +547,20 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       });
     }
 
+    // #698 - validate the policy coverage against the product limit before creating
+    // or submitting a claim. Policies created before this guard (or changed by
+    // direct database access) must not result in an over-limit payout.
+    const product = await this.policyService.getProductById(policy.productId);
+    if (!product) {
+      throw new NotFoundException('Product ' + policy.productId + ' not found for policy ' + policyId);
+    }
+    const coverageLimit = new Prisma.Decimal(product.coverageMax);
+    if (policy.coverageXlm.gt(coverageLimit)) {
+      throw new BadRequestException(
+        'Claim amount ' + policy.coverageXlm.toString() + ' exceeds the policy coverage limit of ' + coverageLimit.toString(),
+      );
+    }
+
     // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
     const existingClaim = await this.prisma.claim.findFirst({
       where: {
