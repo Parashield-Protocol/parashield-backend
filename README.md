@@ -187,6 +187,7 @@ All error responses follow the same envelope shape regardless of endpoint:
 | `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. accessing another wallet's policy, calling an operator-only endpoint without an API key). |
 | `NOT_FOUND` | 404 | Resource does not exist (policy ID, claim ID, oracle key, etc.). |
 | `CONFLICT` | 409 | Duplicate resource (e.g. submitting a claim when one is already active for the same policy). |
+| `CLAIM_CONCURRENT_MODIFICATION` | 409 | The policy changed (or another claim was filed) while a claim was being submitted. Re-read the policy and retry. |
 | `GONE` | 410 | Resource existed but is no longer accessible (e.g. an expired policy). |
 | `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `Retry-After` header value. |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC). |
@@ -296,6 +297,36 @@ All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit times
 
 - **Input sanitization**: a global middleware (`InputSanitizationMiddleware`, registered in `src/main.ts`) trims every string in JSON/urlencoded request bodies and escapes `<`/`>` before validation and persistence, so markup cannot survive into stored values or reflected responses.
 - **Connection pooling**: Prisma pool sizing is applied at runtime to the datasource URL (`connection_limit=10`, `pool_timeout=10`, `connect_timeout=5`). Override each value with `DATABASE_CONNECTION_LIMIT`, `DATABASE_POOL_TIMEOUT`, `DATABASE_CONNECT_TIMEOUT`, or by putting the parameter directly in `DATABASE_URL`.
+
+---
+
+## Transaction strategy
+
+Postgres defaults to `READ COMMITTED`. Under it, two concurrent "check for an existing claim, then insert one" transactions can both pass the check, which can double-pay a policy. Every write that can lead to or record a payout therefore goes through `src/prisma/financial-transaction.ts`:
+
+- **`financialTransaction(prisma, label, fn)`** (interactive) and **`financialBatch(prisma, label, () => [...ops])`** (array form) run at **`SERIALIZABLE`** isolation (`maxWait` 5s, `timeout` 10s). When transactions conflict, Postgres aborts one of them with a serialization failure (SQLSTATE `40001`, Prisma `P2034`) rather than letting both commit.
+- **Serialization failures are retried** up to 3 attempts in total, with jittered exponential backoff. The retry re-runs the whole transaction, so it sees the winner's committed rows (for example, the duplicate guard now finds the claim and returns `AlreadyProcessed` / 409). Interactive callbacks must therefore have no side effects outside `tx`: contract calls, SSE events and webhooks happen after the transaction commits. `financialBatch` takes a factory because a `PrismaPromise` can't be re-run. If a submission is still conflicting after the last attempt, `submitClaim` returns 409 `CLAIM_CONCURRENT_MODIFICATION`.
+- **Optimistic locking** uses `Policy.version`. Every policy status write increments it. Claim flows guard their policy writes on the version they read:
+  - `autoProcess` gates `ACTIVE → PROCESSING` only on the version it validated, and its later `→ CLAIMED` / `→ ACTIVE` writes match only the version its own gate produced. A policy that the stuck-`PROCESSING` sweep reverted and another worker re-gated is back in `PROCESSING` but at a higher version, so the stale attempt's writes miss instead of clobbering it (the ABA case a status-only guard can't detect).
+  - `submitClaim` re-reads the policy inside its transaction and rejects the submission if the status or version changed after validation.
+
+| Operation | Isolation | Guard |
+|---|---|---|
+| `autoProcess` reservation: duplicate guard, `ACTIVE → PROCESSING` gate, claim insert (one transaction) | Serializable + retry | status + `version` |
+| `autoProcess` outcome writes (`PAID`/`CLAIMED`, `REJECTED`, `FAILED` + revert) | Serializable + retry | `status = PROCESSING` + gated `version` |
+| `submitClaim`: policy re-check, duplicate guard, claim insert (one transaction) | Serializable + retry | `version` + partial unique index on non-terminal claims |
+| Stuck-`PROCESSING` recovery | Serializable + retry | status + `updatedAt` cutoff |
+| Cancel / expire policy | single-statement `updateMany` (atomic on its own) | status; bumps `version` |
+| Read-only pagination (`findMany` + `count`) | default | — |
+
+The database-level partial unique index on `Claim(policyId) WHERE status IN ('PENDING','PROCESSING')` remains as a backstop. It does not cover terminal statuses such as `PAID`, which is why the isolation level matters.
+
+Concurrency tests in `src/claims/claims.concurrency.spec.ts` run against a real Postgres. They are skipped unless `CONCURRENCY_TEST_DATABASE_URL` points at a **disposable** database (its tables are truncated):
+
+```bash
+DATABASE_URL=postgresql://.../parashield_test npx prisma db push
+CONCURRENCY_TEST_DATABASE_URL=postgresql://.../parashield_test npx jest claims.concurrency
+```
 
 ---
 

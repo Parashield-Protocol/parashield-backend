@@ -10,6 +10,7 @@ import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { ErrorCode } from '../common/errors/error-codes';
+import { financialBatch, financialTransaction, isSerializationFailure } from '../prisma/financial-transaction';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -138,36 +139,56 @@ export class ClaimsService {
       return 'PendingFinalPeriod';
     }
 
-    // #163 — Duplicate guard: prevent double payouts or duplicate in-flight processing
-    const existingClaim = await this.prisma.claim.findFirst({
-      where: {
-        policyId,
-        status: { in: [ClaimStatus.PROCESSING, ClaimStatus.PAID, ClaimStatus.REJECTED] },
-      },
+    // Duplicate guard (#163), atomic policy gate (#164) and claim insert run as
+    // one SERIALIZABLE transaction so a concurrent autoProcess/submitClaim on
+    // the same policy can't pass the duplicate check in between. The gate is
+    // also guarded on the version read above (optimistic lock), so the policy
+    // snapshot validated above is exactly the one that gets gated.
+    const reservation = await financialTransaction(this.prisma, `autoProcess(${policyId})`, async (tx) => {
+      const existingClaim = await tx.claim.findFirst({
+        where: {
+          policyId,
+          status: { in: [ClaimStatus.PROCESSING, ClaimStatus.PAID, ClaimStatus.REJECTED] },
+        },
+      });
+      if (existingClaim) return { kind: 'duplicate' as const, existingClaim };
+
+      // Conditional updateMany: exactly one caller flips ACTIVE → PROCESSING;
+      // the other sees count=0 and bails before any oracle read or contract call.
+      const gateResult = await tx.policy.updateMany({
+        where: { id: policyId, status: PolicyStatus.ACTIVE, version: policy.version },
+        data:  { status: PolicyStatus.PROCESSING, version: { increment: 1 } },
+      });
+      if (gateResult.count === 0) return { kind: 'lostRace' as const };
+
+      const claim = await tx.claim.create({
+        data: {
+          policyId,
+          claimant:       policy.policyholder,
+          coverageAmount: policy.coverageXlm,
+          triggerMet:     false,
+          status:         ClaimStatus.PROCESSING,
+        },
+      });
+      return { kind: 'reserved' as const, claim };
     });
 
-    if (existingClaim) {
+    if (reservation.kind === 'duplicate') {
       this.logger.warn(
-        `Duplicate autoProcess call for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
+        `Duplicate autoProcess call for policy ${policyId} — existing claim id=${reservation.existingClaim.id} status=${reservation.existingClaim.status}`,
       );
       return 'AlreadyProcessed';
     }
-
-    // #164 — Atomic policy gate: flip policy to PROCESSING atomically so a concurrent
-    // autoProcess call that read the same ACTIVE snapshot loses the race here, before
-    // any oracle read or contract call is made. Using updateMany with a conditional
-    // WHERE ensures exactly one caller proceeds; the other sees count=0 and bails.
-    const gateResult = await this.prisma.policy.updateMany({
-      where: { id: policyId, status: PolicyStatus.ACTIVE },
-      data:  { status: PolicyStatus.PROCESSING },
-    });
-
-    if (gateResult.count === 0) {
+    if (reservation.kind === 'lostRace') {
       this.logger.warn(
         `Policy ${policyId} status gate missed — already claimed by a concurrent call`,
       );
       return 'AlreadyProcessed';
     }
+    const { claim } = reservation;
+    // Every later policy write in this flow is guarded on this version, so it
+    // misses if the policy was reverted and re-gated by another attempt.
+    const gatedPolicy = { id: policyId, status: PolicyStatus.PROCESSING, version: policy.version + 1 };
     // #350 — best-effort audit write after the guarded update succeeds; not
     // folded into the update itself so the gate can't be blocked by an
     // audit-log write failure.
@@ -177,17 +198,6 @@ export class ClaimsService {
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
-    // Persist initial claim record with PROCESSING status
-    const claim = await this.prisma.claim.create({
-      data: {
-        policyId,
-        claimant:       policy.policyholder,
-        coverageAmount: policy.coverageXlm,
-        triggerMet:     false,
-        status:         ClaimStatus.PROCESSING,
-      },
-    });
-
     this.claimCountCache.delete(policy.policyholder);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
@@ -195,7 +205,7 @@ export class ClaimsService {
     const reading = await this.oracleService.getLatestReading(policy.oracleKey);
     if (!reading) {
       this.logger.warn(`No oracle reading for key=${policy.oracleKey} — rejecting claim ${claim.id}`);
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.REJECTED, processedAt: new Date() },
@@ -222,14 +232,14 @@ export class ClaimsService {
       this.logger.error(
         `Product ${policy.productId} not found for policy ${policyId} — cannot evaluate trigger, marking claim FAILED for manual review`,
       );
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
         this.prisma.policy.updateMany({
-          where: { id: policyId, status: PolicyStatus.PROCESSING },
-          data:  { status: PolicyStatus.ACTIVE },
+          where: gatedPolicy,
+          data:  { status: PolicyStatus.ACTIVE, version: { increment: 1 } },
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Product not found'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: product not found'),
@@ -254,14 +264,14 @@ export class ClaimsService {
       this.logger.error(
         `Product ${policy.productId} has non-numeric threshold "${product.threshold}" — cannot evaluate trigger for policy ${policyId}, marking claim FAILED for manual review`,
       );
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
         this.prisma.policy.updateMany({
-          where: { id: policyId, status: PolicyStatus.PROCESSING },
-          data:  { status: PolicyStatus.ACTIVE },
+          where: gatedPolicy,
+          data:  { status: PolicyStatus.ACTIVE, version: { increment: 1 } },
         }),
 this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: non-numeric product threshold'),
@@ -288,7 +298,7 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
     );
 
     if (!triggerMet) {
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.REJECTED, triggerMet: false, processedAt: new Date() },
@@ -325,14 +335,14 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
       // #165 — payout failure: mark claim FAILED and revert the atomic policy gate so
       // the policy can be retried on the next worker tick rather than being stuck.
       this.logger.error(`Soroban payout failed for claim ${claim.id}`, err);
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },
         }),
         this.prisma.policy.updateMany({
-          where: { id: policyId, status: PolicyStatus.PROCESSING },
-          data:  { status: PolicyStatus.ACTIVE },
+          where: gatedPolicy,
+          data:  { status: PolicyStatus.ACTIVE, version: { increment: 1 } },
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'On-chain payout failed'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: on-chain payout failed'),
@@ -355,14 +365,14 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     // #260 — the policy write is guarded with an expected-status WHERE (rather than
     // `where: { id }` alone) so a second status-writing path racing on this row can't
     // silently clobber it; the affected-row count is checked below.
-    const [, policyUpdateResult] = await this.prisma.$transaction([
+    const [, policyUpdateResult] = await financialBatch(this.prisma, `claim ${claim.id}`, () => [
       this.prisma.claim.update({
         where: { id: claim.id },
         data:  { status: ClaimStatus.PAID, triggerMet: true, processedAt: new Date(), txHash, payoutAmount: policy.coverageXlm },
       }),
       this.prisma.policy.updateMany({
-        where: { id: policyId, status: PolicyStatus.PROCESSING },
-        data:  { status: transition('PROCESSING', 'CLAIMED') as PolicyStatus },
+        where: gatedPolicy,
+        data:  { status: transition('PROCESSING', 'CLAIMED') as PolicyStatus, version: { increment: 1 } },
       }),
       this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.PAID, `Payout confirmed, txHash=${txHash}`),
     ]);
@@ -444,7 +454,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         if (paidClaim) {
           const { count } = await this.prisma.policy.updateMany({
             where: guard,
-            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.CLAIMED) as PolicyStatus },
+            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.CLAIMED) as PolicyStatus, version: { increment: 1 } },
           });
           if (count === 0) { summary.skipped++; continue; }
           await this.auditOp('Policy', policy.id, PolicyStatus.PROCESSING, PolicyStatus.CLAIMED, `Recovered stuck PROCESSING: claim ${paidClaim.id} already PAID`)
@@ -466,10 +476,10 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
           continue;
         }
 
-        const reverted = await this.prisma.$transaction(async (tx) => {
+        const reverted = await financialTransaction(this.prisma, `recoverStuckProcessing(${policy.id})`, async (tx) => {
           const { count } = await tx.policy.updateMany({
             where: guard,
-            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.ACTIVE) as PolicyStatus },
+            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.ACTIVE) as PolicyStatus, version: { increment: 1 } },
           });
           if (count === 0) return false;
           if (inFlightClaims.length > 0) {
@@ -555,21 +565,6 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       });
     }
 
-    // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
-    const existingClaim = await this.prisma.claim.findFirst({
-      where: {
-        policyId,
-        status: { in: [ClaimStatus.PAID, ClaimStatus.PROCESSING, ClaimStatus.PENDING] },
-      },
-    });
-
-    if (existingClaim) {
-      this.logger.warn(
-        `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
-      );
-      throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
-    }
-
     const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
     if (!contractId || !/^C[A-Z2-7]{55}$/.test(contractId)) {
       throw new BadGatewayException(
@@ -577,16 +572,42 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       );
     }
 
+    // The policy re-check, duplicate claim guard and insert run as one
+    // SERIALIZABLE transaction, so two concurrent submissions (or a submission
+    // racing autoProcess) can't both pass the guard before either inserts.
     let claim: Awaited<ReturnType<typeof this.prisma.claim.create>>;
     try {
-      claim = await this.prisma.claim.create({
-        data: {
-          policyId,
-          claimant,
-          coverageAmount: policy.coverageXlm,
-          triggerMet:     false,
-          status:         ClaimStatus.PENDING,
-        },
+      claim = await financialTransaction(this.prisma, `submitClaim(${policyId})`, async (tx) => {
+        // Optimistic lock: the checks above ran against `policy`; refuse to
+        // file against it if any status write has landed since.
+        const current = await tx.policy.findUnique({ where: { id: policyId } });
+        if (!current || current.status !== PolicyStatus.ACTIVE || current.version !== policy.version) {
+          throw new ConflictException({ message: `Policy ${policyId} changed while the claim was being submitted`, errorCode: ErrorCode.CLAIM_CONCURRENT_MODIFICATION });
+        }
+
+        // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
+        const existingClaim = await tx.claim.findFirst({
+          where: {
+            policyId,
+            status: { in: [ClaimStatus.PAID, ClaimStatus.PROCESSING, ClaimStatus.PENDING] },
+          },
+        });
+        if (existingClaim) {
+          this.logger.warn(
+            `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
+          );
+          throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
+        }
+
+        return tx.claim.create({
+          data: {
+            policyId,
+            claimant,
+            coverageAmount: policy.coverageXlm,
+            triggerMet:     false,
+            status:         ClaimStatus.PENDING,
+          },
+        });
       });
     } catch (error: unknown) {
       if (
@@ -594,6 +615,11 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         error.code === 'P2002'
       ) {
         throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
+      }
+      if (isSerializationFailure(error)) {
+        // Still conflicting after every retry: tell the caller to try again
+        // rather than surfacing a 500.
+        throw new ConflictException({ message: `Policy ${policyId} is being modified concurrently; retry the claim`, errorCode: ErrorCode.CLAIM_CONCURRENT_MODIFICATION });
       }
       throw error;
     }
@@ -613,7 +639,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
         ],
       );
       this.logger.log(`Manual claim submitted on-chain: id=${claim.id} txHash=${txHash}`);
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.PROCESSING, txHash },
@@ -623,7 +649,7 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
     } catch (err) {
       this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
       // Use FAILED (not REJECTED) for on-chain errors — REJECTED means trigger condition not met (#119)
-      await this.prisma.$transaction([
+      await financialBatch(this.prisma, `claim ${claim.id}`, () => [
         this.prisma.claim.update({
           where: { id: claim.id },
           data:  { status: ClaimStatus.FAILED, processedAt: new Date() },

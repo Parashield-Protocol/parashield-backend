@@ -144,7 +144,7 @@ export class ClaimsWorker {
             // updateMany's WHERE matches nothing and count is 0 below.
             const { count } = await this.prisma.policy.updateMany({
               where: { id: policy.id, status: policy.status },
-              data:  { status: transition(policy.status, 'EXPIRED') as PolicyStatus },
+              data:  { status: transition(policy.status, 'EXPIRED') as PolicyStatus, version: { increment: 1 } },
             });
             if (count === 0) {
               this.logger.warn(
