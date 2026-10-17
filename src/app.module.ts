@@ -19,6 +19,7 @@ import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serial
 import { WebhooksModule } from './common/webhooks/webhooks.module';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
 import { validateAllSecrets } from './common/secrets/secret-validator';
+import { OpenTelemetryShutdownHook } from './common/telemetry/opentelemetry';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -150,6 +151,7 @@ function validateConfig(config: Record<string, unknown>) {
       provide: APP_INTERCEPTOR,
       useClass: VersioningInterceptor,
     },
+    OpenTelemetryShutdownHook,
   ],
 })
 export class AppModule {}
