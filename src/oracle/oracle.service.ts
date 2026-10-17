@@ -229,6 +229,18 @@ export class OracleService {
       );
       return;
     }
+    // #703 — reject future-dated readings to prevent corrupting claim triggers.
+    // Allow 60s of clock skew tolerance.
+    const FUTURE_SKEW_TOLERANCE_SECONDS = 60;
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    if (reading.timestamp > nowSeconds + FUTURE_SKEW_TOLERANCE_SECONDS) {
+      this.logger.error(
+        `Rejecting future-dated reading for key=${reading.key}: timestamp=${reading.timestamp} now=${nowSeconds}`,
+      );
+      throw new BadRequestException(
+        `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,
+      );
+    }
     await this.prisma.oracleReading.upsert({
       where: {
         key_source_bucket: {

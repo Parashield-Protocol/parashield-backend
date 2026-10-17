@@ -557,6 +557,37 @@ describe("OracleService.fetchRainfall", () => {
       expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
     });
 
+    // #703 — reject future-dated readings
+    it("should reject readings with future timestamps (#703)", async () => {
+      const futureTimestamp = Math.floor(Date.now() / 1000) + 3600; // 1 hour in future
+      const mockReading = {
+        dataType: "weather",
+        key: "rainfall:0,0:2026-06",
+        value: "100000000",
+        confidence: 95,
+        timestamp: futureTimestamp,
+        source: "open-meteo",
+      };
+      await expect(service.persistReading(mockReading)).rejects.toThrow(
+        /future/i,
+      );
+      expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+
+    it("should accept readings within clock skew tolerance (#703)", async () => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const mockReading = {
+        dataType: "weather",
+        key: "rainfall:0,0:2026-06",
+        value: "100000000",
+        confidence: 95,
+        timestamp: nowSeconds + 30, // 30s ahead — within 60s tolerance
+        source: "open-meteo",
+      };
+      await service.persistReading(mockReading);
+      expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalled();
+    });
+
     it("#171 — returns NO_DATA when data array element is null", async () => {
       mockConfigService.get.mockImplementation((key) =>
         key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,

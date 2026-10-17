@@ -86,6 +86,12 @@ async function bootstrap() {
   // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
   app.use(helmet({
     referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+    // #705 — enable HSTS to prevent SSL stripping attacks
+    hsts: {
+      maxAge: 31536000, // 1 year
+      includeSubDomains: true,
+      preload: true,
+    },
   }));
 
   // Response compression — gzip/deflate for text-based responses (JSON, HTML,
