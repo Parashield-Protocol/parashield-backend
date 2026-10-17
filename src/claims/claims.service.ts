@@ -50,6 +50,19 @@ const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
 const CLAIM_COUNT_CACHE_TTL_MS = 30_000;
 const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
 
+// #583 — minimum spacing between the Soroban calls this service issues, so a
+// burst of claims cannot hammer the RPC endpoint. `waitForContractCallSlot()`
+// has referenced this constant since #583 but it was never declared, so the
+// module did not compile and the method would have thrown a ReferenceError at
+// runtime.
+const CONTRACT_CALL_MIN_INTERVAL_MS = 250;
+
+// Policy ids are UUIDs; checked before any DB round-trip so a malformed id is a
+// 400 rather than a Prisma type error. Also referenced since #593 but never
+// declared.
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
  * ClaimsService — submits and queries claims on the Claims Processor contract.
  *
@@ -60,6 +73,8 @@ const CLAIM_COUNT_CACHE_MAX_ENTRIES = 1000;
 export class ClaimsService {
   private readonly logger = new Logger(ClaimsService.name);
   private readonly claimCountCache = new Map<string, { total: number; expiresAt: number }>();
+  /** Next reserved Soroban call slot, in epoch ms (#583). */
+  private nextContractCallAt = 0;
 
   constructor(
     private readonly stellar: StellarService,
