@@ -24,6 +24,7 @@ import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 import Redis from 'ioredis';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
+import { validateAllSecrets } from './common/secrets/secret-validator';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
@@ -65,8 +66,16 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   const configService = app.get(ConfigService);
+  const nodeEnv = configService.get<string>('NODE_ENV') || process.env.NODE_ENV || 'development';
+  try {
+    validateAllSecrets(process.env, nodeEnv);
+  } catch (err) {
+    logger.error(`Fatal Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
   const jwtSecret = configService.get<string>('JWT_SECRET');
-  const jwtSecretValidation = validateJwtSecret(jwtSecret);
+  const jwtSecretValidation = validateJwtSecret(jwtSecret, nodeEnv);
   if (!jwtSecretValidation.valid) {
     logger.error(`Fatal Error: ${jwtSecretValidation.error}`);
     process.exit(1);

@@ -18,6 +18,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { WebhooksModule } from './common/webhooks/webhooks.module';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
+import { validateAllSecrets } from './common/secrets/secret-validator';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -35,7 +36,15 @@ function validateConfig(config: Record<string, unknown>) {
     logger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
   }
 
-  const jwtSecretValidation = validateJwtSecret(config['JWT_SECRET'] as string | undefined);
+  // #716 — Validate all secrets for length, format, entropy, and placeholders
+  const nodeEnv = (config['NODE_ENV'] as string) || process.env.NODE_ENV || 'development';
+  try {
+    validateAllSecrets(config, nodeEnv);
+  } catch (err) {
+    errors.push((err as Error).message);
+  }
+
+  const jwtSecretValidation = validateJwtSecret(config['JWT_SECRET'] as string | undefined, nodeEnv);
   if (!jwtSecretValidation.valid) {
     errors.push(jwtSecretValidation.error!);
   }
