@@ -40,6 +40,15 @@ function validateConfig(config: Record<string, unknown>) {
     errors.push(jwtSecretValidation.error!);
   }
 
+  // #681 — Validate AUTH_NONCE_TTL_SECONDS if configured
+  const nonceTtl = config['AUTH_NONCE_TTL_SECONDS'] as string | undefined;
+  if (nonceTtl !== undefined && nonceTtl !== '') {
+    const parsed = Number(nonceTtl);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86400) {
+      errors.push('AUTH_NONCE_TTL_SECONDS must be a positive integer between 1 and 86400');
+    }
+  }
+
   if (!config['DATABASE_URL']) {
     errors.push('DATABASE_URL is required');
   } else {
