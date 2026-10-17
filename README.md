@@ -32,6 +32,8 @@ Supporting infrastructure:
 ParaShield supports two authentication schemes:
 
 - **JWT bearer auth**: the primary frontend flow. Clients request `/api/v1/auth/challenge`, sign the nonce, call `/api/v1/auth/login`, then send `Authorization: Bearer <token>`. `JwtAuthGuard` verifies the token and sets `req.wallet` from the token payload.
+  - `JWT_SECRET` is strictly required and validated at startup: it must be at least 32 characters long. Insecure fallbacks and placeholder values (e.g. previous dev defaults, "changeme", "secret") are rejected.
+  - **Security Notice**: Any environment previously running on the default secret must configure a cryptographically random secret before deploying. Any tokens signed with the legacy default secret should be treated as compromised.
 - **Wallet-header auth**: a legacy request-signature flow for protected API routes. Clients send `x-wallet-address`, `x-wallet-message`, and `x-wallet-signature`; `AuthMiddleware` verifies the Stellar signature and sets `req.wallet`.
 
 Operator-only oracle fetch endpoints require either `x-api-key: <ORACLE_OPERATOR_API_KEY>` or an admin JWT. Public endpoints such as `/api/v1/products`, `/api/v1/oracle/latest/:key`, `/api/v1/health`, and `/docs` do not run wallet-header middleware.

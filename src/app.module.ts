@@ -16,6 +16,7 @@ import { RedisModule }   from './redis/redis.module';
 import { VersioningInterceptor } from './common/interceptors/versioning.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { WebhooksModule } from './common/webhooks/webhooks.module';
+import { validateJwtSecret } from './auth/jwt-secret.validator';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -33,10 +34,9 @@ function validateConfig(config: Record<string, unknown>) {
     logger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
   }
 
-  if (!config['JWT_SECRET']) {
-    errors.push('JWT_SECRET is required');
-  } else if ((config['JWT_SECRET'] as string).length < 32) {
-    errors.push('JWT_SECRET must be at least 32 bytes (256 bits) for production security');
+  const jwtSecretValidation = validateJwtSecret(config['JWT_SECRET'] as string | undefined);
+  if (!jwtSecretValidation.valid) {
+    errors.push(jwtSecretValidation.error!);
   }
 
   if (!config['DATABASE_URL']) {

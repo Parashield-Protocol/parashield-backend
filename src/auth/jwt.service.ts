@@ -4,6 +4,8 @@ import * as jwt from "jsonwebtoken";
 import * as crypto from "crypto";
 import Redis from 'ioredis';
 
+import { validateJwtSecret } from "./jwt-secret.validator";
+
 export interface JwtPayload {
   walletAddress: string;
   role?: string;
@@ -33,11 +35,12 @@ export class JwtService {
 
   constructor(private readonly config: ConfigService, @Inject('REDIS_CLIENT') private readonly redis: Redis) {
     const secret = config.get<string>("JWT_SECRET");
-    if (!secret) {
-      this.logger.error("JWT_SECRET environment variable is required");
-      throw new Error("JWT_SECRET environment variable is required");
+    const validation = validateJwtSecret(secret);
+    if (!validation.valid) {
+      this.logger.error(`Fatal Error: ${validation.error}`);
+      throw new Error(validation.error);
     }
-    this.secret = secret;
+    this.secret = secret!;
   }
 
   get expiresIn(): string {

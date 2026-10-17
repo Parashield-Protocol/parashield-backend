@@ -8,7 +8,7 @@ import { JwtService } from './jwt.service';
 import { AuthenticatedRequest } from './authenticated-request';
 
 describe('Auth guards', () => {
-  const secret = 'test-secret';
+  const secret = 'test-secret-at-least-32-characters-long-for-testing!';
   let jwtService: JwtService;
   let redis: { get: jest.Mock; set: jest.Mock; del: jest.Mock; exists: jest.Mock };
 

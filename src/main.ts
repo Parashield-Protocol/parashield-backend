@@ -23,6 +23,7 @@ import compression from 'compression';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 import Redis from 'ioredis';
+import { validateJwtSecret } from './auth/jwt-secret.validator';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
@@ -65,8 +66,9 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
   const jwtSecret = configService.get<string>('JWT_SECRET');
-  if (!jwtSecret) {
-    logger.error('Fatal Error: JWT_SECRET environment variable is required');
+  const jwtSecretValidation = validateJwtSecret(jwtSecret);
+  if (!jwtSecretValidation.valid) {
+    logger.error(`Fatal Error: ${jwtSecretValidation.error}`);
     process.exit(1);
   }
 
