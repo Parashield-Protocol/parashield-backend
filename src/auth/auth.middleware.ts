@@ -39,6 +39,12 @@ export class AuthMiddleware implements NestMiddleware {
     return `${address.slice(0, 8)}...${address.slice(-4)}`;
   }
 
+  /** #742 — detect infrastructure errors (connection refused, timeout, DNS) vs auth errors. */
+  private isInfrastructureError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /ECONNREFUSED|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|connection|timeout|unavailable/i.test(message);
+  }
+
   async use(req: Request & { wallet?: string }, res: Response, next: NextFunction): Promise<void> {
     const address   = req.headers['x-wallet-address'] as string | undefined;
     const signature = req.headers['x-wallet-signature'] as string | undefined;
@@ -80,6 +86,19 @@ export class AuthMiddleware implements NestMiddleware {
         select: { nonce: true, expiresAt: true },
       });
     } catch (err) {
+      // #742 — distinguish infrastructure failures (network partition, DB/Redis
+      // outage) from auth failures. Infrastructure errors get 503 so clients
+      // know to retry; auth errors get 401.
+      const isInfraError = this.isInfrastructureError(err);
+      if (isInfraError) {
+        this.logger.error(`Infrastructure error during token verification for ${this.truncateAddress(address)}: ${err}`);
+        res.setHeader('Cache-Control', 'no-store, no-cache');
+        res.status(503).json({
+          statusCode: 503,
+          message: 'Authentication service temporarily unavailable',
+        });
+        return;
+      }
       this.logger.warn(`Challenge lookup failed for ${this.truncateAddress(address)}: ${err}`);
       this.unauthorized(res, { statusCode: 401, message: 'Authentication service unavailable' });
       return;

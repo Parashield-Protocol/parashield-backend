@@ -84,7 +84,9 @@ async function bootstrap() {
   );
 
   // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
-  app.use(helmet());
+  app.use(helmet({
+    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  }));
 
   // Response compression — gzip/deflate for text-based responses (JSON, HTML,
   // SSE streams). Runs before route handlers so every response is eligible.

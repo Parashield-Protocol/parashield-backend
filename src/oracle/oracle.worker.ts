@@ -112,14 +112,23 @@ export class OracleWorker {
 
   /**
    * Runs processKey over `keys` with at most `limit` in flight at once,
-   * instead of one key at a time (#335).
+   * instead of one key at a time (#335). Each key is processed independently —
+   * a failure in one key does not prevent others from completing (#739).
    */
   private async processKeysWithConcurrency(keys: string[], limit: number): Promise<void> {
     let next = 0;
     const workers = Array.from({ length: Math.min(limit, keys.length) }, async () => {
       while (next < keys.length) {
         const key = keys[next++];
-        await this.processKey(key);
+        try {
+          await this.processKey(key);
+        } catch (err) {
+          // #739 — track individual key failures without aborting the batch.
+          // Each key is independent; one failure must not prevent others from
+          // being processed or cause the entire batch to be retried.
+          this.invalidCount += 1;
+          this.logger.error(`Failed to process oracle key ${key} (batch continues)`, err);
+        }
       }
     });
     await Promise.all(workers);

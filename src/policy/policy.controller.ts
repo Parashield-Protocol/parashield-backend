@@ -17,9 +17,11 @@ import {
   UseGuards,
   UseInterceptors,
   Req,
+  Res,
   UnauthorizedException,
 } from '@nestjs/common';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
+import type { Response } from 'express';
 import { Observable } from 'rxjs';
 import {
   ApiTags,
@@ -502,5 +504,50 @@ export class PolicyController {
 
       return () => cleanup();
     });
+  }
+
+  /**
+   * GET /api/v1/policies/export/csv — Stream policies as CSV (#740).
+   *
+   * Uses a database cursor and writes rows incrementally to avoid building
+   * the entire file in memory, preventing OOM on large exports.
+   */
+  @Get('policies/export/csv')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Export policies as CSV (streaming)',
+    description:
+      'Streams all policies as CSV rows using a database cursor, writing each row ' +
+      'incrementally to avoid memory spikes on large exports.',
+  })
+  async exportCsv(@Res() res: Response): Promise<void> {
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="policies-export.csv"');
+
+    // Write CSV header
+    res.write('id,status,premium,coverage,createdAt\n');
+
+    // Use cursor-based pagination to stream rows without loading all into memory
+    let cursor: string | undefined;
+    const batchSize = 100;
+
+    do {
+      const batch = await this.policy.findAll({
+        take: batchSize,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+        orderBy: { id: 'asc' },
+      });
+
+      for (const policy of batch) {
+        res.write(
+          `${policy.id},${policy.status},${policy.premium},${policy.coverage},${policy.createdAt}\n`,
+        );
+      }
+
+      cursor = batch.length === batchSize ? batch[batch.length - 1].id : undefined;
+    } while (cursor);
+
+    res.end();
   }
 }
