@@ -10,6 +10,45 @@ const DEFAULT_CONNECTION_LIMIT = '10';
 const DEFAULT_POOL_TIMEOUT_SECONDS = '10';
 const DEFAULT_CONNECT_TIMEOUT_SECONDS = '5';
 
+export interface PrismaPoolConfig {
+  connectionLimit: number;
+  poolTimeout: number;
+  connectTimeout: number;
+}
+
+/**
+ * Determine the effective pool configuration. Explicit query parameters in the
+ * connection URL take precedence over environment variables.
+ */
+function getEffectivePoolConfig(url: string | undefined): PrismaPoolConfig {
+  let connectionLimit = process.env.DATABASE_CONNECTION_LIMIT || DEFAULT_CONNECTION_LIMIT;
+  let poolTimeout = process.env.DATABASE_POOL_TIMEOUT || DEFAULT_POOL_TIMEOUT_SECONDS;
+  let connectTimeout = process.env.DATABASE_CONNECT_TIMEOUT || DEFAULT_CONNECT_TIMEOUT_SECONDS;
+
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.searchParams.has('connection_limit')) {
+        connectionLimit = parsed.searchParams.get('connection_limit')!;
+      }
+      if (parsed.searchParams.has('pool_timeout')) {
+        poolTimeout = parsed.searchParams.get('pool_timeout')!;
+      }
+      if (parsed.searchParams.has('connect_timeout')) {
+        connectTimeout = parsed.searchParams.get('connect_timeout')!;
+      }
+    } catch {
+      // Ignore URL parsing errors
+    }
+  }
+
+  return {
+    connectionLimit: parseInt(connectionLimit, 10),
+    poolTimeout: parseInt(poolTimeout, 10),
+    connectTimeout: parseInt(connectTimeout, 10),
+  };
+}
+
 /**
  * Append Prisma connection-pool parameters to the datasource URL.
  * Parameters already present in the URL are left untouched, and URLs that
@@ -56,14 +95,19 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   // writes and transactions are never affected.
   private readonly queryCache = new Map<string, CacheEntry>();
 
+  public readonly poolConfig: PrismaPoolConfig;
+
   constructor() {
     super({ datasourceUrl: withConnectionPoolParams(process.env.DATABASE_URL) });
+
+    this.poolConfig = getEffectivePoolConfig(process.env.DATABASE_URL);
 
     const replicaUrl = withConnectionPoolParams(process.env.DATABASE_REPLICA_URL);
     this.replicaClient = replicaUrl
       ? new PrismaClient({ datasourceUrl: replicaUrl })
       : null;
   }
+
 
   /**
    * Returns the read-replica PrismaClient when DATABASE_REPLICA_URL is
@@ -91,7 +135,12 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
           this.logger.log('Read-replica connection established');
         }
         this.logger.log('Database connection established');
+        this.logger.log(
+          `Prisma connection pool configured: connection_limit=${this.poolConfig.connectionLimit}, ` +
+          `pool_timeout=${this.poolConfig.poolTimeout}s, connect_timeout=${this.poolConfig.connectTimeout}s`,
+        );
         return;
+
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         this.logger.warn(
@@ -167,4 +216,20 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
       }
     }
   }
+
+  /**
+   * Expose Prisma internal engine pool metrics if supported by the installed
+   * Prisma engine/client (#676). Returns null if metrics preview is unavailable.
+   */
+  async getMetrics(): Promise<unknown | null> {
+    try {
+      if (typeof (this as any).$metrics?.json === 'function') {
+        return await (this as any).$metrics.json();
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to collect Prisma metrics: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return null;
+  }
 }
+
