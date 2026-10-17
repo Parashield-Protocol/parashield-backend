@@ -31,8 +31,10 @@ export class RequestTimeoutMiddleware implements NestMiddleware {
   }
 
   use(req: Request, res: Response, next: NextFunction): void {
+    let timedOut = false;
     const timer = setTimeout(() => {
       if (res.headersSent) return;
+      timedOut = true;
       this.logger.warn(
         `Request timeout after ${this.timeoutMs}ms: ${req.method} ${req.url}`,
       );
@@ -44,6 +46,20 @@ export class RequestTimeoutMiddleware implements NestMiddleware {
       // Destroy the socket so the connection slot is released immediately.
       req.socket?.destroy();
     }, this.timeoutMs);
+
+    // Guard against double response: if the handler completes after the
+    // timeout already sent a 408, suppress the late write (#693).
+    const originalWrite = res.write.bind(res);
+    res.write = ((...args: unknown[]) => {
+      if (timedOut && !res.headersSent) return true;
+      return (originalWrite as (...a: unknown[]) => boolean)(...args);
+    }) as typeof res.write;
+
+    const originalEnd = res.end.bind(res);
+    res.end = ((...args: unknown[]) => {
+      if (timedOut && !res.headersSent) return res;
+      return (originalEnd as (...a: unknown[]) => Response)(...args);
+    }) as typeof res.end;
 
     // Clear the timer as soon as the response is fully flushed.
     res.on('finish', () => clearTimeout(timer));

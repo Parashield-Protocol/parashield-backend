@@ -29,10 +29,14 @@ const SENSITIVE_BODY_FIELDS = new Set([
  * Sensitive query parameters (wallet addresses, tokens, keys) are masked
  * to prevent them from leaking into log aggregation systems.
  * Sensitive request body fields are masked before logging (#666).
+ *
+ * Body serialization is deferred to the async logger and truncated for
+ * large payloads to avoid blocking the event loop (#690).
  */
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
   private readonly logger = new Logger('HTTP');
+  private readonly maxBodyLogLength = 2000;
 
   /** Returns the URL with sensitive query parameter values replaced by ***. */
   private sanitizeUrl(url: string): string {
@@ -74,6 +78,24 @@ export class LoggingInterceptor implements NestInterceptor {
     return masked;
   }
 
+  /** Serialize and truncate body for logging, deferred to avoid blocking (#690). */
+  private logBody(method: string, safeUrl: string, body: unknown): void {
+    if (body === null || body === undefined || typeof body !== 'object') return;
+    // Defer serialization to the next microtask to avoid blocking the event loop.
+    setTimeout(() => {
+      try {
+        const sanitized = this.sanitizeBody(body);
+        let serialized = JSON.stringify(sanitized);
+        if (serialized.length > this.maxBodyLogLength) {
+          serialized = serialized.slice(0, this.maxBodyLogLength) + '...[truncated]';
+        }
+        this.logger.debug(`  body: ${serialized}`);
+      } catch {
+        // Body serialization failure is not worth logging an error for.
+      }
+    }, 0);
+  }
+
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const ctx     = context.switchToHttp();
     const request = ctx.getRequest<Request>();
@@ -89,6 +111,11 @@ export class LoggingInterceptor implements NestInterceptor {
     const safeUrl = this.sanitizeUrl(url);
 
     this.logger.log(`→ ${method} ${safeUrl}`);
+
+    // Log body asynchronously (deferred) for non-GET requests (#690).
+    if (method !== 'GET' && request.body) {
+      this.logBody(method, safeUrl, request.body);
+    }
 
     return next.handle().pipe(
       tap({

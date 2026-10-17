@@ -106,6 +106,14 @@ export class UsdcPrecisionValidationMiddleware implements NestMiddleware {
       );
     }
 
+    // #692 — Reject negative zero (-0) which can cause unexpected arithmetic.
+    // -0 === 0 in JS but has different string representation and bit pattern.
+    if (Object.is(value, -0) || strValue === '-0' || /^-0(\.0*)?$/.test(strValue)) {
+      throw new BadRequestException(
+        `Invalid amount at ${path.join('.')}: negative zero (-0) is not allowed. Use 0 instead.`
+      );
+    }
+
     // #663 — Also reject numeric values that lose precision when converted
     // to string (e.g. 0.1 + 0.2 = 0.30000000000000004).
     if (typeof value === 'number' && !Number.isFinite(value)) {
