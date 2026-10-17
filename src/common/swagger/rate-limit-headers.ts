@@ -86,10 +86,18 @@ export function applyRateLimitHeaders(document: OpenAPIObject): void {
 
       // 1. Inject rate-limit headers into all declared responses.
       for (const [status, response] of Object.entries(op.responses)) {
+        // `headers` is `unknown` on the cast above, and TS refuses to spread a
+        // non-object type (TS2698). Normalise it to a plain record first; a
+        // response that declares no headers simply contributes nothing.
+        const existingHeaders =
+          response.headers && typeof response.headers === 'object'
+            ? (response.headers as Record<string, unknown>)
+            : {};
+
         response.headers = {
           ...RATE_LIMIT_HEADERS,
           ...(status === '429' ? RETRY_AFTER_HEADER : {}),
-          ...response.headers,
+          ...existingHeaders,
         };
       }
 
