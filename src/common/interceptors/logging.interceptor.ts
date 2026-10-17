@@ -15,12 +15,20 @@ const SENSITIVE_PARAMS = new Set([
   'authorization', 'password', 'seed', 'private_key',
 ]);
 
+/** Request body fields whose values must never appear in logs (#666). */
+const SENSITIVE_BODY_FIELDS = new Set([
+  'password', 'secret', 'token', 'key', 'apikey', 'api_key',
+  'authorization', 'seed', 'private_key', 'wallet', 'signature',
+  'xdr', 'signedXdr', 'signed_xdr',
+]);
+
 /**
  * LoggingInterceptor — logs every incoming request and its response time.
  *
  * Logs at the start of each request and on completion via tap().
  * Sensitive query parameters (wallet addresses, tokens, keys) are masked
  * to prevent them from leaking into log aggregation systems.
+ * Sensitive request body fields are masked before logging (#666).
  */
 @Injectable()
 export class LoggingInterceptor implements NestInterceptor {
@@ -44,6 +52,26 @@ export class LoggingInterceptor implements NestInterceptor {
     }).join('&');
 
     return `${base}?${sanitized}`;
+  }
+
+  /** Recursively mask sensitive fields in an object (#666). */
+  private sanitizeBody(body: unknown): unknown {
+    if (body === null || body === undefined) return body;
+    if (Array.isArray(body)) return body.map((item) => this.sanitizeBody(item));
+    if (typeof body !== 'object') return body;
+
+    const masked: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(body as Record<string, unknown>)) {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9_]/g, '');
+      if (SENSITIVE_BODY_FIELDS.has(normalizedKey)) {
+        masked[key] = '***';
+      } else if (typeof value === 'object' && value !== null) {
+        masked[key] = this.sanitizeBody(value);
+      } else {
+        masked[key] = value;
+      }
+    }
+    return masked;
   }
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
