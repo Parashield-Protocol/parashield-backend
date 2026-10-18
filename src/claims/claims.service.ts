@@ -10,6 +10,7 @@ import { Prisma, ClaimStatus, PolicyStatus } from '@prisma/client';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { ErrorCode } from '../common/errors/error-codes';
+import { compareScaledToThreshold, parseDecimalScaled, parseFixedPointBigInt } from '../common/utils/decimal';
 import { financialBatch, financialTransaction, isSerializationFailure } from '../prisma/financial-transaction';
 import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cache.service';
 
@@ -287,12 +288,14 @@ export class ClaimsService {
     }
     // #245 — Guard against non-numeric threshold values. Product.threshold is a
     // free-text string at the service boundary (Decimal serialised via .toString()).
-    // parseFloat('') or parseFloat('N/A') yields NaN, and BigInt(NaN) throws a
-    // RangeError — crashing mid-flow after the claim row is already PROCESSING.
-    // Treat an unparseable threshold the same as a missing product: fail loud for
-    // manual review and revert the atomic gate so the policy can be retried.
-    const rawThreshold = parseFloat(product.threshold);
-    if (!isFinite(rawThreshold)) {
+    // #712 — Parse it exactly (scaled BigInt) instead of `parseFloat`, which loses
+    // precision and could put a boundary value on the wrong side of the trigger.
+    // An unparseable threshold is treated the same as a missing product: fail loud
+    // for manual review and revert the atomic gate so the policy can be retried.
+    let threshold: bigint;
+    try {
+      threshold = parseDecimalScaled(product.threshold);
+    } catch {
       this.logger.error(
         `Product ${policy.productId} has non-numeric threshold "${product.threshold}" — cannot evaluate trigger for policy ${policyId}, marking claim FAILED for manual review`,
       );
@@ -328,13 +331,13 @@ export class ClaimsService {
       await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
-    const threshold  = BigInt(Math.round(rawThreshold * 1e7));
     const comparison = product.comparison;
 
-    const readingValue = BigInt(reading.value);
-    const triggerMet = comparison === 'LessThan'
-      ? readingValue < threshold
-      : readingValue > threshold;
+    // #712 — Compare the exact scaled values. Semantics are unchanged: 'LessThan'
+    // triggers strictly below the threshold, otherwise strictly above; a reading
+    // exactly equal to the threshold never triggers.
+    const readingValue = parseFixedPointBigInt(reading.value);
+    const triggerMet = compareScaledToThreshold(readingValue, threshold, comparison);
 
     this.logger.log(
       `Trigger eval: key=${reading.key} value=${reading.value} threshold=${threshold} triggerMet=${triggerMet}`,
@@ -791,16 +794,34 @@ export class ClaimsService {
     return claim.id;
   }
 
-  async getClaimsByWallet(walletAddress: string, page = 1, limit = 20): Promise<{ data: ClaimSummary[]; total: number; page: number; limit: number }> {
+  async getClaimsByWallet(
+    walletAddress: string,
+    page = 1,
+    limit = 20,
+    cursor?: string,
+  ): Promise<{
+    data: ClaimSummary[];
+    total: number;
+    page: number;
+    limit: number;
+    nextCursor?: string | null;
+    hasMore?: boolean;
+  }> {
     // Clamp to valid bounds; page is 1-based (#114)
     const safePage = Math.max(1, page);
     const safeLimit = Math.min(Math.max(1, limit), 100);
-    this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${safePage} limit=${safeLimit}`);
+    this.logger.log(`get_claims_by_wallet: ${walletAddress} page=${safePage} limit=${safeLimit} cursor=${cursor ?? 'none'}`);
+
+    // #749 — If a cursor is provided, use cursor-based pagination which avoids slow OFFSET scans
+    // on large datasets. Otherwise, fall back to offset pagination for backward compatibility.
+    // Fetch safeLimit + 1 items to determine if a next page exists without extra count query.
     const findClaims = this.prisma.claim.findMany({
       where: { claimant: walletAddress },
       orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-      skip: (safePage - 1) * safeLimit,
-      take: safeLimit,
+      ...(cursor
+        ? { cursor: { id: cursor }, skip: 1 }
+        : { skip: (safePage - 1) * safeLimit }),
+      take: safeLimit + 1,
     });
 
     // #589 — reuse a recent total instead of running COUNT on every request
@@ -821,7 +842,13 @@ export class ClaimsService {
       this.claimCountCache.set(walletAddress, { total, expiresAt: Date.now() + CLAIM_COUNT_CACHE_TTL_MS });
     }
 
-    const summaries = claims.map((claim) => ({
+    const hasMore = claims.length > safeLimit;
+    const paginatedClaims = hasMore ? claims.slice(0, safeLimit) : claims;
+    const nextCursor = hasMore && paginatedClaims.length > 0
+      ? paginatedClaims[paginatedClaims.length - 1].id
+      : null;
+
+    const summaries = paginatedClaims.map((claim) => ({
       id:             claim.id,
       policyId:       claim.policyId,
       claimant:       claim.claimant,
@@ -842,6 +869,8 @@ export class ClaimsService {
       total,
       page: safePage,
       limit: safeLimit,
+      nextCursor,
+      hasMore,
     };
   }
 

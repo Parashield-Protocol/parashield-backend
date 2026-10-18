@@ -4,6 +4,7 @@ import {
   Logger,
   BadRequestException,
   ServiceUnavailableException,
+  BadRequestException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
@@ -130,6 +131,12 @@ export interface OracleReading {
   source: string;
   /** OK when the upstream returned real data, NO_DATA when the value is unknown (#171). */
   status?: "OK" | "NO_DATA";
+  /**
+   * #712 — Start of the idempotency bucket this reading was stored under. Set
+   * when a reading is loaded from the database; optional because upstream
+   * fetches build readings before they are persisted.
+   */
+  bucketStart?: Date;
 }
 
 /** Length of an oracle idempotency bucket in ms — matches the hourly cron cadence (#172). */
@@ -159,11 +166,25 @@ export const SANITY_BOUNDS = {
  * All values are expressed in 7-decimal fixed point to match Stellar asset precision.
  * Example: 32.4mm rainfall → 324_000_000 (multiply by 10^7)
  */
+interface BufferedReading {
+  reading: OracleReading;
+  resolve: () => void;
+  reject: (err: unknown) => void;
+}
+
 @Injectable()
-export class OracleService {
+export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
   private readonly logger = new Logger(OracleService.name);
   private readonly openMeteoBreaker: CircuitBreaker;
   private readonly aviationStackBreaker: CircuitBreaker;
+
+  // #686 — Batching configuration and in-memory buffer
+  private readonly batchSize: number;
+  private readonly flushIntervalMs: number;
+  private readonly maxBufferSize: number;
+  private readonly buffer: BufferedReading[] = [];
+  private flushTimer: NodeJS.Timeout | null = null;
+  private isFlushing = false;
 
   constructor(
     private readonly config: ConfigService,
@@ -173,6 +194,56 @@ export class OracleService {
   ) {
     this.openMeteoBreaker = openMeteoBreaker;
     this.aviationStackBreaker = aviationStackBreaker;
+
+    // #686 — Read and validate batching configuration with documented defaults
+    const envBatchSize = config.get<string>('ORACLE_BATCH_SIZE');
+    if (envBatchSize !== undefined && envBatchSize !== '') {
+      const parsed = Number(envBatchSize);
+      if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1000) {
+        throw new Error('ORACLE_BATCH_SIZE must be a positive integer between 1 and 1000');
+      }
+      this.batchSize = parsed;
+    } else {
+      this.batchSize = 50;
+    }
+
+    const envFlushInterval = config.get<string>('ORACLE_FLUSH_INTERVAL_MS');
+    if (envFlushInterval !== undefined && envFlushInterval !== '') {
+      const parsed = Number(envFlushInterval);
+      if (!Number.isInteger(parsed) || parsed < 10 || parsed > 60000) {
+        throw new Error('ORACLE_FLUSH_INTERVAL_MS must be an integer between 10 and 60000');
+      }
+      this.flushIntervalMs = parsed;
+    } else {
+      this.flushIntervalMs = 1000;
+    }
+
+    const envMaxBuffer = config.get<string>('ORACLE_BUFFER_MAX_SIZE');
+    if (envMaxBuffer !== undefined && envMaxBuffer !== '') {
+      const parsed = Number(envMaxBuffer);
+      if (!Number.isInteger(parsed) || parsed < 10 || parsed > 10000) {
+        throw new Error('ORACLE_BUFFER_MAX_SIZE must be an integer between 10 and 10000');
+      }
+      this.maxBufferSize = parsed;
+    } else {
+      this.maxBufferSize = 1000;
+    }
+  }
+
+  getBatchSize(): number {
+    return this.batchSize;
+  }
+
+  getFlushIntervalMs(): number {
+    return this.flushIntervalMs;
+  }
+
+  getMaxBufferSize(): number {
+    return this.maxBufferSize;
+  }
+
+  getBufferSize(): number {
+    return this.buffer.length;
   }
 
   /**
@@ -212,7 +283,84 @@ export class OracleService {
     }
   }
 
-  /** Persist an OracleReading to the database. */
+  /**
+   * Persist multiple OracleReadings in batches (#686).
+   * Groups rows into chunks of batchSize and persists them in multi-query transactions.
+   */
+  async persistReadings(readings: OracleReading[]): Promise<void> {
+    if (!readings || readings.length === 0) return;
+
+    const validReadings: OracleReading[] = [];
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const FUTURE_SKEW_TOLERANCE_SECONDS = 60;
+
+    for (const reading of readings) {
+      if (
+        reading.confidence === 0 ||
+        reading.status === "NO_DATA" ||
+        reading.source === "mock"
+      ) {
+        this.logger.warn(
+          `Skipping persistence of mock/confidence-0 reading for key: ${reading.key}`,
+        );
+        continue;
+      }
+      if (!Number.isFinite(reading.confidence) || reading.confidence < 0 || reading.confidence > 100) {
+        this.logger.error(
+          `Rejecting reading with invalid confidence ${reading.confidence} for key: ${reading.key}`,
+        );
+        continue;
+      }
+      if (reading.timestamp > nowSeconds + FUTURE_SKEW_TOLERANCE_SECONDS) {
+        this.logger.error(
+          `Rejecting future-dated reading for key=${reading.key}: timestamp=${reading.timestamp} now=${nowSeconds}`,
+        );
+        throw new BadRequestException(
+          `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,
+        );
+      }
+      validReadings.push(reading);
+    }
+
+    if (validReadings.length === 0) return;
+
+    if (this.batchSize <= 1) {
+      for (const reading of validReadings) {
+        await this.executeSingleUpsert(reading);
+      }
+      return;
+    }
+
+    // Process in chunks of batchSize
+    for (let i = 0; i < validReadings.length; i += this.batchSize) {
+      const chunk = validReadings.slice(i, i + this.batchSize);
+      try {
+        await this.executeUpsertBatch(chunk);
+        for (const r of chunk) {
+          this.readingCache.delete(r.key);
+          this.logger.log(`OracleReading persisted: key=${r.key} value=${r.value}`);
+        }
+      } catch (batchErr) {
+        this.logger.error(
+          `Batch upsert failed for chunk of ${chunk.length} readings; falling back to individual inserts: ${(batchErr as Error).message}`,
+        );
+        // Fall back to individual inserts to isolate any single bad row
+        for (const r of chunk) {
+          try {
+            await this.executeSingleUpsert(r);
+          } catch (singleErr) {
+            this.logger.error(
+              `Individual upsert failed for key=${r.key}: ${(singleErr as Error).message}`,
+            );
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Persist an OracleReading to the database (buffered when batchSize > 1) (#686).
+   */
   async persistReading(reading: OracleReading): Promise<void> {
     if (
       reading.confidence === 0 ||
@@ -242,6 +390,119 @@ export class OracleService {
         `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,
       );
     }
+
+    // Direct insert when batchSize is 1 (matches legacy 1:1 behavior)
+    if (this.batchSize <= 1) {
+      await this.executeSingleUpsert(reading);
+      return;
+    }
+
+    // Backpressure / bounded capacity check
+    if (this.buffer.length >= this.maxBufferSize) {
+      this.logger.error(`Oracle buffer full (${this.buffer.length}/${this.maxBufferSize}); rejecting reading`);
+      throw new ServiceUnavailableException('Oracle reading buffer full; backpressure applied');
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      this.buffer.push({ reading, resolve, reject });
+      if (this.buffer.length >= this.batchSize) {
+        this.flushBuffer();
+      } else if (!this.flushTimer) {
+        this.flushTimer = setTimeout(() => this.flushBuffer(), this.flushIntervalMs);
+        if (typeof (this.flushTimer as any).unref === 'function') {
+          (this.flushTimer as any).unref();
+        }
+      }
+    });
+  }
+
+  /**
+   * Flush pending buffered readings to the database in chunks of batchSize (#686).
+   */
+  async flushBuffer(): Promise<void> {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+
+    if (this.buffer.length === 0 || this.isFlushing) {
+      return;
+    }
+
+    this.isFlushing = true;
+    try {
+      while (this.buffer.length > 0) {
+        const batch = this.buffer.splice(0, this.batchSize);
+        if (batch.length === 0) break;
+
+        const readings = batch.map((item) => item.reading);
+        try {
+          await this.executeUpsertBatch(readings);
+          for (const item of batch) {
+            this.readingCache.delete(item.reading.key);
+            this.logger.log(`OracleReading persisted: key=${item.reading.key} value=${item.reading.value}`);
+            item.resolve();
+          }
+        } catch (batchErr) {
+          this.logger.error(
+            `Batch upsert failed for ${readings.length} readings; falling back to individual inserts: ${(batchErr as Error).message}`,
+          );
+          // Fall back to individual inserts to isolate any single bad row
+          for (const item of batch) {
+            try {
+              await this.executeSingleUpsert(item.reading);
+              item.resolve();
+            } catch (singleErr) {
+              this.logger.error(
+                `Individual upsert failed for key=${item.reading.key}: ${(singleErr as Error).message}`,
+              );
+              item.reject(singleErr);
+            }
+          }
+        }
+      }
+    } finally {
+      this.isFlushing = false;
+      if (this.buffer.length > 0 && !this.flushTimer) {
+        this.flushTimer = setTimeout(() => this.flushBuffer(), this.flushIntervalMs);
+        if (typeof (this.flushTimer as any).unref === 'function') {
+          (this.flushTimer as any).unref();
+        }
+      }
+    }
+  }
+
+  private async executeUpsertBatch(readings: OracleReading[]): Promise<void> {
+    if (readings.length === 0) return;
+    const ops = readings.map((reading) =>
+      this.prisma.oracleReading.upsert({
+        where: {
+          key_source_bucket: {
+            key: reading.key,
+            source: reading.source,
+            bucketStart: this.bucketStartFor(reading.timestamp),
+          },
+        },
+        update: {
+          dataType: reading.dataType,
+          value: BigInt(reading.value),
+          confidence: reading.confidence,
+          submittedAt: new Date(),
+        },
+        create: {
+          dataType: reading.dataType,
+          key: reading.key,
+          value: BigInt(reading.value),
+          confidence: reading.confidence,
+          source: reading.source,
+          bucketStart: this.bucketStartFor(reading.timestamp),
+        },
+      }),
+    );
+    await this.prisma.$transaction(ops);
+  }
+
+  private async executeSingleUpsert(reading: OracleReading): Promise<void> {
     await this.prisma.oracleReading.upsert({
       where: {
         key_source_bucket: {
@@ -265,9 +526,26 @@ export class OracleService {
         bucketStart: this.bucketStartFor(reading.timestamp),
       },
     });
+    this.readingCache.delete(reading.key);
     this.logger.log(
       `OracleReading persisted: key=${reading.key} value=${reading.value}`,
     );
+  }
+
+  /**
+   * Flush on application shutdown through existing shutdown hooks (#686).
+   */
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    this.logger.log(`OracleService shutting down (signal: ${signal || 'none'}) - flushing buffer`);
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = null;
+    }
+    await this.flushBuffer();
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.onApplicationShutdown('module-destroy');
   }
 
   /**
@@ -343,6 +621,8 @@ export class OracleService {
       confidence: record.confidence,
       timestamp: Math.floor(record.submittedAt.getTime() / 1000),
       source: record.source,
+      // #712 — expose the bucket start so callers can report it as the reading time.
+      bucketStart: record.bucketStart,
     }));
   }
 
@@ -375,6 +655,8 @@ export class OracleService {
           confidence: record.confidence,
           timestamp: Math.floor(record.submittedAt.getTime() / 1000),
           source: record.source,
+          // #712 — expose the bucket start so callers can report it as the reading time.
+          bucketStart: record.bucketStart,
         }
       : null;
 
@@ -440,6 +722,8 @@ export class OracleService {
     const url = isPastMonth
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+
+    const key = `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
 
     const res = await this.openMeteoBreaker.execute(() =>
       this.executeWithRateLimitBackoff(() =>
@@ -554,6 +838,9 @@ export class OracleService {
     const url = isPastMonth
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
+
+    const key = `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
+
     const res = await this.openMeteoBreaker.execute(() =>
       this.executeWithRateLimitBackoff(() =>
         axios.get<{

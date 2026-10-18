@@ -93,4 +93,19 @@ export class PaginatedResponseDto<T = unknown> {
 
   @ApiProperty({ description: 'Number of items per page', example: 20 })
   limit: number;
+
+  @ApiProperty({
+    description: 'Cursor pointing to the next page of results (UUID of last item on current page, or null if no further items) (#749)',
+    required: false,
+    nullable: true,
+    example: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
+  })
+  nextCursor?: string | null;
+
+  @ApiProperty({
+    description: 'Whether there are more items after the current page (#749)',
+    required: false,
+    example: true,
+  })
+  hasMore?: boolean;
 }

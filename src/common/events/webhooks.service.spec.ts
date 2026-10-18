@@ -13,7 +13,9 @@ describe('WebhooksService', () => {
       },
     };
     const config = { get: jest.fn((key: string) => key === 'WEBHOOK_SECRET_KEY' ? webhookSecretKey : undefined) };
-    return { service: new WebhooksService(prisma as any, config as any), prisma, config };
+    const service = new WebhooksService(prisma as any, config as any);
+    jest.spyOn(service as any, 'sleep').mockResolvedValue(undefined);
+    return { service, prisma, config };
   }
 
   afterEach(() => jest.restoreAllMocks());
@@ -99,7 +101,7 @@ describe('WebhooksService', () => {
 
     await expect(
       service.notifyPolicyStatusChange({ policyId: 'p', fromStatus: 'ACTIVE', toStatus: 'CLAIMED', timestamp: 1 }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual([]);
   });
 
   describe('#606 — webhook secret encryption at rest', () => {
@@ -268,4 +270,82 @@ describe('WebhooksService', () => {
       expect(results[0].error).toContain('signature verification failed');
     });
   });
+
+  describe('#751 — webhook redirect handling and domain protection', () => {
+    it('sets redirect: manual when dispatching webhook request', async () => {
+      const { service } = build([
+        { id: 'a', url: 'https://webhook.test/callback', secret: 's', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Map(),
+      } as unknown as Response);
+
+      await service.notifyClaimStatusChange({
+        claimId: 'c1',
+        fromStatus: 'PENDING',
+        toStatus: 'PROCESSING',
+        timestamp: 12345,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.redirect).toBe('manual');
+    });
+
+    it('rejects and logs redirect attempts to a different domain', async () => {
+      const { service } = build([
+        { id: 'target-1', url: 'https://trusted.example.com/webhook', secret: 's', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      const redirectHeaders = new Map([['location', 'https://malicious-attacker.com/steal-payload']]);
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 302,
+        headers: redirectHeaders,
+      } as unknown as Response);
+
+      const results = await service.notifyClaimStatusChange({
+        claimId: 'c1',
+        fromStatus: 'PENDING',
+        toStatus: 'PROCESSING',
+        timestamp: 12345,
+      });
+
+      expect(results[0].success).toBe(false);
+      expect(results[0].error).toMatch(/redirect to different domain blocked|redirects are not followed/);
+      // Ensure fetch was never called with the malicious redirect URL
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        'https://malicious-attacker.com/steal-payload',
+        expect.anything(),
+      );
+    });
+
+    it('rejects redirect attempts on 301, 307, 308 without leaking payloads', async () => {
+      const { service } = build([
+        { id: 'target-2', url: 'https://trusted.example.com/webhook', secret: 's', events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      for (const statusCode of [301, 307, 308]) {
+        const redirectHeaders = new Map([['location', 'https://other-domain.org/hook']]);
+        jest.spyOn(global, 'fetch').mockResolvedValue({
+          ok: false,
+          status: statusCode,
+          headers: redirectHeaders,
+        } as unknown as Response);
+
+        const results = await service.notifyPolicyStatusChange({
+          policyId: 'p1',
+          fromStatus: 'PENDING',
+          toStatus: 'ACTIVE',
+          timestamp: 12345,
+        });
+
+        expect(results[0].success).toBe(false);
+        expect(results[0].error).toBeDefined();
+      }
+    });
+  });
 });
+

@@ -37,6 +37,24 @@ function validateConfig(config: Record<string, unknown>) {
     logger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
   }
 
+  // #710 — Validate Redis startup-retry tuning. All optional; defaults live in
+  // src/redis/redis-startup.ts and are documented in .env.example / README.
+  const redisRetryBounds: Array<{ key: string; min: number; max: number }> = [
+    { key: 'REDIS_STARTUP_MAX_ATTEMPTS', min: 1, max: 100 },
+    { key: 'REDIS_STARTUP_INITIAL_DELAY_MS', min: 0, max: 60000 },
+    { key: 'REDIS_STARTUP_MAX_DELAY_MS', min: 0, max: 300000 },
+    { key: 'REDIS_STARTUP_ATTEMPT_TIMEOUT_MS', min: 1, max: 120000 },
+  ];
+  for (const { key, min, max } of redisRetryBounds) {
+    const raw = config[key] as string | undefined;
+    if (raw !== undefined && raw !== '') {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+        errors.push(`${key} must be an integer between ${min} and ${max}`);
+      }
+    }
+  }
+
   // #716 — Validate all secrets for length, format, entropy, and placeholders
   const nodeEnv = (config['NODE_ENV'] as string) || process.env.NODE_ENV || 'development';
   try {
@@ -91,6 +109,31 @@ function validateConfig(config: Record<string, unknown>) {
     const parsed = Number(connectTimeout);
     if (!Number.isInteger(parsed) || parsed < 1 || parsed > 120) {
       errors.push('DATABASE_CONNECT_TIMEOUT must be a positive integer between 1 and 120');
+    }
+  }
+
+  // #686 — Validate oracle batching environment variables
+  const oracleBatchSize = config['ORACLE_BATCH_SIZE'] as string | undefined;
+  if (oracleBatchSize !== undefined && oracleBatchSize !== '') {
+    const parsed = Number(oracleBatchSize);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1000) {
+      errors.push('ORACLE_BATCH_SIZE must be a positive integer between 1 and 1000');
+    }
+  }
+
+  const oracleFlushInterval = config['ORACLE_FLUSH_INTERVAL_MS'] as string | undefined;
+  if (oracleFlushInterval !== undefined && oracleFlushInterval !== '') {
+    const parsed = Number(oracleFlushInterval);
+    if (!Number.isInteger(parsed) || parsed < 10 || parsed > 60000) {
+      errors.push('ORACLE_FLUSH_INTERVAL_MS must be an integer between 10 and 60000');
+    }
+  }
+
+  const oracleMaxBuffer = config['ORACLE_BUFFER_MAX_SIZE'] as string | undefined;
+  if (oracleMaxBuffer !== undefined && oracleMaxBuffer !== '') {
+    const parsed = Number(oracleMaxBuffer);
+    if (!Number.isInteger(parsed) || parsed < 10 || parsed > 10000) {
+      errors.push('ORACLE_BUFFER_MAX_SIZE must be an integer between 10 and 10000');
     }
   }
 

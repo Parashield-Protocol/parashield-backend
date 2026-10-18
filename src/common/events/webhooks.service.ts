@@ -316,12 +316,21 @@ export class WebhooksService {
   private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
     let lastError: Error | undefined;
 
+    // #719 — Serialize and sign the payload once before the retry loop
+    // so each retry reuses the cached body and signature instead of
+    // re-computing JSON.stringify + HMAC per attempt.
+    const payloadStr = JSON.stringify(payload);
+    if (Buffer.byteLength(payloadStr, 'utf8') > MAX_WEBHOOK_PAYLOAD_BYTES) {
+      throw new Error(
+        `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
+      );
+    }
+    const signature = registration.secret
+      ? this.signPayloadString(payloadStr, registration.secret)
+      : undefined;
+
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        // #625/#667 — exponential backoff with full jitter. The delay is
-        // randomized between 0 and the exponential ceiling to spread
-        // retries across time and prevent thundering-herd effects when
-        // many webhooks fail simultaneously.
         const exponentialDelay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
         const delayMs = Math.floor(Math.random() * exponentialDelay);
         this.logger.warn(
@@ -332,7 +341,7 @@ export class WebhooksService {
       }
 
       try {
-        await this.deliverWebhook(registration, payload);
+        await this.deliverWebhook(registration, payloadStr, signature);
         if (attempt > 0) {
           this.logger.log(
             `Webhook ${registration.id} → ${registration.url} succeeded on attempt ${attempt}`,
@@ -347,23 +356,17 @@ export class WebhooksService {
     throw lastError!;
   }
 
-  private async deliverWebhook(registration: WebhookRegistration, payload: unknown): Promise<void> {
-    // #624 — reject oversized payloads before attempting delivery to
-    // prevent memory exhaustion and receiver-side HTTP 413 errors.
-    const payloadStr = JSON.stringify(payload);
-    if (Buffer.byteLength(payloadStr, 'utf8') > MAX_WEBHOOK_PAYLOAD_BYTES) {
-      throw new Error(
-        `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
-      );
-    }
-
-    const secret = registration.secret;
+  private async deliverWebhook(
+    registration: WebhookRegistration,
+    payloadStr: string,
+    signature?: string,
+  ): Promise<void> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    if (secret) {
-      headers['X-Webhook-Signature'] = this.signPayload(payload, secret);
+    if (signature) {
+      headers['X-Webhook-Signature'] = signature;
     }
 
     const controller = new AbortController();
@@ -371,12 +374,58 @@ export class WebhooksService {
 
     let response: Response;
     try {
+      // #751 — Disable automatic redirect following to prevent leaking signed payloads
+      // to unintended or malicious hosts.
       response = await fetch(registration.url, {
         method: 'POST',
         headers,
         body: payloadStr,
         signal: controller.signal,
+        redirect: 'manual',
       });
+
+      // #751 — Handle redirect attempts explicitly and block redirect following.
+      const isRedirect =
+        (response.status >= 300 && response.status < 400) ||
+        response.type === 'opaqueredirect';
+
+      if (isRedirect) {
+        const location =
+          typeof response.headers?.get === 'function'
+            ? response.headers.get('location')
+            : (response.headers as unknown as Record<string, string>)?.[
+                'location'
+              ];
+
+        let targetHostname = 'unknown';
+        let isDifferentDomain = false;
+        if (location) {
+          try {
+            const targetUrl = new URL(location, registration.url);
+            const originalUrl = new URL(registration.url);
+            targetHostname = targetUrl.hostname;
+            isDifferentDomain = targetUrl.origin !== originalUrl.origin;
+          } catch {
+            isDifferentDomain = true;
+          }
+        }
+
+        if (isDifferentDomain) {
+          this.logger.warn(
+            `Blocked redirect to different domain for webhook ${registration.id}: ${registration.url} -> ${location ?? 'unknown'}`,
+          );
+          throw new Error(
+            `Webhook redirect to different domain blocked: ${targetHostname}`,
+          );
+        }
+
+        this.logger.warn(
+          `Webhook delivery to ${registration.url} attempted redirect (${response.status}) to ${location ?? 'unknown'}; redirects are disabled to prevent payload leakage`,
+        );
+        throw new Error(
+          `Webhook delivery failed: redirects are not followed (${response.status})`,
+        );
+      }
 
       if (!response.ok) {
         throw new Error(`Webhook responded with ${response.status}`);
@@ -386,29 +435,26 @@ export class WebhooksService {
     }
 
     // #613 — Verify response signature if the endpoint provides one.
-    // Some webhook consumers sign their responses with the shared secret
-    // so the caller can confirm the response wasn't tampered with by a
-    // MITM. When present, the X-Webhook-Signature-Response header must
-    // match the HMAC of the response body; a mismatch is treated as a
-    // delivery failure.
-    if (secret) {
+    if (registration.secret) {
       const responseSignature = response.headers.get('x-webhook-signature-response');
       if (responseSignature) {
         const responseBody = await response.text();
         const expectedSignature = crypto
-          .createHmac('sha256', secret)
+          .createHmac('sha256', registration.secret)
           .update(responseBody)
           .digest('base64');
 
-        if (!crypto.timingSafeEqual(Buffer.from(responseSignature), Buffer.from(expectedSignature))) {
+        const sigBuf = Buffer.from(responseSignature);
+        const expBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
           throw new Error('Webhook response signature verification failed');
         }
       }
     }
   }
 
-  private signPayload(payload: unknown, secret: string): string {
-    const payloadStr = JSON.stringify(payload);
+  // #719 — Sign a pre-serialized payload string (avoids redundant JSON.stringify).
+  private signPayloadString(payloadStr: string, secret: string): string {
     return crypto.createHmac('sha256', secret).update(payloadStr).digest('base64');
   }
 

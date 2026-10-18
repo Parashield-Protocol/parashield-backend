@@ -132,6 +132,26 @@ npm run start:prod
 
 ---
 
+## API versioning (#713)
+
+Every response carries an `X-API-Version` header advertising the semantic
+version that served it (`v1` → `1.0.0`, `v2` → `2.0.0`), including error
+responses, streamed responses (SSE/NDJSON) and responses that never reach a
+route handler (CORS preflights, request timeouts).
+
+- The version is taken from the route's `vN` segment (`/api/v1/...`), falling
+  back to a request `x-api-version` header, then to `v1`.
+- Requests for an unknown version (`/api/v3/...`) are rejected with `400`.
+- `v1` responses also include `Deprecation: true` and
+  `Link: </api/v2>; rel="successor"`.
+- The header is exposed via CORS so browser clients can read it.
+
+Resolution lives in `src/common/versioning/api-version.ts` and is applied by the
+versioning interceptor (success paths), the global exception filter (error
+paths) and an early middleware (everything else).
+
+---
+
 ## CORS configuration
 
 CORS is enabled in `src/main.ts` and controlled entirely via environment variables (see `.env.example`):
@@ -190,6 +210,20 @@ Pool utilization is monitored continuously via `/api/v1/health`:
 - Flags health as degraded when connection utilization reaches `DB_POOL_EXHAUSTION_WARN_PERCENT` (default 90%) to detect exhaustion before queries queue or fail.
 - Exposes genuine Prisma runtime engine metrics when supported.
 - The effective pool configuration is logged at server startup.
+
+---
+
+## Oracle Reading Batch Persistence (#686)
+
+To minimize database round-trips when storing high-frequency oracle readings, `OracleService` batches database inserts using multi-query transactions and a bounded in-memory buffer.
+
+| Environment Variable | Default | Description | Valid Range |
+|---|---|---|---|
+| `ORACLE_BATCH_SIZE` | `50` | Maximum number of readings written in a single multi-row database transaction | 1 – 1000 |
+| `ORACLE_FLUSH_INTERVAL_MS` | `1000` | Maximum time in milliseconds before pending buffered readings are flushed | 10 – 60000 |
+| `ORACLE_BUFFER_MAX_SIZE` | `1000` | Maximum in-memory buffer capacity before backpressure is applied | 10 – 10000 |
+
+Setting `ORACLE_BATCH_SIZE=1` disables buffering and executes immediate 1:1 inserts matching legacy behavior. Graceful shutdown hooks flush any remaining buffered readings before process termination.
 
 ### Load Testing
 
@@ -320,6 +354,16 @@ If none of the three are set, Vault is skipped. Once any of them is set, the ser
 
 On success the loaded key names (never values) are logged.
 
+#### Database credential rotation
+
+When Vault is configured, the server re-reads the Vault secret every `VAULT_REFRESH_INTERVAL_MS` (default `300000`, i.e. 5 minutes; `0` disables polling). If `DATABASE_URL` or `DATABASE_REPLICA_URL` changed, it reconnects without a restart:
+
+1. A new Prisma client is built from the new URL and connected **before** anything is swapped. If Vault is unreachable or the database rejects the new credentials, the error is logged, the existing connections stay in use, and the next refresh retries.
+2. Once connected, the new client takes over all new queries.
+3. The previous client is disconnected after `DATABASE_ROTATION_DRAIN_MS` (default `30000`) so in-flight queries and transactions can finish. Keep the old credentials valid in the database for at least that long after rotating them in Vault.
+
+Only the database URLs are applied at runtime; other secrets are still read once at startup.
+
 ### OpenTelemetry tracing
 
 Tracing is enabled when the OpenTelemetry packages are installed and the following variables are set:
@@ -370,6 +414,7 @@ All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit times
 
 - **Input sanitization**: a global middleware (`InputSanitizationMiddleware`, registered in `src/main.ts`) trims every string in JSON/urlencoded request bodies and escapes `<`/`>` before validation and persistence, so markup cannot survive into stored values or reflected responses.
 - **Connection pooling**: Prisma pool sizing is applied at runtime to the datasource URL (`connection_limit=10`, `pool_timeout=10`, `connect_timeout=5`). Override each value with `DATABASE_CONNECTION_LIMIT`, `DATABASE_POOL_TIMEOUT`, `DATABASE_CONNECT_TIMEOUT`, or by putting the parameter directly in `DATABASE_URL`.
+- **Response header hardening (#711)**: `applySecurityHeaders()` (`src/common/security/response-header-hardening.ts`, called from `src/main.ts`) disables Express's `X-Powered-By`, applies [helmet](https://helmetjs.github.io/) and strips implementation-revealing headers (`Server`, `X-Powered-By`, `X-AspNet-Version`, `X-AspNetMvc-Version`, `X-Runtime`, `Via`) from every response. Stripping is done at the header level, so headers added later by the framework or an upstream proxy are removed too. Extra names can be added via `extraHeadersToStrip`.
 
 ---
 
@@ -410,6 +455,8 @@ CONCURRENCY_TEST_DATABASE_URL=postgresql://.../parashield_test npx jest claims.c
 | Rainfall, temperature, wind | [Open-Meteo](https://open-meteo.com) | No |
 | Flight delay | [AviationStack](https://aviationstack.com) | Yes (`AVIATIONSTACK_API_KEY`) |
 | DeFi exploit | Stellar RPC event stream | No |
+
+**Threshold evaluation (#712):** oracle readings are 7-decimal fixed point (e.g. `324000000` = 32.4) and product thresholds are `Decimal(20,7)`. Trigger comparisons are done on exact scaled `BigInt` values (`src/common/utils/decimal.ts`) rather than `parseFloat`, so the last decimal place is never lost and a reading exactly equal to the threshold never triggers (strict `LessThan` / greater-than).
 
 ---
 
@@ -470,6 +517,36 @@ The keeper is a Stellar account (`KEEPER_SECRET_KEY`) that signs:
 - `claims-processor.auto_process(policy_id)` — one tx per active policy per hour
 
 Fee per tx: ~0.00001 XLM. Fund via `stellar keys fund <address> --network testnet` on testnet.
+
+---
+
+## Redis connection & startup retry (#710)
+
+The app creates a single shared Redis client (`REDIS_URL`) used for rate limiting,
+idempotency, distributed locks and the policy-state cache. The client is created
+with `lazyConnect`, so construction never blocks; the first connection is performed
+during startup by `RedisConnectionService` (`src/redis/redis-connection.service.ts`).
+
+Startup behaviour:
+
+- The first connection is retried with exponential backoff, a capped delay and
+  jitter. A per-attempt timeout guarantees a hung connect cannot stall startup.
+- If every attempt fails, startup fails fast with one actionable error naming the
+  Redis `host:port` (never the username/password or full URL).
+- Once connected, runtime reconnection is handed back to ioredis (its
+  `retryStrategy`/`reconnectOnError` handle transient drops).
+
+Tuning (all optional — defaults shown):
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REDIS_STARTUP_MAX_ATTEMPTS` | `5` | Total connection attempts, including the first. |
+| `REDIS_STARTUP_INITIAL_DELAY_MS` | `200` | Delay before the second attempt; doubles each retry. |
+| `REDIS_STARTUP_MAX_DELAY_MS` | `3000` | Upper bound for the backoff delay. |
+| `REDIS_STARTUP_ATTEMPT_TIMEOUT_MS` | `5000` | Per-attempt timeout. |
+
+Invalid values (negative, non-integer or out of range) fail startup with a clear
+validation error. Credentials embedded in `REDIS_URL` are never logged.
 
 ---
 

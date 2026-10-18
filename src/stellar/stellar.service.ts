@@ -1,13 +1,15 @@
-import { Injectable, Logger, HttpException, HttpStatus, BadRequestException } from "@nestjs/common";
+import { Injectable, Logger, HttpException, HttpStatus, BadRequestException, ForbiddenException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Networks,
   Keypair,
   TransactionBuilder,
   Transaction,
+  FeeBumpTransaction,
   BASE_FEE,
   Operation,
   Contract,
+  StrKey,
   rpc as StellarRpc,
   Horizon,
   xdr,
@@ -283,6 +285,127 @@ export class StellarService {
   }
 
   /**
+   * Validate the format of a Stellar public key using the Stellar SDK.
+   * Compares canonical forms (trimmed, uppercase).
+   *
+   * Deliberate decision regarding muxed (M...) addresses:
+   * Muxed accounts are explicitly rejected with 400 Bad Request because
+   * ParaShield smart contracts on Soroban and JWT wallet authentication
+   * require standard Ed25519 public keys (G...).
+   *
+   * @param rawAddress The account public key to validate.
+   * @param contextLabel Optional field or role name for descriptive error messaging.
+   * @returns The canonical public key string.
+   */
+  validateAccountAddress(rawAddress: unknown, contextLabel = 'account'): string {
+    if (typeof rawAddress !== 'string' || !rawAddress.trim()) {
+      throw new BadRequestException(`Invalid Stellar ${contextLabel}: address must be a non-empty string`);
+    }
+
+    const trimmed = rawAddress.trim();
+
+    // Check if it's a muxed account (M...)
+    if (
+      trimmed.startsWith('M') ||
+      (typeof StrKey.isValidMed25519PublicKey === 'function' && StrKey.isValidMed25519PublicKey(trimmed))
+    ) {
+      throw new BadRequestException(
+        `Muxed accounts (M...) are not supported for ${contextLabel}; a standard Ed25519 public key (G...) is required`,
+      );
+    }
+
+    const canonical = trimmed.toUpperCase();
+
+    const isValid = typeof StrKey.isValidEd25519PublicKey === 'function'
+      ? StrKey.isValidEd25519PublicKey(canonical)
+      : /^G[A-Z2-7]{55}$/.test(canonical);
+
+    if (!isValid) {
+      throw new BadRequestException(
+        `Invalid Stellar ${contextLabel} format: must be a valid 56-character Ed25519 public key (G...)`,
+      );
+    }
+
+    return canonical;
+  }
+
+  /**
+   * Validate that a transaction's source account (and all operation-level source fields)
+   * match the authenticated user's linked wallet.
+   *
+   * Security constraints (#687):
+   * 1. Identity is taken from trusted authentication context (never unverified params).
+   * 2. Key format is validated with the Stellar SDK (malformed is 400).
+   * 3. Mismatches and users with no linked wallet return 403 without revealing the linked wallet address.
+   * 4. Validates transaction envelope source, fee source, and every operation-level source.
+   * 5. Runs before any Horizon/RPC calls, simulation, or signing.
+   * 6. Attempted mismatches are logged at warn level (never logging secret keys or signatures).
+   */
+  validateTransactionSource(
+    tx: Transaction | FeeBumpTransaction | any,
+    authenticatedWallet?: string,
+    options?: { correlationId?: string; method?: string; userId?: string },
+  ): void {
+    const method = options?.method || 'validateTransactionSource';
+    const correlationId = options?.correlationId;
+    const userId = options?.userId || authenticatedWallet || 'anonymous';
+
+    // 1. Verify user has a linked wallet in their auth context
+    if (!authenticatedWallet || typeof authenticatedWallet !== 'string' || !authenticatedWallet.trim()) {
+      this.logger.warn(
+        `User without linked wallet attempted transaction in ${method}: user=${userId}${correlationId ? ` corr=${correlationId}` : ''}`,
+      );
+      throw new ForbiddenException('Forbidden: No linked wallet found for authenticated user');
+    }
+
+    const canonicalExpected = this.validateAccountAddress(authenticatedWallet, 'authenticated wallet');
+
+    // 2. Check fee-bump transaction
+    if (tx && typeof tx === 'object' && ('feeSource' in tx || 'innerTransaction' in tx)) {
+      if (tx.feeSource) {
+        const canonicalFeeSource = this.validateAccountAddress(tx.feeSource, 'fee source');
+        if (canonicalFeeSource !== canonicalExpected) {
+          this.logger.warn(
+            `Fee source account mismatch in ${method}: user=${userId} attempted=${tx.feeSource}${correlationId ? ` corr=${correlationId}` : ''}`,
+          );
+          throw new ForbiddenException('Forbidden: Transaction source account does not match authenticated user');
+        }
+      }
+      if (tx.innerTransaction) {
+        this.validateTransactionSource(tx.innerTransaction, authenticatedWallet, options);
+        return;
+      }
+    }
+
+    // 3. Check transaction envelope source
+    if (!tx || typeof tx !== 'object' || !tx.source) {
+      throw new BadRequestException('Transaction must have a valid source account');
+    }
+
+    const canonicalTxSource = this.validateAccountAddress(tx.source, 'transaction source');
+    if (canonicalTxSource !== canonicalExpected) {
+      this.logger.warn(
+        `Transaction source account mismatch in ${method}: user=${userId} attempted=${tx.source}${correlationId ? ` corr=${correlationId}` : ''}`,
+      );
+      throw new ForbiddenException('Forbidden: Transaction source account does not match authenticated user');
+    }
+
+    // 4. Check all operation-level sources
+    const operations = Array.isArray(tx.operations) ? tx.operations : [];
+    for (const op of operations) {
+      if (op && op.source) {
+        const canonicalOpSource = this.validateAccountAddress(op.source, 'operation source');
+        if (canonicalOpSource !== canonicalExpected) {
+          this.logger.warn(
+            `Operation source account mismatch in ${method}: user=${userId} attempted=${op.source}${correlationId ? ` corr=${correlationId}` : ''}`,
+          );
+          throw new ForbiddenException('Forbidden: Operation source account does not match authenticated user');
+        }
+      }
+    }
+  }
+
+  /**
    * Simulate a raw transaction, assemble it with the simulation result,
    * sign it with the keeper key, and send it to the network.
    *
@@ -295,7 +418,17 @@ export class StellarService {
    */
   async simulateAssembleAndSend(
     tx: Transaction,
+    authenticatedWallet?: string,
+    correlationId?: string,
   ): Promise<StellarRpc.Api.SendTransactionResponse> {
+    // If authenticatedWallet is provided, validate source account BEFORE any RPC calls or signing
+    if (authenticatedWallet) {
+      this.validateTransactionSource(tx, authenticatedWallet, {
+        method: 'simulateAssembleAndSend',
+        correlationId,
+      });
+    }
+
     const simResult = await this.withTimeout(
       this.rpc.simulateTransaction(tx),
       "simulateTransaction",

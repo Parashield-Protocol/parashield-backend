@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { OracleService } from '../oracle/oracle.service';
 import { PolicyStatus, ClaimStatus } from '@prisma/client';
 import { StatusEventsService, PolicyStatusEvent, PolicyOracleKeyChangeEvent } from '../common/events/status-events.service';
+import { compareScaledToThreshold, parseDecimalScaled, parseFixedPointBigInt } from '../common/utils/decimal';
 
 export const POLICY_DERIVED_STATE_TTL_SECONDS = 60;
 const IN_MEMORY_MAX_ENTRIES = 2000;
@@ -305,8 +306,15 @@ export class PolicyStateCacheService implements OnModuleInit, OnModuleDestroy {
     const reading = await this.oracleService.getLatestReading(policy.oracleKey);
 
     const product = policy.product;
-    const rawThreshold = parseFloat(product.threshold.toString());
-    const thresholdBigInt = isFinite(rawThreshold) ? BigInt(Math.round(rawThreshold * 1e7)) : 0n;
+    // #712 — Parse the threshold exactly (scaled BigInt) instead of parseFloat.
+    // Unlike the payout path, a non-numeric threshold here keeps the previous
+    // graceful behaviour (treated as 0) rather than throwing.
+    let thresholdBigInt: bigint;
+    try {
+      thresholdBigInt = parseDecimalScaled(product.threshold.toString());
+    } catch {
+      thresholdBigInt = 0n;
+    }
 
     let triggerMet = false;
     let readingValueStr: string | null = null;
@@ -314,14 +322,13 @@ export class PolicyStateCacheService implements OnModuleInit, OnModuleDestroy {
 
     if (reading) {
       readingValueStr = reading.value.toString();
-      readingTimestamp = (reading as any).bucketStart
-        ? (reading as any).bucketStart.getTime()
-        : (reading.timestamp ? reading.timestamp * 1000 : null);
-      const readingVal = BigInt(reading.value);
-      triggerMet =
-        product.comparison === 'LessThan'
-          ? readingVal < thresholdBigInt
-          : readingVal > thresholdBigInt;
+      // #712 — Prefer the reading's own bucket start, falling back to its
+      // timestamp: OracleReading does not always carry a bucketStart.
+      readingTimestamp = reading.bucketStart
+        ? reading.bucketStart.getTime()
+        : reading.timestamp * 1000;
+      const readingVal = parseFixedPointBigInt(reading.value);
+      triggerMet = compareScaledToThreshold(readingVal, thresholdBigInt, product.comparison);
     }
 
     const claims = policy.claims ?? [];

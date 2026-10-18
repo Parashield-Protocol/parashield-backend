@@ -631,6 +631,95 @@ describe('ClaimsService', () => {
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
     });
 
+    // #712 — The threshold comparison must be exact. A reading equal to a
+    // LessThan threshold is NOT a trigger (strict), and this must hold at full
+    // 7-decimal resolution rather than via parseFloat's binary rounding.
+    it('#712 — a reading exactly equal to the LessThan threshold does not trigger', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-eq-lt', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(500_000_000), // exactly 50.0000000 — equal to the threshold
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT); // threshold 50.0000000, LessThan
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'REJECTED', triggerMet: false }),
+        }),
+      );
+    });
+
+    it('#712 — a reading exactly equal to the GreaterThan threshold does not trigger', async () => {
+      const GT_PRODUCT = { ...MOCK_PRODUCT, comparison: 'GreaterThan', threshold: '30.0000000' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-eq-gt', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(300_000_000), // exactly 30.0000000 — equal to the threshold
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(GT_PRODUCT);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+    });
+
+    it('#712 — the last decimal place of the threshold is honoured (one unit below triggers)', async () => {
+      // Reading is exactly 1e-7 below the threshold — must trigger LessThan.
+      const PRODUCT = { ...MOCK_PRODUCT, threshold: '50.0000001' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-last-dp', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(500_000_000), // 50.0000000 < 50.0000001
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(PRODUCT);
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Paid');
+      expect(mockStellarService.invokeContract).toHaveBeenCalled();
+    });
+
+    // #712 regression: with the old `parseFloat(threshold) * 1e7` path, a large
+    // threshold loses low-order digits to double rounding, so a reading exactly
+    // equal to the threshold can drift below it and pay out. The scaled BigInt
+    // comparison keeps the boundary exact.
+    it('#712 — exact comparison holds for large thresholds (no float drift)', async () => {
+      const PRODUCT = { ...MOCK_PRODUCT, threshold: '1000000000000.0000001' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-large', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        // Exactly equal to the threshold, as scaled BigInt.
+        value:      BigInt('10000000000000000001'),
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(PRODUCT);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+    });
+
     // #259 — When getProductById returns null/undefined (product deactivated after
     // the policy was sold), the claim must fail loud for manual review rather than
     // silently substituting a threshold/comparison that may not match what the
