@@ -59,6 +59,24 @@ export class StellarService {
   private readonly network: string;
   private readonly keeperKeypair: Keypair;
 
+  // #728 — per-account transaction serialization. Concurrent invocations from
+  // the same account would race on sequence numbers and fail with
+  // TRANSACTION_BAD_SEQ. A simple promise-chain mutex serializes them.
+  private readonly accountLocks = new Map<string, Promise<void>>();
+
+  private async withAccountLock<T>(publicKey: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.accountLocks.get(publicKey) ?? Promise.resolve();
+    let release: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this.accountLocks.set(publicKey, prev.then(() => gate));
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release!();
+    }
+  }
+
   constructor(private readonly config: ConfigService) {
     const rpcUrl =
       config.get<string>("STELLAR_RPC_URL") ??
@@ -130,6 +148,18 @@ export class StellarService {
       );
     }
     const signer = signerKeypair ?? this.keeperKeypair;
+    // #728 — serialize per-account to prevent sequence number conflicts.
+    return this.withAccountLock(signer.publicKey(), () =>
+      this.doInvokeContract(contractId, method, args, signer),
+    );
+  }
+
+  private async doInvokeContract(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+    signer: Keypair,
+  ): Promise<string> {
     const contract = new Contract(contractId);
     const MAX_ATTEMPTS = 3;
     let lastError: Error | null = null;

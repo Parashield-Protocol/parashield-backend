@@ -334,7 +334,17 @@ export class OracleService {
   }
 
   /** Get the latest reading for a given oracle key from the database. */
+  // #727 — cache recent reads to avoid repeated identical queries.
+  private readonly readingCache = new Map<string, { value: OracleReading | null; expiresAt: number }>();
+  private static readonly READING_CACHE_TTL_MS = 30_000;
+
   async getLatestReading(key: string): Promise<OracleReading | null> {
+    // Check cache first (#727)
+    const cached = this.readingCache.get(key);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
     // #265 — submittedAt alone has no guaranteed tiebreak on ties (plausible
     // under bulk/backfill writes or fast successive submissions), and this
     // result directly drives claim payout decisions. id is a stable secondary
@@ -344,16 +354,24 @@ export class OracleService {
       orderBy: [{ submittedAt: "desc" }, { id: "desc" }],
     });
 
-    if (!record) return null;
+    const result = record
+      ? {
+          dataType: record.dataType,
+          key: record.key,
+          value: record.value.toString(),
+          confidence: record.confidence,
+          timestamp: Math.floor(record.submittedAt.getTime() / 1000),
+          source: record.source,
+        }
+      : null;
 
-    return {
-      dataType: record.dataType,
-      key: record.key,
-      value: record.value.toString(),
-      confidence: record.confidence,
-      timestamp: Math.floor(record.submittedAt.getTime() / 1000),
-      source: record.source,
-    };
+    // Cache the result (#727)
+    this.readingCache.set(key, {
+      value: result,
+      expiresAt: Date.now() + OracleService.READING_CACHE_TTL_MS,
+    });
+
+    return result;
   }
 
   private async executeWithRateLimitBackoff<T>(

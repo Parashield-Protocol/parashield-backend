@@ -569,6 +569,27 @@ this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
       );
     }
 
+    // #725 — Re-check policy status immediately before creating the claim
+    // and invoking the contract. The earlier checks used a snapshot from
+    // when the request started; the policy may have been expired or
+    // cancelled since then.
+    const freshPolicy = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    if (!freshPolicy) {
+      throw new NotFoundException({ message: `Policy ${policyId} not found`, errorCode: ErrorCode.CLAIM_POLICY_NOT_FOUND });
+    }
+    if (freshPolicy.status === PolicyStatus.CANCELLED) {
+      throw new ConflictException({ message: `Policy ${policyId} was cancelled`, errorCode: ErrorCode.CLAIM_POLICY_NOT_ACTIVE });
+    }
+    if (freshPolicy.status !== PolicyStatus.ACTIVE) {
+      throw new ConflictException({ message: `Policy ${policyId} is not active (status: ${freshPolicy.status})`, errorCode: ErrorCode.CLAIM_POLICY_NOT_ACTIVE });
+    }
+    if (new Date() > freshPolicy.endTime) {
+      throw new ConflictException({
+        message: `Policy ${policyId} coverage period ended at ${freshPolicy.endTime.toISOString()}`,
+        errorCode: ErrorCode.CLAIM_POLICY_EXPIRED,
+      });
+    }
+
     let claim: Awaited<ReturnType<typeof this.prisma.claim.create>>;
     try {
       claim = await this.prisma.claim.create({
