@@ -6,6 +6,7 @@ import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PolicyService, ProductSummary } from '../policy/policy.service';
 import { transition } from '../policy/policy-status.machine';
+import { StatusEventsService } from '../common/events/status-events.service';
 import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 
 const BATCH_SIZE = 10;
@@ -38,6 +39,7 @@ export class ClaimsWorker {
     private readonly claims: ClaimsService,
     private readonly prisma: PrismaService,
     private readonly policyService: PolicyService,
+    private readonly statusEvents: StatusEventsService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
@@ -149,6 +151,12 @@ export class ClaimsWorker {
             if (count === 0) {
               this.logger.warn(
                 `Policy ${policy.id} status guard missed on EXPIRED transition — status changed underneath the worker`,
+              );
+            } else {
+              // #748 — Emit expiration event so downstream systems are aware.
+              this.statusEvents.emitPolicyStatusChange(
+                policy.id,
+                PolicyStatus.EXPIRED,
               );
             }
           }
