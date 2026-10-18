@@ -44,7 +44,8 @@ describe('PolicyStateCacheService (#714)', () => {
   beforeEach(async () => {
     mockPrisma = {
       policy: {
-        findUnique: jest.fn().mockResolvedValue(JSON.parse(JSON.stringify(mockPolicy))),
+        // structuredClone (not JSON round-trip) so BigInt/Date fields survive.
+        findUnique: jest.fn().mockResolvedValue(structuredClone(mockPolicy)),
         findMany: jest.fn().mockResolvedValue([{ id: 'policy-uuid-1' }]),
       },
     };
@@ -314,6 +315,46 @@ describe('PolicyStateCacheService (#714)', () => {
       // DB query reduction: (40 - 2) / 40 = 95%
       const dbQueryReductionPct = ((uncachedDbQueries - cachedDbQueries) / uncachedDbQueries) * 100;
       expect(dbQueryReductionPct).toBe(95);
+    });
+  });
+
+  describe('#712 — exact oracle threshold comparison', () => {
+    it('does not trigger when the reading equals the threshold', async () => {
+      mockOracle.getLatestReading.mockResolvedValue({
+        ...mockReading,
+        value: BigInt(500_000_000), // exactly 50.0, equal to the '50.0' threshold
+      });
+
+      const state = await service.computePolicyState('policy-uuid-1');
+
+      expect(state?.triggerMet).toBe(false);
+      expect(state?.latestReadingValue).toBe('500000000');
+    });
+
+    it('triggers when the reading is one unit below a LessThan threshold', async () => {
+      mockOracle.getLatestReading.mockResolvedValue({
+        ...mockReading,
+        value: BigInt(499_999_999), // 49.9999999 < 50.0
+      });
+
+      const state = await service.computePolicyState('policy-uuid-1');
+
+      expect(state?.triggerMet).toBe(true);
+    });
+
+    it('falls back to the reading timestamp when bucketStart is absent', async () => {
+      mockOracle.getLatestReading.mockResolvedValue({
+        key: 'rainfall:station-101:monthly',
+        value: '450000000',
+        confidence: 90,
+        timestamp: 1_700_000_000,
+        source: 'open-meteo',
+      });
+
+      const state = await service.computePolicyState('policy-uuid-1');
+
+      expect(state?.latestReadingTimestamp).toBe(1_700_000_000_000);
+      expect(state?.triggerMet).toBe(true);
     });
   });
 });

@@ -146,6 +146,27 @@ describe('GlobalExceptionFilter', () => {
       const body = json.mock.calls[0][0];
       expect(body.correlationId).toBe('req-corr-123');
     });
+
+    // #713 — error responses bypass the versioning interceptor, so the filter
+    // must stamp X-API-Version itself.
+    it('#713 — stamps X-API-Version on error responses', () => {
+      const host = mockHost('GET', '/api/v2/policies/missing-uuid');
+      const error = new HttpException('Policy not found', HttpStatus.NOT_FOUND);
+
+      filter.catch(error, host);
+
+      expect(res.setHeader).toHaveBeenCalledWith('X-API-Version', '2.0.0');
+    });
+
+    it('#713 — defaults to 1.0.0 for unversioned error paths', () => {
+      const host = mockHost('GET', '/health');
+      const error = new HttpException('Unavailable', HttpStatus.BAD_REQUEST);
+
+      filter.catch(error, host);
+
+      expect(res.setHeader).toHaveBeenCalledWith('X-API-Version', '1.0.0');
+      expect(res.setHeader).toHaveBeenCalledWith('Deprecation', 'true');
+    });
   });
 
   describe('Prisma Error Mapping & Security Hardening (#688)', () => {

@@ -1072,6 +1072,27 @@ export class PolicyService {
     return this.mapProduct(product);
   }
 
+  async findAll(params?: {
+    take?: number;
+    skip?: number;
+    cursor?: { id: string };
+    orderBy?: { [key: string]: 'asc' | 'desc' };
+  }): Promise<Array<{ id: string; status: string; premium: string; coverage: string; createdAt: Date }>> {
+    const policies = await this.prisma.policy.findMany({
+      take: params?.take,
+      skip: params?.skip,
+      cursor: params?.cursor,
+      orderBy: params?.orderBy,
+    });
+    return policies.map((p) => ({
+      id: p.id,
+      status: p.status,
+      premium: p.premiumPaid.toString(),
+      coverage: p.coverageXlm.toString(),
+      createdAt: p.createdAt,
+    }));
+  }
+
   private mapProduct(product: Product): ProductSummary {
     return {
       id:          product.id,

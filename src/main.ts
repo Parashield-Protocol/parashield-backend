@@ -18,7 +18,8 @@ import { REALTIME_DOCS } from './common/swagger/realtime-docs';
 import { ErrorResponseDto } from './common/swagger/error-response.dto';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import { parseTrustProxy } from './common/network/trust-proxy';
-import helmet from 'helmet';
+import { applySecurityHeaders } from './common/security/response-header-hardening';
+import { createApiVersionMiddleware } from './common/versioning/api-version';
 import compression from 'compression';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
@@ -92,16 +93,16 @@ async function bootstrap() {
     typeof value === 'bigint' ? value.toString() : value,
   );
 
-  // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
-  app.use(helmet({
-    referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-    // #705 — enable HSTS to prevent SSL stripping attacks
-    hsts: {
-      maxAge: 31536000, // 1 year
-      includeSubDomains: true,
-      preload: true,
-    },
-  }));
+  // #713 — Stamp X-API-Version on every response as early as possible so it is
+  // present even on responses that bypass the interceptor/exception-filter
+  // pipeline (CORS preflights, timeouts, static docs).
+  app.use(createApiVersionMiddleware());
+
+  // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.).
+  // #711 — also disables Express's X-Powered-By and strips leaky headers such
+  // as Server/X-Runtime/Via from every response.
+  // #705 — HSTS is enabled to prevent SSL stripping attacks (see the helper).
+  applySecurityHeaders(app);
 
   // Response compression — gzip/deflate for text-based responses (JSON, HTML,
   // SSE streams). Runs before route handlers so every response is eligible.
@@ -230,6 +231,8 @@ async function bootstrap() {
     methods: corsMethods,
     allowedHeaders: corsAllowedHeaders,
     credentials: corsCredentials,
+    // #713 — let browser clients read the version/deprecation headers.
+    exposedHeaders: ['X-API-Version', 'Deprecation', 'Link'],
   });
 
   app.setGlobalPrefix('api/v1');

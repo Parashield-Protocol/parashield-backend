@@ -7,6 +7,7 @@ import { Prisma } from '@prisma/client';
 import { ErrorCode, errorCodeFromBody, errorCodeFromStatus } from '../errors/error-codes';
 import { serializeBigInt } from '../interceptors/bigint-serializer.interceptor';
 import { buildProblemDetails } from '../errors/problem-details';
+import { applyApiVersionHeaders, resolveRequestedVersion } from '../versioning/api-version';
 
 interface PrismaErrorInfo {
   className: string;
@@ -89,6 +90,14 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     const errors = this.extractValidationErrors(rawResponse);
 
     const errorCode = errorCodeFromBody(rawResponse) ?? errorCodeFromStatus(status);
+
+    // #713 — Error responses never pass through the versioning interceptor's
+    // success path, so stamp the version header here too.
+    const versionHeader = req.headers?.['x-api-version'];
+    applyApiVersionHeaders(
+      res,
+      resolveRequestedVersion(path, Array.isArray(versionHeader) ? versionHeader[0] : versionHeader),
+    );
 
     // #677 — Adopt RFC 7807 problem details with Content-Type application/problem+json.
     const problemBody = buildProblemDetails({

@@ -73,6 +73,27 @@ describe('ClaimsController', () => {
 
       expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
     });
+
+    it('passes cursor to ClaimsService when cursor is provided (#749)', async () => {
+      mockClaims.getClaimsByWallet.mockResolvedValue({
+        data: [{ id: 'c2' }],
+        total: 2,
+        page: 1,
+        limit: 1,
+        nextCursor: null,
+        hasMore: false,
+      } as any);
+
+      const result = await controller.getClaimsByWalletQuery(WALLET, '1', '1', 'cursor-123', reqWith(WALLET));
+
+      expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 1, 'cursor-123');
+      expect(result).toMatchObject({
+        success: true,
+        data: [{ id: 'c2' }],
+        nextCursor: null,
+        hasMore: false,
+      });
+    });
   });
 
   describe('autoProcess', () => {
@@ -142,6 +163,27 @@ describe('ClaimsController', () => {
       await controller.getClaimHistory(WALLET, 'invalid', 'invalid', reqWith(WALLET));
 
       expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
+    });
+
+    it('passes cursor to ClaimsService when cursor is provided (#749)', async () => {
+      mockClaims.getClaimsByWallet.mockResolvedValue({
+        data: [{ id: 'c2' }],
+        total: 2,
+        page: 1,
+        limit: 1,
+        nextCursor: null,
+        hasMore: false,
+      } as any);
+
+      const result = await controller.getClaimHistory(WALLET, '1', '1', 'cursor-123', reqWith(WALLET));
+
+      expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 1, 'cursor-123');
+      expect(result).toMatchObject({
+        success: true,
+        data: [{ id: 'c2' }],
+        nextCursor: null,
+        hasMore: false,
+      });
     });
 
     it('throws Forbidden when reading claims for another wallet', async () => {

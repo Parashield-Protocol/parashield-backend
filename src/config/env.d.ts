@@ -19,6 +19,11 @@ export interface EnvironmentVariables {
   HORIZON_URL?: string;
   STELLAR_NETWORK?: string;
   REDIS_URL?: string;
+  // #710 — Redis startup connection retry tuning (defaults in src/redis/redis-startup.ts)
+  REDIS_STARTUP_MAX_ATTEMPTS?: string;
+  REDIS_STARTUP_INITIAL_DELAY_MS?: string;
+  REDIS_STARTUP_MAX_DELAY_MS?: string;
+  REDIS_STARTUP_ATTEMPT_TIMEOUT_MS?: string;
   ADMIN_API_KEY?: string;
   ORACLE_OPERATOR_API_KEY?: string;
   AVIATIONSTACK_API_KEY?: string;

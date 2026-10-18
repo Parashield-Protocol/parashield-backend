@@ -38,7 +38,7 @@ describe('PrismaService', () => {
 
       expect(connect).toHaveBeenCalledTimes(3);
       expect(service['logger'].warn).toHaveBeenCalledTimes(2);
-      expect(service['logger'].log).toHaveBeenLastCalledWith('Database connection established');
+      expect(service['logger'].log).toHaveBeenCalledWith('Database connection established');
     });
 
     it('throws after all retries are exhausted', async () => {
@@ -148,5 +148,66 @@ describe('PrismaService', () => {
       );
     });
   });
+
+  describe('#750 — database connection string redaction in error messages and logs', () => {
+    const { getHostAndDatabaseFromUrl, sanitizeConnectionError } = require('./prisma.service');
+    const originalEnv = process.env;
+
+    beforeEach(() => {
+      process.env = { ...originalEnv };
+      process.env.DATABASE_URL = 'postgresql://admin:supersecret99@prod-db.internal:5432/parashield_prod?sslmode=require';
+    });
+
+    afterEach(() => {
+      process.env = originalEnv;
+    });
+
+    it('extracts only host and database from URL', () => {
+      const info = getHostAndDatabaseFromUrl('postgresql://myuser:secretpassword@dbhost:5432/mydb?schema=public');
+      expect(info.host).toBe('dbhost:5432');
+      expect(info.database).toBe('mydb');
+    });
+
+    it('redacts credentials from error messages', () => {
+      const rawError = new Error(
+        'Failed to connect to postgresql://admin:supersecret99@prod-db.internal:5432/parashield_prod: password authentication failed',
+      );
+      const sanitized = sanitizeConnectionError(rawError, process.env.DATABASE_URL);
+
+      expect(sanitized.message).not.toContain('supersecret99');
+      expect(sanitized.message).not.toContain('admin:supersecret99');
+      expect(sanitized.message).toContain('prod-db.internal:5432');
+    });
+
+    it('logs only host and database without credentials on connection failure', async () => {
+      const secretError = new Error('Connection refused at postgresql://secretuser:secretpass@10.0.0.5:5432/db');
+      jest.spyOn(service, '$connect').mockRejectedValue(secretError);
+      const warnSpy = jest.spyOn(service['logger'], 'warn');
+      const errorSpy = jest.spyOn(service['logger'], 'error');
+
+      let thrownError: Error | undefined;
+      service.onModuleInit().catch((err) => {
+        thrownError = err;
+      });
+      await jest.advanceTimersByTimeAsync(100_000);
+
+      // Verify warn logs do not contain the secret credentials
+      expect(warnSpy).toHaveBeenCalled();
+      for (const call of warnSpy.mock.calls) {
+        const msg = call[0];
+        expect(msg).not.toContain('secretpass');
+        expect(msg).not.toContain('secretuser');
+        expect(msg).toMatch(/target: prod-db\.internal:5432\/parashield_prod/);
+      }
+
+      // Verify final error log does not contain credentials
+      expect(errorSpy).toHaveBeenCalledWith('All database connection retries exhausted');
+
+      // Verify thrown error is sanitized
+      expect(thrownError).toBeDefined();
+      expect(thrownError!.message).not.toContain('secretpass');
+    });
+  });
 });
+
 
