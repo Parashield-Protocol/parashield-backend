@@ -31,3 +31,45 @@ export function parseBooleanEnv(value: unknown, defaultValue = false): boolean {
 
   throw new Error(`Invalid boolean configuration type: ${typeof value}`);
 }
+
+/**
+ * Validate URL configuration at startup (#734).
+ *
+ * Rejects malformed URLs so the service fails fast with a clear error
+ * instead of producing runtime failures from bad endpoint configuration.
+ *
+ * @param value - The URL string to validate
+ * @param name - The configuration key name (for error messages)
+ * @returns The validated URL string
+ * @throws Error if the URL is not a valid http(s) URL
+ */
+export function validateUrlEnv(value: string | undefined, name: string): string {
+  if (!value || value.trim() === '') {
+    throw new Error(`Missing required URL configuration: ${name}`);
+  }
+
+  try {
+    const url = new URL(value);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      throw new Error(`Invalid URL protocol for ${name}: "${value}". Must use http: or https:.`);
+    }
+    return value;
+  } catch (err) {
+    if (err instanceof Error && err.message.includes('Invalid URL protocol')) {
+      throw err;
+    }
+    throw new Error(`Invalid URL configuration for ${name}: "${value}". Must be a valid http(s) URL.`);
+  }
+}
+
+/**
+ * Validate optional URL configuration (#734).
+ *
+ * Returns undefined if value is not set; validates format if it is.
+ */
+export function validateOptionalUrlEnv(value: string | undefined, name: string): string | undefined {
+  if (value === undefined || value.trim() === '') {
+    return undefined;
+  }
+  return validateUrlEnv(value, name);
+}

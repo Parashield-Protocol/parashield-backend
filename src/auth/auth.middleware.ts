@@ -56,6 +56,22 @@ export class AuthMiddleware implements NestMiddleware {
     const address   = req.headers['x-wallet-address'] as string | undefined;
     const signature = req.headers['x-wallet-signature'] as string | undefined;
     const message   = req.headers['x-wallet-message'] as string | undefined;
+    const authHeader = req.headers['authorization'] as string | undefined;
+
+    // #733 — Validate JWT Authorization header format before processing.
+    // Malformed headers (wrong scheme, missing Bearer prefix, empty token)
+    // must return 401, not cause unhandled errors downstream.
+    if (authHeader !== undefined) {
+      const parts = authHeader.split(' ');
+      if (parts.length !== 2 || parts[0] !== 'Bearer' || parts[1].length === 0) {
+        this.logger.warn('Malformed Authorization header received: missing Bearer prefix or empty token');
+        this.unauthorized(res, {
+          statusCode: 401,
+          message: 'Malformed Authorization header. Expected format: Bearer <token>',
+        });
+        return;
+      }
+    }
 
     // If no auth headers present, pass through as anonymous request
     if (!address && !signature && !message) {

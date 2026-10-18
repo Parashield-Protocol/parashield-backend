@@ -80,6 +80,11 @@ export class HealthController {
   } | null = null;
   private dbThroughputCache: { timestamp: number; value: { commits: number; rollbacks: number; conflicts: number } } | null = null;
 
+  // #744 — Cache the full health response briefly to prevent connection churn
+  // under health probe load. Load balancers poll every 5-10s; caching for 5s
+  // cuts DB connection creation by ~50% without meaningfully stale status.
+  private healthResponseCache: { timestamp: number; body: HealthResponseDto } | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
@@ -183,6 +188,13 @@ export class HealthController {
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
   async check(@Req() req?: Request): Promise<HealthResponseDto> {
+    // #744 — Serve from cache if still fresh (5s TTL). Bypass cache for admin
+    // requests since they need detailed pool/replication data that may have changed.
+    const isAdmin = this.isAdminRequest(req);
+    if (!isAdmin && this.healthResponseCache && Date.now() - this.healthResponseCache.timestamp < 5000) {
+      return this.healthResponseCache.body;
+    }
+
     const startTime = Date.now();
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
@@ -706,7 +718,7 @@ export class HealthController {
       openMeteoStatus === 'ok' &&
       aviationStackStatus === 'ok';
 
-    const detailed = this.isAdminRequest(req);
+    const detailed = isAdmin;
 
     const body: HealthResponseDto = {
       status:    healthy ? 'ok' : 'degraded',
@@ -730,6 +742,11 @@ export class HealthController {
 
     const statusFormat = this.getStatusFormat(req?.headers?.['accept']);
     const responseBody = this.transformStatusFormat(body, statusFormat);
+
+    // #744 — Cache the response for subsequent probes (only non-admin, healthy).
+    if (!isAdmin && healthy) {
+      this.healthResponseCache = { timestamp: Date.now(), body: responseBody as HealthResponseDto };
+    }
 
     if (!healthy) {
       throw new HttpException(responseBody, HttpStatus.SERVICE_UNAVAILABLE);

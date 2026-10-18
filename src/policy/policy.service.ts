@@ -249,20 +249,23 @@ export class PolicyService {
     product: ProductSummary,
     oracleKey?: string,
   ): Promise<PremiumValidationResult> {
-    const min = parseFloat(product.coverageMin);
-    const max = parseFloat(product.coverageMax);
+    // #743 — Use integer comparison for monetary bounds to avoid floating-point
+    // rounding errors. coverageMin/Max are string-formatted integers.
+    const min = BigInt(product.coverageMin.split('.')[0] || '0');
+    const max = BigInt(product.coverageMax.split('.')[0] || '0');
+    const coverage = BigInt(coverageXlm);
 
-    if (coverageXlm < min) {
+    if (coverage < min) {
       return {
         valid: false,
-        reason: `Coverage ${coverageXlm} XLM is below the minimum ${min} XLM for this product`,
+        reason: `Coverage ${coverageXlm} XLM is below the minimum ${product.coverageMin} XLM for this product`,
       };
     }
 
-    if (coverageXlm > max) {
+    if (coverage > max) {
       return {
         valid: false,
-        reason: `Coverage ${coverageXlm} XLM exceeds the maximum ${max} XLM for this product`,
+        reason: `Coverage ${coverageXlm} XLM exceeds the maximum ${product.coverageMax} XLM for this product`,
       };
     }
 
