@@ -44,6 +44,29 @@ function isRateLimitError(err: unknown): boolean {
 }
 
 /**
+ * #745 — Stellar transaction memo limit is 28 bytes.
+ * Memos exceeding this cause the transaction to be rejected by the network.
+ */
+const MAX_MEMO_BYTES = 28;
+
+/**
+ * #745 — Validate and normalize a transaction memo.
+ * Throws BadRequestException if the memo exceeds 28 bytes.
+ * Returns undefined for empty/undefined memos.
+ */
+function validateMemo(memo?: string): string | undefined {
+  if (!memo) return undefined;
+  const bytes = Buffer.byteLength(memo, "utf8");
+  if (bytes > MAX_MEMO_BYTES) {
+    throw new BadRequestException(
+      `Transaction memo exceeds ${MAX_MEMO_BYTES}-byte limit (got ${bytes} bytes). ` +
+        `Shorten the memo to at most ${MAX_MEMO_BYTES} bytes.`,
+    );
+  }
+  return memo;
+}
+
+/**
  * StellarService — thin wrapper over the Stellar SDK for Soroban contract calls.
  *
  * Responsibilities:
@@ -123,7 +146,11 @@ export class StellarService {
     method: string,
     args: xdr.ScVal[],
     signerKeypair?: Keypair,
+    memo?: string,
   ): Promise<string> {
+    // #745 — Validate memo length before building the transaction.
+    const validMemo = validateMemo(memo);
+
     if (!/^C[A-BA-HJ-NP-Z0-9]{55}$/.test(contractId)) {
       throw new BadRequestException(
         `Invalid Stellar contract address: ${contractId}`,
@@ -161,13 +188,16 @@ export class StellarService {
           this.rpc.getAccount(signer.publicKey()),
           "getAccount",
         );
-        const tx = new TransactionBuilder(account, {
+        let builder = new TransactionBuilder(account, {
           fee: BASE_FEE,
           networkPassphrase: this.network,
         })
           .addOperation(contract.call(method, ...args))
-          .setTimeout(30)
-          .build();
+          .setTimeout(30);
+        if (validMemo) {
+          builder = builder.addMemo(xdr.Memo.text(validMemo));
+        }
+        const tx = builder.build();
 
         const simResult = await this.withTimeout(
           this.rpc.simulateTransaction(tx),
