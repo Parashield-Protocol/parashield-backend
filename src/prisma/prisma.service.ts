@@ -75,19 +75,53 @@ function withConnectionPoolParams(url: string | undefined): string | undefined {
 
 const DEFAULT_QUERY_CACHE_TTL_SECONDS = 30;
 
+// After a credential rotation the previous clients are kept alive for this
+// long so in-flight queries and interactive transactions can finish before
+// their pools are closed. Override with DATABASE_ROTATION_DRAIN_MS.
+const DEFAULT_ROTATION_DRAIN_MS = 30_000;
+
+function getRotationDrainMs(): number {
+  const parsed = parseInt(process.env.DATABASE_ROTATION_DRAIN_MS ?? '', 10);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : DEFAULT_ROTATION_DRAIN_MS;
+}
+
 interface CacheEntry {
   value: unknown;
   expiresAt: number;
 }
 
+// Database credentials can rotate at runtime (see rotateCredentials), and a
+// PrismaClient's datasource URL is fixed once constructed. PrismaService
+// therefore wraps a swappable client instead of extending PrismaClient: the
+// interface merge below keeps the full PrismaClient API on PrismaService, and
+// the Proxy returned from the constructor forwards everything PrismaService
+// doesn't define itself to whichever client is current.
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
+export interface PrismaService extends PrismaClient {}
+
 @Injectable()
-export class PrismaService extends PrismaClient implements OnModuleInit, OnModuleDestroy {
+// eslint-disable-next-line @typescript-eslint/no-unsafe-declaration-merging
+export class PrismaService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(PrismaService.name);
+
+  // Primary client; replaced on credential rotation.
+  private client: PrismaClient;
 
   // #439 — Read replica client. Instantiated only when DATABASE_REPLICA_URL
   // is set; otherwise reader falls back to the primary so callers need no
   // conditional logic and existing code paths are unchanged.
-  private readonly replicaClient: PrismaClient | null;
+  private replicaClient: PrismaClient | null;
+
+  // Raw URLs the current clients were built from, compared against
+  // process.env to detect rotated credentials.
+  private primaryUrl: string | undefined;
+  private replicaUrl: string | undefined;
+
+  // Serializes rotations so two refreshes never race on the swap.
+  private rotation: Promise<boolean> = Promise.resolve(false);
+
+  // Clients replaced by a rotation, waiting out the drain period.
+  private readonly retiring = new Map<NodeJS.Timeout, PrismaClient[]>();
 
   // In-process TTL cache for repeated read queries (e.g. product lookups,
   // config-style tables) that are hit frequently but change rarely. Callers
@@ -95,19 +129,31 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   // writes and transactions are never affected.
   private readonly queryCache = new Map<string, CacheEntry>();
 
-  public readonly poolConfig: PrismaPoolConfig;
+  public poolConfig: PrismaPoolConfig;
 
   constructor() {
-    super({ datasourceUrl: withConnectionPoolParams(process.env.DATABASE_URL) });
+    this.primaryUrl = process.env.DATABASE_URL;
+    this.client = this.createClient(this.primaryUrl);
+    this.poolConfig = getEffectivePoolConfig(this.primaryUrl);
 
-    this.poolConfig = getEffectivePoolConfig(process.env.DATABASE_URL);
+    this.replicaUrl = process.env.DATABASE_REPLICA_URL;
+    this.replicaClient = this.replicaUrl ? this.createClient(this.replicaUrl) : null;
 
-    const replicaUrl = withConnectionPoolParams(process.env.DATABASE_REPLICA_URL);
-    this.replicaClient = replicaUrl
-      ? new PrismaClient({ datasourceUrl: replicaUrl })
-      : null;
+    return new Proxy(this, {
+      get(target, prop, receiver) {
+        if (prop in target) {
+          return Reflect.get(target, prop, receiver);
+        }
+        const value = Reflect.get(target.client, prop);
+        return typeof value === 'function' ? value.bind(target.client) : value;
+      },
+    });
   }
 
+  /** Builds a client for `url` with the pool parameters applied. */
+  protected createClient(url: string | undefined): PrismaClient {
+    return new PrismaClient({ datasourceUrl: withConnectionPoolParams(url) });
+  }
 
   /**
    * Returns the read-replica PrismaClient when DATABASE_REPLICA_URL is
@@ -122,6 +168,94 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    */
   get reader(): PrismaClient {
     return this.replicaClient ?? this;
+  }
+
+  /**
+   * Picks up rotated database credentials without a restart.
+   *
+   * Re-reads DATABASE_URL and DATABASE_REPLICA_URL from process.env; for each
+   * one that changed, a new client is built and connected *before* it is
+   * swapped in, so a bad or not-yet-active credential never replaces a
+   * working connection — the error is thrown and the current clients stay in
+   * place (the next rotation attempt retries). Once swapped, new queries use
+   * the new credentials, while the replaced clients are disconnected only
+   * after DATABASE_ROTATION_DRAIN_MS (default 30s) so in-flight queries and
+   * transactions can complete.
+   *
+   * Rotations are serialized. Resolves true when any client was swapped.
+   */
+  rotateCredentials(): Promise<boolean> {
+    this.rotation = this.rotation
+      .catch(() => false)
+      .then(() => this.swapClientsIfCredentialsChanged());
+    return this.rotation;
+  }
+
+  private async swapClientsIfCredentialsChanged(): Promise<boolean> {
+    const primaryUrl = process.env.DATABASE_URL;
+    const replicaUrl = process.env.DATABASE_REPLICA_URL;
+    const primaryChanged = primaryUrl !== this.primaryUrl;
+    const replicaChanged = replicaUrl !== this.replicaUrl;
+    if (!primaryChanged && !replicaChanged) {
+      return false;
+    }
+
+    const nextPrimary = primaryChanged ? this.createClient(primaryUrl) : null;
+    const nextReplica = replicaChanged && replicaUrl ? this.createClient(replicaUrl) : null;
+    try {
+      await nextPrimary?.$connect();
+      await nextReplica?.$connect();
+    } catch (err) {
+      await this.disconnectQuietly([nextPrimary, nextReplica]);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      this.logger.error(
+        `Database credential rotation failed, keeping existing connections: ${errorMsg}`,
+      );
+      throw err;
+    }
+
+    const retired: PrismaClient[] = [];
+    const rotated: string[] = [];
+    if (nextPrimary) {
+      retired.push(this.client);
+      this.client = nextPrimary;
+      this.primaryUrl = primaryUrl;
+      this.poolConfig = getEffectivePoolConfig(primaryUrl);
+      rotated.push('primary');
+    }
+    if (replicaChanged) {
+      if (this.replicaClient) retired.push(this.replicaClient);
+      this.replicaClient = nextReplica;
+      this.replicaUrl = replicaUrl;
+      rotated.push('replica');
+    }
+
+    const drainMs = getRotationDrainMs();
+    const timer = setTimeout(() => {
+      this.retiring.delete(timer);
+      void this.disconnectQuietly(retired);
+    }, drainMs);
+    timer.unref?.();
+    this.retiring.set(timer, retired);
+
+    this.logger.log(
+      `Database credentials rotated (${rotated.join(', ')}); ` +
+      `previous connections close in ${drainMs / 1000}s`,
+    );
+    return true;
+  }
+
+  private async disconnectQuietly(clients: Array<PrismaClient | null>): Promise<void> {
+    await Promise.all(clients.map(async (client) => {
+      if (!client) return;
+      try {
+        await client.$disconnect();
+      } catch (err) {
+        this.logger.warn(
+          `Failed to disconnect retired database client: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }));
   }
 
   async onModuleInit() {
@@ -168,6 +302,11 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   }
 
   async onModuleDestroy() {
+    const retiring = [...this.retiring.entries()];
+    this.retiring.clear();
+    for (const [timer] of retiring) clearTimeout(timer);
+    await this.disconnectQuietly(retiring.flatMap(([, clients]) => clients));
+
     await this.$disconnect();
     if (this.replicaClient) {
       await this.replicaClient.$disconnect();
@@ -233,8 +372,8 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    */
   async getMetrics(): Promise<unknown | null> {
     try {
-      if (typeof (this as any).$metrics?.json === 'function') {
-        return await (this as any).$metrics.json();
+      if (typeof (this.client as any).$metrics?.json === 'function') {
+        return await (this.client as any).$metrics.json();
       }
     } catch (err) {
       this.logger.warn(`Failed to collect Prisma metrics: ${err instanceof Error ? err.message : String(err)}`);

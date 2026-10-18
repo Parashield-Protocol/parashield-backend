@@ -94,6 +94,23 @@ function validateConfig(config: Record<string, unknown>) {
     }
   }
 
+  // Database credential rotation tuning (see src/prisma/database-credential-rotation.service.ts)
+  const refreshInterval = config['VAULT_REFRESH_INTERVAL_MS'] as string | undefined;
+  if (refreshInterval !== undefined && refreshInterval !== '') {
+    const parsed = Number(refreshInterval);
+    if (!Number.isInteger(parsed) || parsed < 0 || (parsed > 0 && parsed < 10_000)) {
+      errors.push('VAULT_REFRESH_INTERVAL_MS must be 0 (disabled) or an integer of at least 10000');
+    }
+  }
+
+  const rotationDrain = config['DATABASE_ROTATION_DRAIN_MS'] as string | undefined;
+  if (rotationDrain !== undefined && rotationDrain !== '') {
+    const parsed = Number(rotationDrain);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      errors.push('DATABASE_ROTATION_DRAIN_MS must be a non-negative integer');
+    }
+  }
+
 
   if (!config['STELLAR_RPC_URL']) {
     errors.push('STELLAR_RPC_URL is required');

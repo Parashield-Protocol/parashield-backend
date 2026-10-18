@@ -320,6 +320,16 @@ If none of the three are set, Vault is skipped. Once any of them is set, the ser
 
 On success the loaded key names (never values) are logged.
 
+#### Database credential rotation
+
+When Vault is configured, the server re-reads the Vault secret every `VAULT_REFRESH_INTERVAL_MS` (default `300000`, i.e. 5 minutes; `0` disables polling). If `DATABASE_URL` or `DATABASE_REPLICA_URL` changed, it reconnects without a restart:
+
+1. A new Prisma client is built from the new URL and connected **before** anything is swapped. If Vault is unreachable or the database rejects the new credentials, the error is logged, the existing connections stay in use, and the next refresh retries.
+2. Once connected, the new client takes over all new queries.
+3. The previous client is disconnected after `DATABASE_ROTATION_DRAIN_MS` (default `30000`) so in-flight queries and transactions can finish. Keep the old credentials valid in the database for at least that long after rotating them in Vault.
+
+Only the database URLs are applied at runtime; other secrets are still read once at startup.
+
 ### OpenTelemetry tracing
 
 Tracing is enabled when the OpenTelemetry packages are installed and the following variables are set:
