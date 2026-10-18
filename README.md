@@ -191,6 +191,20 @@ Pool utilization is monitored continuously via `/api/v1/health`:
 - Exposes genuine Prisma runtime engine metrics when supported.
 - The effective pool configuration is logged at server startup.
 
+---
+
+## Oracle Reading Batch Persistence (#686)
+
+To minimize database round-trips when storing high-frequency oracle readings, `OracleService` batches database inserts using multi-query transactions and a bounded in-memory buffer.
+
+| Environment Variable | Default | Description | Valid Range |
+|---|---|---|---|
+| `ORACLE_BATCH_SIZE` | `50` | Maximum number of readings written in a single multi-row database transaction | 1 – 1000 |
+| `ORACLE_FLUSH_INTERVAL_MS` | `1000` | Maximum time in milliseconds before pending buffered readings are flushed | 10 – 60000 |
+| `ORACLE_BUFFER_MAX_SIZE` | `1000` | Maximum in-memory buffer capacity before backpressure is applied | 10 – 10000 |
+
+Setting `ORACLE_BATCH_SIZE=1` disables buffering and executes immediate 1:1 inserts matching legacy behavior. Graceful shutdown hooks flush any remaining buffered readings before process termination.
+
 ### Load Testing
 
 A k6 stress test script is provided in `loadtest/k6/pool-stress.js` to evaluate pool behavior and latency under concurrent load:
