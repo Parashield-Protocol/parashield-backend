@@ -3,7 +3,7 @@ import { PolicyService, ProductSummary, OracleKeyValidationResult } from "./poli
 import { StellarService } from "../stellar/stellar.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
-import { BadRequestException, ConflictException, GoneException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, GoneException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { StatusEventsService } from "../common/events/status-events.service";
 import { WebhooksService } from "../common/events/webhooks.service";
@@ -23,6 +23,23 @@ describe("PolicyService.calculatePremium", () => {
   const mockStellarService = {
     simulateInvoke: jest.fn(),
     simulateAssembleAndSend: jest.fn(),
+    validateTransactionSource: jest.fn((tx: any, authWallet: string) => {
+      if (!authWallet) throw new ForbiddenException("Forbidden: No linked wallet found for authenticated user");
+      if (tx.source !== authWallet) {
+        throw new ForbiddenException("Forbidden: Transaction source account does not match authenticated user");
+      }
+      if (tx.operations) {
+        for (const op of tx.operations) {
+          if (op.source && op.source !== authWallet) {
+            throw new ForbiddenException("Forbidden: Operation source account does not match authenticated user");
+          }
+        }
+      }
+    }),
+    validateAccountAddress: jest.fn((addr: string) => {
+      if (!addr || typeof addr !== 'string') throw new BadRequestException("Invalid account");
+      return addr.trim().toUpperCase();
+    }),
     keeperPublicKey: "GABC",
     networkPassphrase: "Test SDF Network ; September 2015",
   };
@@ -932,7 +949,7 @@ describe("PolicyService.calculatePremium", () => {
       ).rejects.toThrow(GoneException);
     });
 
-    it("should throw BadRequestException if source account does not match wallet address", async () => {
+    it("should throw ForbiddenException (403) if source account does not match wallet address (#687)", async () => {
       const otherKey = Keypair.random().publicKey();
       const mismatchedXdr = buildTestTxXdr({ source: otherKey });
 
@@ -947,9 +964,50 @@ describe("PolicyService.calculatePremium", () => {
 
       await expect(
         service.confirmAndCreatePolicy(dto, validWallet),
-      ).rejects.toThrow(
-        /Transaction source account.*does not match the authenticated wallet/,
-      );
+      ).rejects.toThrow(ForbiddenException);
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(/Transaction source account does not match authenticated user/);
+    });
+
+    it("should throw ForbiddenException (403) if operation-level source does not match wallet address (#687)", async () => {
+      const otherKey = Keypair.random().publicKey();
+      const account = new Account(validWallet, "1");
+      const op = Operation.invokeContractFunction({
+        contract: validContract,
+        function: "buy_policy",
+        args: [
+          nativeToScVal("prod-1", { type: "string" }),
+          nativeToScVal("500", { type: "i128" }),
+          nativeToScVal("rainfall:-0.0917,34.7679:2026-06", { type: "string" }),
+        ],
+        source: otherKey,
+      });
+      const tx = new TransactionBuilder(account, {
+        fee: "100",
+        networkPassphrase: "Test SDF Network ; September 2015",
+      })
+        .addOperation(op)
+        .setTimeout(300)
+        .build();
+
+      const dto = {
+        signedXdr: tx.toXDR(),
+        productId: "prod-1",
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(ForbiddenException);
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(/Operation source account does not match authenticated user/);
     });
 
     it("should throw BadRequestException if first operation is not invokeHostFunction", async () => {

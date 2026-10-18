@@ -363,12 +363,58 @@ export class WebhooksService {
 
     let response: Response;
     try {
+      // #751 — Disable automatic redirect following to prevent leaking signed payloads
+      // to unintended or malicious hosts.
       response = await fetch(registration.url, {
         method: 'POST',
         headers,
         body: payloadStr,
         signal: controller.signal,
+        redirect: 'manual',
       });
+
+      // #751 — Handle redirect attempts explicitly and block redirect following.
+      const isRedirect =
+        (response.status >= 300 && response.status < 400) ||
+        response.type === 'opaqueredirect';
+
+      if (isRedirect) {
+        const location =
+          typeof response.headers?.get === 'function'
+            ? response.headers.get('location')
+            : (response.headers as unknown as Record<string, string>)?.[
+                'location'
+              ];
+
+        let targetHostname = 'unknown';
+        let isDifferentDomain = false;
+        if (location) {
+          try {
+            const targetUrl = new URL(location, registration.url);
+            const originalUrl = new URL(registration.url);
+            targetHostname = targetUrl.hostname;
+            isDifferentDomain = targetUrl.origin !== originalUrl.origin;
+          } catch {
+            isDifferentDomain = true;
+          }
+        }
+
+        if (isDifferentDomain) {
+          this.logger.warn(
+            `Blocked redirect to different domain for webhook ${registration.id}: ${registration.url} -> ${location ?? 'unknown'}`,
+          );
+          throw new Error(
+            `Webhook redirect to different domain blocked: ${targetHostname}`,
+          );
+        }
+
+        this.logger.warn(
+          `Webhook delivery to ${registration.url} attempted redirect (${response.status}) to ${location ?? 'unknown'}; redirects are disabled to prevent payload leakage`,
+        );
+        throw new Error(
+          `Webhook delivery failed: redirects are not followed (${response.status})`,
+        );
+      }
 
       if (!response.ok) {
         throw new Error(`Webhook responded with ${response.status}`);
@@ -392,7 +438,9 @@ export class WebhooksService {
           .update(responseBody)
           .digest('base64');
 
-        if (!crypto.timingSafeEqual(Buffer.from(responseSignature), Buffer.from(expectedSignature))) {
+        const sigBuf = Buffer.from(responseSignature);
+        const expBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
           throw new Error('Webhook response signature verification failed');
         }
       }

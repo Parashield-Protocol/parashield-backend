@@ -207,4 +207,122 @@ describe('OracleFeedRequestDto', () => {
       expect(errors).toHaveLength(0);
     });
   });
+
+  describe('NaN and Infinity rejection (#752)', () => {
+    it('rejects NaN for lat with a clear error message', async () => {
+      const dto = validDto();
+      dto.lat = NaN;
+      const errors = await validate(dto);
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+      const latError = errors.find((e) => e.property === 'lat');
+      expect(latError).toBeDefined();
+      expect(latError!.constraints).toBeDefined();
+      expect(
+        Object.values(latError!.constraints!).some((msg) =>
+          msg.includes('finite number') || msg.includes('NaN'),
+        ),
+      ).toBe(true);
+    });
+
+    it('rejects Infinity and -Infinity for lat', async () => {
+      const dtoPos = validDto();
+      dtoPos.lat = Infinity;
+      const errorsPos = await validate(dtoPos);
+      expect(errorsPos.some((e) => e.property === 'lat')).toBe(true);
+
+      const dtoNeg = validDto();
+      dtoNeg.lat = -Infinity;
+      const errorsNeg = await validate(dtoNeg);
+      expect(errorsNeg.some((e) => e.property === 'lat')).toBe(true);
+    });
+
+    it('rejects NaN for lng with a clear error message', async () => {
+      const dto = validDto();
+      dto.lng = NaN;
+      const errors = await validate(dto);
+      expect(errors.length).toBeGreaterThanOrEqual(1);
+      const lngError = errors.find((e) => e.property === 'lng');
+      expect(lngError).toBeDefined();
+      expect(lngError!.constraints).toBeDefined();
+      expect(
+        Object.values(lngError!.constraints!).some((msg) =>
+          msg.includes('finite number') || msg.includes('NaN'),
+        ),
+      ).toBe(true);
+    });
+
+    it('rejects Infinity and -Infinity for lng', async () => {
+      const dtoPos = validDto();
+      dtoPos.lng = Infinity;
+      const errorsPos = await validate(dtoPos);
+      expect(errorsPos.some((e) => e.property === 'lng')).toBe(true);
+
+      const dtoNeg = validDto();
+      dtoNeg.lng = -Infinity;
+      const errorsNeg = await validate(dtoNeg);
+      expect(errorsNeg.some((e) => e.property === 'lng')).toBe(true);
+    });
+  });
 });
+
+describe('OracleReadingDto (#752)', () => {
+  const { OracleReadingDto } = require('./oracle-reading.dto');
+
+  function validReadingDto(): InstanceType<typeof OracleReadingDto> {
+    const dto = new OracleReadingDto();
+    dto.dataType = 'weather';
+    dto.key = 'rainfall:-0.0917,34.7679:2026-06';
+    dto.value = 32.4;
+    dto.confidence = 95;
+    dto.timestamp = 1719576600;
+    dto.source = 'open-meteo';
+    return dto;
+  }
+
+  it('passes validation with finite numeric value and confidence', async () => {
+    const dto = validReadingDto();
+    const errors = await validate(dto);
+    expect(errors).toHaveLength(0);
+  });
+
+  it('rejects NaN for value with clear validation error', async () => {
+    const dto = validReadingDto();
+    dto.value = NaN;
+    const errors = await validate(dto);
+    expect(errors.length).toBeGreaterThanOrEqual(1);
+    const valueError = errors.find((e) => e.property === 'value');
+    expect(valueError).toBeDefined();
+    expect(
+      Object.values(valueError!.constraints!).some((msg) =>
+        msg.includes('finite number') || msg.includes('NaN'),
+      ),
+    ).toBe(true);
+  });
+
+  it('rejects Infinity and -Infinity for value', async () => {
+    const dtoPos = validReadingDto();
+    dtoPos.value = Infinity;
+    const errorsPos = await validate(dtoPos);
+    expect(errorsPos.some((e) => e.property === 'value')).toBe(true);
+
+    const dtoNeg = validReadingDto();
+    dtoNeg.value = -Infinity;
+    const errorsNeg = await validate(dtoNeg);
+    expect(errorsNeg.some((e) => e.property === 'value')).toBe(true);
+  });
+
+  it('rejects NaN for confidence', async () => {
+    const dto = validReadingDto();
+    dto.confidence = NaN;
+    const errors = await validate(dto);
+    expect(errors.some((e) => e.property === 'confidence')).toBe(true);
+  });
+
+  it('rejects Infinity for confidence', async () => {
+    const dto = validReadingDto();
+    dto.confidence = Infinity;
+    const errors = await validate(dto);
+    expect(errors.some((e) => e.property === 'confidence')).toBe(true);
+  });
+});
+

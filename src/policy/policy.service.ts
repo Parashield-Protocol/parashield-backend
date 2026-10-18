@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, PolicyStatus, ProductStatus, Product } from '@prisma/client';
 import { TransactionBuilder, Transaction, Address, Operation, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -427,16 +427,19 @@ export class PolicyService {
       throw new GoneException('Signed XDR has expired; please request a new transaction to sign');
     }
 
-    // Validate XDR source matches both the JWT-verified wallet and the DTO field (#112)
-    if (tx.source !== authenticatedWallet) {
-      throw new BadRequestException(
-        `Transaction source account (${tx.source}) does not match the authenticated wallet (${authenticatedWallet})`
+    // Validate XDR source matches both the JWT-verified wallet and the DTO field (#112, #687)
+    this.stellar.validateTransactionSource(tx, authenticatedWallet, {
+      method: 'confirmAndCreatePolicy',
+      userId: authenticatedWallet,
+    });
+
+    const canonicalDtoWallet = this.stellar.validateAccountAddress(dto.walletAddress, 'request walletAddress');
+    const canonicalAuthWallet = this.stellar.validateAccountAddress(authenticatedWallet, 'authenticated wallet');
+    if (canonicalDtoWallet !== canonicalAuthWallet) {
+      this.logger.warn(
+        `Request walletAddress mismatch in confirmAndCreatePolicy: user=${authenticatedWallet} attempted=${dto.walletAddress}`,
       );
-    }
-    if (tx.source !== dto.walletAddress) {
-      throw new BadRequestException(
-        `Transaction source account (${tx.source}) does not match the wallet address in the request (${dto.walletAddress})`
-      );
+      throw new ForbiddenException('Forbidden: Transaction source account does not match authenticated user');
     }
 
     // Validate there is at least one operation
@@ -521,7 +524,7 @@ export class PolicyService {
       throw new BadRequestException('Failed to decode buy_policy arguments from XDR');
     }
 
-    const sendResult = await this.stellar.simulateAssembleAndSend(tx);
+    const sendResult = await this.stellar.simulateAssembleAndSend(tx, authenticatedWallet);
     if (sendResult.status === 'ERROR') {
       throw new Error(`On-chain submission failed: ${JSON.stringify(sendResult.errorResult)}`);
     }
@@ -1067,6 +1070,27 @@ export class PolicyService {
     this.logger.log(`Admin deactivated product ${product.id}`);
     this.statusEvents.emitProductUpdate(product.id);
     return this.mapProduct(product);
+  }
+
+  async findAll(params?: {
+    take?: number;
+    skip?: number;
+    cursor?: { id: string };
+    orderBy?: { [key: string]: 'asc' | 'desc' };
+  }): Promise<Array<{ id: string; status: string; premium: string; coverage: string; createdAt: Date }>> {
+    const policies = await this.prisma.policy.findMany({
+      take: params?.take,
+      skip: params?.skip,
+      cursor: params?.cursor,
+      orderBy: params?.orderBy,
+    });
+    return policies.map((p) => ({
+      id: p.id,
+      status: p.status,
+      premium: p.premiumPaid.toString(),
+      coverage: p.coverageXlm.toString(),
+      createdAt: p.createdAt,
+    }));
   }
 
   private mapProduct(product: Product): ProductSummary {

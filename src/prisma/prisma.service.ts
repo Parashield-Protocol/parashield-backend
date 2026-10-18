@@ -73,6 +73,65 @@ function withConnectionPoolParams(url: string | undefined): string | undefined {
   }
 }
 
+/**
+ * Extracts only host and database name from a connection URL, omitting credentials and query params (#750).
+ */
+export function getHostAndDatabaseFromUrl(url: string | undefined): { host: string; database?: string } {
+  if (!url) return { host: 'unknown' };
+  try {
+    const parsed = new URL(url);
+    const database = parsed.pathname ? parsed.pathname.replace(/^\//, '') : undefined;
+    return { host: parsed.host || 'unknown', database: database || undefined };
+  } catch {
+    const match = url.match(/@([^:\/\s?#]+(?::\d+)?)(?:\/([^?\s#]+))?/);
+    if (match) {
+      return { host: match[1], database: match[2] };
+    }
+    return { host: 'unknown' };
+  }
+}
+
+/**
+ * Redacts credentials and full connection strings from error messages (#750).
+ */
+export function sanitizeConnectionError(error: unknown, fallbackUrl?: string): Error {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const info = getHostAndDatabaseFromUrl(fallbackUrl);
+  const targetDesc = info.database ? `${info.host}/${info.database}` : info.host;
+
+  // Redact any URI containing user:pass@...
+  let sanitizedMessage = rawMessage.replace(
+    /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(?:[^:@\s\r\n]+)(?::(?:[^@\s\r\n]+))?@([^\/\s?#\r\n]+)(?:\/([^?\s#\r\n]+))?(?:\?[^\s\r\n]*)?/gi,
+    (_match, proto, host, db) => {
+      const dbPart = db ? `/${db}` : '';
+      return `${proto}***:***@${host}${dbPart}`;
+    },
+  );
+
+  // Also replace any isolated connection string patterns with [host/database]
+  sanitizedMessage = sanitizedMessage.replace(
+    /(?:postgres|postgresql|mysql|redis|rediss):\/\/[^\s"',;)]+/gi,
+    (match) => {
+      try {
+        const u = new URL(match);
+        const dbName = u.pathname ? u.pathname.replace(/^\//, '') : '';
+        return `[host: ${u.host}${dbName ? `, db: ${dbName}` : ''}]`;
+      } catch {
+        return `[host: ${targetDesc}]`;
+      }
+    },
+  );
+
+  const sanitizedError = new Error(sanitizedMessage);
+  if (error instanceof Error && error.stack) {
+    sanitizedError.stack = error.stack.replace(
+      /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)(?:[^:@\s\r\n]+)(?::(?:[^@\s\r\n]+))?@/gi,
+      '$1***:***@',
+    );
+  }
+  return sanitizedError;
+}
+
 const DEFAULT_QUERY_CACHE_TTL_SECONDS = 30;
 
 // After a credential rotation the previous clients are kept alive for this
@@ -271,6 +330,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
 
     const maxRetries = 5;
     let delayMs = 1000;
+    const { host, database } = getHostAndDatabaseFromUrl(process.env.DATABASE_URL);
+    const target = database ? `${host}/${database}` : host;
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         await this.$connect();
@@ -286,13 +348,14 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         return;
 
       } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+        // #750 — Redact credentials and full connection string in logs and error messages.
+        const sanitizedErr = sanitizeConnectionError(err, process.env.DATABASE_URL);
         this.logger.warn(
-          `Database connection attempt ${attempt}/${maxRetries} failed: ${errorMsg}`,
+          `Database connection attempt ${attempt}/${maxRetries} failed: ${sanitizedErr.message} [target: ${target}]`,
         );
         if (attempt === maxRetries) {
           this.logger.error('All database connection retries exhausted');
-          throw err;
+          throw sanitizedErr;
         }
         this.logger.log(`Retrying in ${delayMs / 1000}s...`);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
