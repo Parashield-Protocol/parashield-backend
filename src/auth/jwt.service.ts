@@ -8,6 +8,7 @@ import { validateJwtSecret } from "./jwt-secret.validator";
 
 export interface JwtPayload {
   walletAddress: string;
+  type?: "access" | "refresh";
   role?: string;
   admin?: boolean;
   iss?: string;
@@ -52,7 +53,7 @@ export class JwtService {
    * Token expires in 1 hour.
    */
   sign(walletAddress: string): string {
-    const payload: JwtPayload = { walletAddress, jti: crypto.randomUUID() };
+    const payload: JwtPayload = { walletAddress, type: "access", jti: crypto.randomUUID() };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
       expiresIn: '1h',
@@ -71,7 +72,7 @@ export class JwtService {
    * Token expires in 1 hour.
    */
   signWithRole(walletAddress: string, role: string, admin = false): string {
-    const payload: JwtPayload = { walletAddress, role, admin, jti: crypto.randomUUID() };
+    const payload: JwtPayload = { walletAddress, type: "access", role, admin, jti: crypto.randomUUID() };
     const options: jwt.SignOptions = {
       algorithm: 'HS256',
       expiresIn: '1h',
@@ -97,9 +98,15 @@ export class JwtService {
         algorithms: ['HS256'],
         issuer: this.issuer,
         audience: this.audience,
-      }) as JwtPayload & { jti?: string };
+      }) as JwtPayload & { jti?: string; type?: string };
+
+      if (decoded.type === "refresh") {
+        throw new UnauthorizedException("Cannot use refresh token as access token");
+      }
+
       return {
         walletAddress: decoded.walletAddress,
+        type: decoded.type,
         role: decoded.role,
         admin: decoded.admin,
       };

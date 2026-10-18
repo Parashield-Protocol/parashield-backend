@@ -1,4 +1,4 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { ConfigService } from '@nestjs/config';
 import { nativeToScVal } from '@stellar/stellar-sdk';
@@ -8,6 +8,7 @@ import { StellarService } from '../stellar/stellar.service';
 import { PolicyStatus } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
+import { DistributedLockService } from '../redis/distributed-lock.service';
 
 // #307 — narrows an arbitrary fetchWithRetry<T> result for the success-path
 // log line without an `any` cast. Duck-typed rather than tied to a single
@@ -62,17 +63,39 @@ export class OracleWorker {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : this.defaultMinConfidence;
   }
 
+  private readonly lockService: DistributedLockService;
+
   constructor(
     private readonly oracleService: OracleService,
     private readonly config: ConfigService,
     private readonly stellar: StellarService,
     private readonly prisma: PrismaService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
-  ) {}
+    @Optional() lockService?: DistributedLockService,
+  ) {
+    this.lockService = lockService ?? new DistributedLockService(this.redis);
+  }
 
   @Cron(CronExpression.EVERY_HOUR)
   async pollAndSubmit(): Promise<void> {
+    const ttlMs = parseInt(
+      this.config?.get<string>('ORACLE_WORKER_LOCK_TTL_MS') ?? '900000',
+      10,
+    );
+
+    await this.lockService.runWithLock(
+      'lock:job:oracle-worker',
+      ttlMs,
+      async () => {
+        await this.executePollAndSubmit();
+      },
+      { enableHeartbeat: true },
+    );
+  }
+
+  private async executePollAndSubmit(): Promise<void> {
     this.logger.log('Oracle poll cycle started');
+
 
     const now   = new Date();
     const year  = now.getUTCFullYear();

@@ -50,6 +50,15 @@ function validateConfig(config: Record<string, unknown>) {
     errors.push(jwtSecretValidation.error!);
   }
 
+  // #681 — Validate AUTH_NONCE_TTL_SECONDS if configured
+  const nonceTtl = config['AUTH_NONCE_TTL_SECONDS'] as string | undefined;
+  if (nonceTtl !== undefined && nonceTtl !== '') {
+    const parsed = Number(nonceTtl);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86400) {
+      errors.push('AUTH_NONCE_TTL_SECONDS must be a positive integer between 1 and 86400');
+    }
+  }
+
   if (!config['DATABASE_URL']) {
     errors.push('DATABASE_URL is required');
   } else {
@@ -59,6 +68,32 @@ function validateConfig(config: Record<string, unknown>) {
       errors.push('DATABASE_URL must be a valid PostgreSQL connection string (postgresql:// or postgres://)');
     }
   }
+
+  // #676 — Validate Prisma connection pool tuning environment variables
+  const connLimit = config['DATABASE_CONNECTION_LIMIT'] as string | undefined;
+  if (connLimit !== undefined && connLimit !== '') {
+    const parsed = Number(connLimit);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
+      errors.push('DATABASE_CONNECTION_LIMIT must be a positive integer between 1 and 500');
+    }
+  }
+
+  const poolTimeout = config['DATABASE_POOL_TIMEOUT'] as string | undefined;
+  if (poolTimeout !== undefined && poolTimeout !== '') {
+    const parsed = Number(poolTimeout);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 300) {
+      errors.push('DATABASE_POOL_TIMEOUT must be a positive integer between 1 and 300');
+    }
+  }
+
+  const connectTimeout = config['DATABASE_CONNECT_TIMEOUT'] as string | undefined;
+  if (connectTimeout !== undefined && connectTimeout !== '') {
+    const parsed = Number(connectTimeout);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 120) {
+      errors.push('DATABASE_CONNECT_TIMEOUT must be a positive integer between 1 and 120');
+    }
+  }
+
 
   if (!config['STELLAR_RPC_URL']) {
     errors.push('STELLAR_RPC_URL is required');

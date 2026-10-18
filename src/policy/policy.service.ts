@@ -827,7 +827,7 @@ export class PolicyService {
 
     const result = await this.prisma.policy.updateMany({
       where: { id: policyId, status: PolicyStatus.ACTIVE },
-      data:  { status: PolicyStatus.CANCELLED },
+      data:  { status: PolicyStatus.CANCELLED, version: { increment: 1 } },
     });
     if (result.count === 0) {
       throw new ConflictException(

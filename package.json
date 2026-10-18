@@ -9,6 +9,7 @@
     "start:dev": "nest start --watch",
     "start:prod": "node dist/main",
     "test:load": "k6 run loadtest/k6/smoke.js",
+    "test:load:pool": "k6 run loadtest/k6/pool-stress.js",
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "test": "jest",
     "test:watch": "jest --watch",

@@ -1,5 +1,6 @@
-import { Injectable, Inject, Logger } from '@nestjs/common';
+import { Injectable, Inject, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+import { ConfigService } from '@nestjs/config';
 import { PolicyStatus } from '@prisma/client';
 import type Redis from 'ioredis';
 import { ClaimsService } from './claims.service';
@@ -7,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { PolicyService, ProductSummary } from '../policy/policy.service';
 import { transition } from '../policy/policy-status.machine';
 import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
+import { DistributedLockService } from '../redis/distributed-lock.service';
 
 const BATCH_SIZE = 10;
 const PRODUCTS_PAGE_SIZE = 100;
@@ -33,13 +35,18 @@ const jitterMs = (minMs: number, maxMs: number) =>
 @Injectable()
 export class ClaimsWorker {
   private readonly logger = new Logger(ClaimsWorker.name);
+  private readonly lockService: DistributedLockService;
 
   constructor(
     private readonly claims: ClaimsService,
     private readonly prisma: PrismaService,
     private readonly policyService: PolicyService,
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
-  ) {}
+    @Optional() lockService?: DistributedLockService,
+    @Optional() private readonly configService?: ConfigService,
+  ) {
+    this.lockService = lockService ?? new DistributedLockService(this.redis);
+  }
 
   private async recordHeartbeat(): Promise<void> {
     await recordWorkerHeartbeat(this.redis, 'claims').catch((err) =>
@@ -62,8 +69,25 @@ export class ClaimsWorker {
 
   @Cron(CronExpression.EVERY_HOUR)
   async processActivePolicies(): Promise<void> {
+    const ttlMs = parseInt(
+      this.configService?.get<string>('CLAIMS_WORKER_LOCK_TTL_MS') ?? '900000',
+      10,
+    );
+
+    await this.lockService.runWithLock(
+      'lock:job:claims-worker',
+      ttlMs,
+      async () => {
+        await this.executeProcessActivePolicies();
+      },
+      { enableHeartbeat: true },
+    );
+  }
+
+  private async executeProcessActivePolicies(): Promise<void> {
     const tickStart = Date.now();
     this.logger.log('Claims worker tick — scanning for expiring policies');
+
 
     // #486 — release policies stranded in PROCESSING before scanning, so any
     // reverted to ACTIVE are retried (or expired) by this same tick. Failure
@@ -144,7 +168,7 @@ export class ClaimsWorker {
             // updateMany's WHERE matches nothing and count is 0 below.
             const { count } = await this.prisma.policy.updateMany({
               where: { id: policy.id, status: policy.status },
-              data:  { status: transition(policy.status, 'EXPIRED') as PolicyStatus },
+              data:  { status: transition(policy.status, 'EXPIRED') as PolicyStatus, version: { increment: 1 } },
             });
             if (count === 0) {
               this.logger.warn(

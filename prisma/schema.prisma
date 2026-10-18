@@ -18,6 +18,10 @@ model Policy {
   startTime     DateTime
   endTime       DateTime
   status        PolicyStatus @default(ACTIVE)
+  // Optimistic-lock counter, bumped on every status write. Claim flows guard
+  // their writes on the version they read, so a policy that was reverted and
+  // re-gated in between (same status, different lifecycle) is detected.
+  version       Int       @default(0)
   txHash        String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
