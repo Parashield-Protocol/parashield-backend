@@ -1,4 +1,5 @@
 import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { CacheControlInterceptor } from '../common/interceptors/cache-control.interceptor';
 import { Throttle } from '@nestjs/throttler';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import {
@@ -22,6 +23,7 @@ import { ErrorCode } from '../common/errors/error-codes';
 
 @ApiTags('claims')
 @Controller('claims')
+@UseInterceptors(CacheControlInterceptor)
 @ApiExtraModels(ResponseDto, PaginatedResponseDto)
 export class ClaimsController {
   constructor(private readonly claims: ClaimsService) {}

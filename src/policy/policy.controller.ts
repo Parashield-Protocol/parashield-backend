@@ -20,6 +20,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
+import { CacheControlInterceptor } from '../common/interceptors/cache-control.interceptor';
 import { Observable } from 'rxjs';
 import {
   ApiTags,
@@ -54,6 +55,7 @@ const SSE_TCP_KEEPALIVE_MS = 30_000;
 
 @ApiTags('policy')
 @Controller()
+@UseInterceptors(CacheControlInterceptor)
 @ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto, CancellationResponseDto)
 @ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto, PolicyStatusEventDto)
 export class PolicyController {
