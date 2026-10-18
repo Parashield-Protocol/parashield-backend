@@ -5,6 +5,7 @@ import {
 import { Request, Response } from 'express';
 import { errorCodeFromBody, errorCodeFromStatus } from '../errors/error-codes';
 import { serializeBigInt } from '../interceptors/bigint-serializer.interceptor';
+import { buildProblemDetails } from '../errors/problem-details';
 
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
@@ -32,47 +33,42 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       this.logger.warn(`${req.method} ${req.url} → ${status}`);
     }
 
-    // #425 — Normalize the error message to always be a plain string so the
-    // client never has to branch on typeof error. NestJS HttpException bodies
-    // can be strings or objects ({ statusCode, message, error }); class-validator
-    // ValidationPipe produces { statusCode, message: string[], error } objects.
-    // We extract the most descriptive string available in each case.
+    // Extract human-readable string message
     const message = this.extractMessage(rawResponse);
 
-    // #402 — include a stable machine-readable errorCode so the frontend
-    // can branch on error type without parsing the human-readable message.
-    // #425 — retryAfter is promoted to the top level so clients never need
-    // to dig into a nested error object to get the value they act on.
+    // Extract retryAfter header for 429 rate limit responses
     const retryAfter = this.extractRetryAfter(rawResponse);
 
-    // #341 — success responses across controllers use { success, data },
-    // so error responses carry the same success flag (always false here)
-    // with the message under `error`, instead of a differently shaped
-    // { statusCode, message } body the frontend had to special-case.
-    const body: Record<string, unknown> = {
-      success:    false,
-      errorCode:  errorCodeFromBody(rawResponse) ?? errorCodeFromStatus(status),
-      error:      message,
-      statusCode: status,
-      path:       req.url,
-      timestamp:  new Date().toISOString(),
-    };
+    // Extract field-level validation errors from class-validator ValidationPipe
+    const errors = this.extractValidationErrors(rawResponse);
 
-    if (retryAfter !== undefined) {
-      body['retryAfter'] = retryAfter;
-    }
+    // Extract optional correlation ID if present on request
+    const correlationId = (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined;
 
-    res.status(status).json(serializeBigInt(body));
+    const errorCode = errorCodeFromBody(rawResponse) ?? errorCodeFromStatus(status);
+    const path = req.originalUrl || req.url;
+
+    // #677 — Adopt RFC 7807 problem details with Content-Type application/problem+json.
+    // Includes type, title, status, detail, instance, extension members (errors, correlationId),
+    // and preserves legacy fields (success, statusCode, error, message, errorCode, path, timestamp)
+    // for backward compatibility.
+    const problemBody = buildProblemDetails({
+      status,
+      message,
+      error: message,
+      errorCode,
+      path,
+      errors,
+      correlationId,
+      retryAfter,
+    });
+
+    res.setHeader('Content-Type', 'application/problem+json');
+    res.status(status).json(serializeBigInt(problemBody));
   }
 
   /**
    * Reduce an HttpException response to a human-readable string.
-   *
-   * Priority order:
-   *  1. Plain string body  → use directly
-   *  2. Object with a string `message` property → use that string
-   *  3. Object with an array `message` property (class-validator) → join with "; "
-   *  4. Anything else → JSON.stringify as a last resort
    */
   private extractMessage(raw: string | object): string {
     if (typeof raw === 'string') return raw;
@@ -91,6 +87,21 @@ export class GlobalExceptionFilter implements ExceptionFilter {
   }
 
   /**
+   * Extract validation error list from ValidationPipe response objects.
+   */
+  private extractValidationErrors(raw: string | object): unknown {
+    if (typeof raw !== 'object' || raw === null) return undefined;
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj['message'])) {
+      return obj['message'];
+    }
+    if (Array.isArray(obj['errors'])) {
+      return obj['errors'];
+    }
+    return undefined;
+  }
+
+  /**
    * Pull retryAfter out of a ThrottleGuard body `{ retryAfter: number }`,
    * or return undefined for all other exception types.
    */
@@ -100,3 +111,4 @@ export class GlobalExceptionFilter implements ExceptionFilter {
     return typeof val === 'number' ? val : undefined;
   }
 }
+

@@ -7,7 +7,7 @@ describe('ClaimsController', () => {
   const OTHER_WALLET = 'GBXY7KLMNOPQRSTUVWXYZAB2CDEFGHIJKLMNOPQRSTUVWXYZAB2CDEF';
 
   let controller: ClaimsController;
-  let mockClaims: jest.Mocked<Pick<ClaimsService, 'submitClaim' | 'getClaimsByWallet' | 'autoProcess' | 'getClaim'>>;
+  let mockClaims: jest.Mocked<Pick<ClaimsService, 'submitClaim' | 'getClaimsByWallet' | 'autoProcess' | 'getClaim' | 'getDerivedPolicyState'>>;
 
   function reqWith(wallet?: string) {
     return { user: undefined, wallet } as any;
@@ -19,6 +19,7 @@ describe('ClaimsController', () => {
       getClaimsByWallet: jest.fn(),
       autoProcess: jest.fn(),
       getClaim: jest.fn(),
+      getDerivedPolicyState: jest.fn(),
     };
     controller = new ClaimsController(mockClaims as unknown as ClaimsService);
   });
@@ -82,6 +83,24 @@ describe('ClaimsController', () => {
 
       expect(mockClaims.autoProcess).toHaveBeenCalledWith('policy-1');
       expect(result).toEqual({ success: true, data: { result: 'Paid' } });
+    });
+  });
+
+  describe('getPolicyDerivedState', () => {
+    it('returns derived policy state when found', async () => {
+      const mockState = { policyId: 'policy-1', effectiveStatus: 'ACTIVE' } as any;
+      mockClaims.getDerivedPolicyState.mockResolvedValue(mockState);
+
+      const result = await controller.getPolicyDerivedState('policy-1');
+
+      expect(mockClaims.getDerivedPolicyState).toHaveBeenCalledWith('policy-1');
+      expect(result).toEqual({ success: true, data: mockState });
+    });
+
+    it('throws NotFoundException when policy state is not found', async () => {
+      mockClaims.getDerivedPolicyState.mockResolvedValue(null);
+
+      await expect(controller.getPolicyDerivedState('missing-policy')).rejects.toThrow(NotFoundException);
     });
   });
 

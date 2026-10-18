@@ -3,6 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { Keypair } from '@stellar/stellar-sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { buildProblemDetails } from '../common/errors/problem-details';
 
 /**
  * AuthMiddleware — verifies a Stellar wallet signature on incoming requests.
@@ -30,8 +31,14 @@ export class AuthMiddleware implements NestMiddleware {
   /** #572 — 401 responses must never be cached or replayed. */
   private unauthorized(res: Response, body: { statusCode: number; message: string }): void {
     res.setHeader('Cache-Control', 'no-store, no-cache');
-    res.status(401).json(body);
+    res.setHeader('Content-Type', 'application/problem+json');
+    res.status(401).json(buildProblemDetails({
+      status: 401,
+      message: body.message,
+      error: body.message,
+    }));
   }
+
 
   /** Truncate a wallet address to first 8 + last 4 characters for safe logging. */
   private truncateAddress(address: string): string {
@@ -93,11 +100,16 @@ export class AuthMiddleware implements NestMiddleware {
       if (isInfraError) {
         this.logger.error(`Infrastructure error during token verification for ${this.truncateAddress(address)}: ${err}`);
         res.setHeader('Cache-Control', 'no-store, no-cache');
-        res.status(503).json({
-          statusCode: 503,
-          message: 'Authentication service temporarily unavailable',
-        });
+        res.setHeader('Content-Type', 'application/problem+json');
+        res.status(503).json(
+          buildProblemDetails({
+            status: 503,
+            message: 'Authentication service temporarily unavailable',
+            error: 'Authentication service temporarily unavailable',
+          }),
+        );
         return;
+
       }
       this.logger.warn(`Challenge lookup failed for ${this.truncateAddress(address)}: ${err}`);
       this.unauthorized(res, { statusCode: 401, message: 'Authentication service unavailable' });

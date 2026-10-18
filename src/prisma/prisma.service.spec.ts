@@ -88,4 +88,65 @@ describe('PrismaService', () => {
       await expect(service.onModuleDestroy()).rejects.toThrow(error);
     });
   });
+
+  describe('connection pool configuration (#676)', () => {
+    const originalEnv = process.env;
+
+    afterEach(() => {
+      process.env = originalEnv;
+    });
+
+    it('uses defaults when env vars and URL params are absent', () => {
+      delete process.env.DATABASE_CONNECTION_LIMIT;
+      delete process.env.DATABASE_POOL_TIMEOUT;
+      delete process.env.DATABASE_CONNECT_TIMEOUT;
+
+      const prisma = new PrismaService();
+      expect(prisma.poolConfig).toEqual({
+        connectionLimit: 10,
+        poolTimeout: 10,
+        connectTimeout: 5,
+      });
+    });
+
+    it('respects environment variable overrides', () => {
+      process.env.DATABASE_CONNECTION_LIMIT = '25';
+      process.env.DATABASE_POOL_TIMEOUT = '30';
+      process.env.DATABASE_CONNECT_TIMEOUT = '15';
+
+      const prisma = new PrismaService();
+      expect(prisma.poolConfig).toEqual({
+        connectionLimit: 25,
+        poolTimeout: 30,
+        connectTimeout: 15,
+      });
+    });
+
+    it('gives explicit DATABASE_URL query parameters precedence over env vars', () => {
+      process.env.DATABASE_CONNECTION_LIMIT = '25';
+      process.env.DATABASE_POOL_TIMEOUT = '30';
+      process.env.DATABASE_CONNECT_TIMEOUT = '15';
+      process.env.DATABASE_URL =
+        'postgresql://user:pass@localhost:5432/db?connection_limit=50&pool_timeout=45&connect_timeout=8';
+
+      const prisma = new PrismaService();
+      expect(prisma.poolConfig).toEqual({
+        connectionLimit: 50,
+        poolTimeout: 45,
+        connectTimeout: 8,
+      });
+    });
+
+    it('logs effective pool configuration on module init', async () => {
+      jest.spyOn(service, '$connect').mockResolvedValue(undefined);
+      const logSpy = jest.spyOn(service['logger'], 'log');
+
+      await service.onModuleInit();
+
+      expect(logSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Prisma connection pool configured: connection_limit='),
+      );
+    });
+  });
 });
+

@@ -4,6 +4,7 @@ import { ClaimsModule } from './claims.module';
 import { ClaimsService } from './claims.service';
 import { ClaimsController } from './claims.controller';
 import { ClaimsWorker } from './claims.worker';
+import { PolicyStateCacheService } from './policy-state-cache.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
 import { JwtService } from '../auth/jwt.service';
@@ -41,5 +42,9 @@ describe('ClaimsModule', () => {
 
   it('provides ClaimsWorker', () => {
     expect(module.get(ClaimsWorker)).toBeInstanceOf(ClaimsWorker);
+  });
+
+  it('provides and exports PolicyStateCacheService', () => {
+    expect(module.get(PolicyStateCacheService)).toBeInstanceOf(PolicyStateCacheService);
   });
 });

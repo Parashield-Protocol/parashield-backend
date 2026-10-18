@@ -244,16 +244,34 @@ export class HealthController {
           const idle    = Number(rows.find(r => r.state === 'idle')?.count    ?? 0);
           const waiting = Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0);
 
-          const maxConnections = Number(
+          const effectiveLimit = this.prisma.poolConfig?.connectionLimit ?? Number(
             this.config.get<string>('DATABASE_CONNECTION_LIMIT') ?? DEFAULT_DB_POOL_MAX_CONNECTIONS,
           );
+          const poolTimeout = this.prisma.poolConfig?.poolTimeout ?? Number(
+            this.config.get<string>('DATABASE_POOL_TIMEOUT') ?? 10,
+          );
+          const connectTimeout = this.prisma.poolConfig?.connectTimeout ?? Number(
+            this.config.get<string>('DATABASE_CONNECT_TIMEOUT') ?? 5,
+          );
+          const maxConnections = effectiveLimit;
           const warnPercent = Number(
             this.config.get<string>('DB_POOL_EXHAUSTION_WARN_PERCENT') ?? DEFAULT_DB_POOL_EXHAUSTION_WARN_PERCENT,
           );
           const utilizationPercent = maxConnections > 0 ? Math.round((active / maxConnections) * 100) : 0;
           const exhausted = utilizationPercent >= warnPercent;
+          const prismaMetrics = await this.prisma.getMetrics();
 
-          dbPool = { active, idle, waiting, max: maxConnections, utilizationPercent, exhausted };
+          dbPool = {
+            active,
+            idle,
+            waiting,
+            max: maxConnections,
+            poolTimeout,
+            connectTimeout,
+            utilizationPercent,
+            exhausted,
+            prismaMetrics: prismaMetrics ?? undefined,
+          };
 
           if (exhausted) {
             dbStatus = 'error';
@@ -264,6 +282,7 @@ export class HealthController {
         } catch {
           // Non-fatal: pg_stat_activity may be restricted on managed databases.
         }
+
 
         // #463 — Database transaction throughput monitoring
         // Track database transaction rate to detect performance degradation.

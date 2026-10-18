@@ -63,6 +63,8 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | `GET` | `/api/v1/products` | List all active insurance products |
 | `GET` | `/api/v1/policies/me?wallet=<address>` | Get policies for a wallet address |
 | `GET` | `/api/v1/policies/:id` | Get a single policy by UUID |
+| `PATCH` | `/api/v1/policies/:id` | Update a policy (e.g. change oracleKey, emits status change event) |
+| `POST` | `/api/v1/policies/:id/cancel` | Cancel an active policy |
 | `POST` | `/api/v1/policies/buy` | Calculate premium and get a purchase quote |
 
 ### Claims
@@ -154,31 +156,102 @@ Multiple origins are comma-separated. The server logs the active origin list at 
 
 ---
 
-## Error handling
+## Database Connection Pool Sizing (#676)
 
-All error responses follow the same envelope shape regardless of endpoint:
+Prisma connection pool sizing and timeouts are configurable via environment variables or directly as query parameters on `DATABASE_URL`.
+
+| Environment Variable | Default | Description | Valid Range |
+|---|---|---|---|
+| `DATABASE_CONNECTION_LIMIT` | `10` | Maximum connections in the pool per application instance | 1 – 500 |
+| `DATABASE_POOL_TIMEOUT` | `10` | Seconds a query waits for an available pool connection before throwing a timeout error | 1 – 300 |
+| `DATABASE_CONNECT_TIMEOUT` | `5` | Seconds establishing a new TCP connection to PostgreSQL may take before timing out | 1 – 120 |
+
+### Precedence
+
+Explicit query parameters in `DATABASE_URL` (e.g. `postgresql://user:pass@host:5432/db?connection_limit=25&pool_timeout=15`) always take precedence over the environment variables. Environment variables are used only when the corresponding query parameter is not present in the URL.
+
+Startup validation verifies all values are positive integers within sane bounds and fails fast with a clear error on misconfiguration.
+
+### Sizing Guidance
+
+When running multiple backend instances (e.g., in Kubernetes, ECS, or behind a load balancer), ensure the aggregate connections from all instances do not exceed PostgreSQL's `max_connections`:
+
+$$\text{Total Connections} = (\text{Number of Instances} \times \text{DATABASE\_CONNECTION\_LIMIT}) + \text{Reserved Connections}$$
+
+**Rule**: $\text{Total Connections} < \text{PostgreSQL } \texttt{max\_connections}$
+
+- **Example 1 (Default)**: 5 instances $\times$ 10 connections = 50 connections. Fits comfortably within a default PostgreSQL `max_connections = 100` setting, leaving 50 connections for database migrations, administrative tasks, and replicas.
+- **Example 2 (High Throughput)**: 10 instances $\times$ 25 connections = 250 connections. Requires PostgreSQL `max_connections` configured to $\ge 300$.
+
+### Pool Monitoring & Health Checks
+
+Pool utilization is monitored continuously via `/api/v1/health`:
+- Exposes `active`, `idle`, `waiting`, `max`, `poolTimeout`, and `connectTimeout`.
+- Flags health as degraded when connection utilization reaches `DB_POOL_EXHAUSTION_WARN_PERCENT` (default 90%) to detect exhaustion before queries queue or fail.
+- Exposes genuine Prisma runtime engine metrics when supported.
+- The effective pool configuration is logged at server startup.
+
+### Load Testing
+
+A k6 stress test script is provided in `loadtest/k6/pool-stress.js` to evaluate pool behavior and latency under concurrent load:
+
+```bash
+# Run pool stress test with k6
+npm run test:load:pool
+
+# Or with custom target URL and thresholds
+BASE_URL=http://localhost:3001/api/v1 k6 run loadtest/k6/pool-stress.js
+```
+
+---
+
+## Error handling (RFC 7807 Problem Details)
+
+All error responses use `Content-Type: application/problem+json` conforming to [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807). Legacy fields remain present in the response body for backward compatibility, but are deprecated:
 
 ```json
 {
+  "type": "https://parashield.io/errors/not-found",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Policy not found",
+  "instance": "/api/v1/policies/abc123",
   "success": false,
   "errorCode": "NOT_FOUND",
   "error": "Policy not found",
+  "message": "Policy not found",
   "statusCode": 404,
   "path": "/api/v1/policies/abc123",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
 ```
 
+### RFC 7807 Members
+
+| Member | Type | Description |
+|---|---|---|
+| `type` | `string (URI)` | Stable URI reference identifying the error type. |
+| `title` | `string` | Short human-readable summary of problem type. |
+| `status` | `number` | HTTP status code. |
+| `detail` | `string` | Human-readable explanation specific to this occurrence. |
+| `instance` | `string (URI)` | Request path that generated the error. |
+| `errors` | `array` | (Extension) Validation error details on 400 validation failures. |
+| `correlationId` | `string` | (Extension) Request correlation ID when header is provided. |
+
+### Legacy Fields (Deprecated)
+
 | Field | Type | Description |
 |---|---|---|
-| `success` | `boolean` | Always `false` for errors. |
-| `errorCode` | `string` | Stable machine-readable code (see table below). Key off this, not `error`. |
-| `error` | `string` \| `object` | Human-readable message, or NestJS validation error details for 400s. May change between versions. |
-| `statusCode` | `number` | Mirrors the HTTP status code. |
-| `path` | `string` | The request path that produced the error. |
+| `success` | `boolean` | Always `false` for errors (Deprecated: use `status`). |
+| `errorCode` | `string` | Stable machine-readable code (Deprecated: use `type`). |
+| `error` | `string` \| `object` | Error message string (Deprecated: use `detail`). |
+| `message` | `string` | Human-readable message (Deprecated: use `detail`). |
+| `statusCode` | `number` | Mirrors the HTTP status code (Deprecated: use `status`). |
+| `path` | `string` | The request path (Deprecated: use `instance`). |
 | `timestamp` | `string` | ISO-8601 UTC timestamp. |
 
 ### Error codes
+
 
 | `errorCode` | HTTP status | When it occurs |
 |---|---|---|
@@ -187,6 +260,7 @@ All error responses follow the same envelope shape regardless of endpoint:
 | `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. accessing another wallet's policy, calling an operator-only endpoint without an API key). |
 | `NOT_FOUND` | 404 | Resource does not exist (policy ID, claim ID, oracle key, etc.). |
 | `CONFLICT` | 409 | Duplicate resource (e.g. submitting a claim when one is already active for the same policy). |
+| `CLAIM_CONCURRENT_MODIFICATION` | 409 | The policy changed (or another claim was filed) while a claim was being submitted. Re-read the policy and retry. |
 | `GONE` | 410 | Resource existed but is no longer accessible (e.g. an expired policy). |
 | `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `Retry-After` header value. |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC). |
@@ -296,6 +370,36 @@ All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit times
 
 - **Input sanitization**: a global middleware (`InputSanitizationMiddleware`, registered in `src/main.ts`) trims every string in JSON/urlencoded request bodies and escapes `<`/`>` before validation and persistence, so markup cannot survive into stored values or reflected responses.
 - **Connection pooling**: Prisma pool sizing is applied at runtime to the datasource URL (`connection_limit=10`, `pool_timeout=10`, `connect_timeout=5`). Override each value with `DATABASE_CONNECTION_LIMIT`, `DATABASE_POOL_TIMEOUT`, `DATABASE_CONNECT_TIMEOUT`, or by putting the parameter directly in `DATABASE_URL`.
+
+---
+
+## Transaction strategy
+
+Postgres defaults to `READ COMMITTED`. Under it, two concurrent "check for an existing claim, then insert one" transactions can both pass the check, which can double-pay a policy. Every write that can lead to or record a payout therefore goes through `src/prisma/financial-transaction.ts`:
+
+- **`financialTransaction(prisma, label, fn)`** (interactive) and **`financialBatch(prisma, label, () => [...ops])`** (array form) run at **`SERIALIZABLE`** isolation (`maxWait` 5s, `timeout` 10s). When transactions conflict, Postgres aborts one of them with a serialization failure (SQLSTATE `40001`, Prisma `P2034`) rather than letting both commit.
+- **Serialization failures are retried** up to 3 attempts in total, with jittered exponential backoff. The retry re-runs the whole transaction, so it sees the winner's committed rows (for example, the duplicate guard now finds the claim and returns `AlreadyProcessed` / 409). Interactive callbacks must therefore have no side effects outside `tx`: contract calls, SSE events and webhooks happen after the transaction commits. `financialBatch` takes a factory because a `PrismaPromise` can't be re-run. If a submission is still conflicting after the last attempt, `submitClaim` returns 409 `CLAIM_CONCURRENT_MODIFICATION`.
+- **Optimistic locking** uses `Policy.version`. Every policy status write increments it. Claim flows guard their policy writes on the version they read:
+  - `autoProcess` gates `ACTIVE → PROCESSING` only on the version it validated, and its later `→ CLAIMED` / `→ ACTIVE` writes match only the version its own gate produced. A policy that the stuck-`PROCESSING` sweep reverted and another worker re-gated is back in `PROCESSING` but at a higher version, so the stale attempt's writes miss instead of clobbering it (the ABA case a status-only guard can't detect).
+  - `submitClaim` re-reads the policy inside its transaction and rejects the submission if the status or version changed after validation.
+
+| Operation | Isolation | Guard |
+|---|---|---|
+| `autoProcess` reservation: duplicate guard, `ACTIVE → PROCESSING` gate, claim insert (one transaction) | Serializable + retry | status + `version` |
+| `autoProcess` outcome writes (`PAID`/`CLAIMED`, `REJECTED`, `FAILED` + revert) | Serializable + retry | `status = PROCESSING` + gated `version` |
+| `submitClaim`: policy re-check, duplicate guard, claim insert (one transaction) | Serializable + retry | `version` + partial unique index on non-terminal claims |
+| Stuck-`PROCESSING` recovery | Serializable + retry | status + `updatedAt` cutoff |
+| Cancel / expire policy | single-statement `updateMany` (atomic on its own) | status; bumps `version` |
+| Read-only pagination (`findMany` + `count`) | default | — |
+
+The database-level partial unique index on `Claim(policyId) WHERE status IN ('PENDING','PROCESSING')` remains as a backstop. It does not cover terminal statuses such as `PAID`, which is why the isolation level matters.
+
+Concurrency tests in `src/claims/claims.concurrency.spec.ts` run against a real Postgres. They are skipped unless `CONCURRENCY_TEST_DATABASE_URL` points at a **disposable** database (its tables are truncated):
+
+```bash
+DATABASE_URL=postgresql://.../parashield_test npx prisma db push
+CONCURRENCY_TEST_DATABASE_URL=postgresql://.../parashield_test npx jest claims.concurrency
+```
 
 ---
 

@@ -128,7 +128,7 @@ describe('ClaimsWorker', () => {
     // than an unconditional update({ where: { id } }).
     expect(mockPrisma.policy.updateMany).toHaveBeenCalledWith({
       where: { id: 'p1', status: 'ACTIVE' },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', version: { increment: 1 } },
     });
   });
 
@@ -163,7 +163,7 @@ describe('ClaimsWorker', () => {
 
     expect(mockPrisma.policy.updateMany).toHaveBeenCalledWith({
       where: { id: 'p1', status: 'ACTIVE' },
-      data: { status: 'EXPIRED' },
+      data: { status: 'EXPIRED', version: { increment: 1 } },
     });
     // The guard's WHERE clause (status: 'ACTIVE') means a real CLAIMED/CANCELLED
     // row simply doesn't match and updateMany affects 0 rows — asserted above by

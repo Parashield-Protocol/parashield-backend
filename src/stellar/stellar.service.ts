@@ -58,6 +58,10 @@ export class StellarService {
   private readonly horizon: Horizon.Server;
   private readonly network: string;
   private readonly keeperKeypair: Keypair;
+  // #704 — cache network config at startup to avoid repeated env lookups
+  private readonly _networkPassphrase: string;
+  private readonly _horizonUrl: string;
+  private readonly _rpcUrl: string;
 
   // #728 — per-account transaction serialization. Concurrent invocations from
   // the same account would race on sequence numbers and fail with
@@ -82,10 +86,12 @@ export class StellarService {
       config.get<string>("STELLAR_RPC_URL") ??
       "https://soroban-testnet.stellar.org";
     this.rpc = new StellarRpc.Server(rpcUrl);
+    this._rpcUrl = rpcUrl;
     this.network =
       config.get<string>("STELLAR_NETWORK") === "mainnet"
         ? Networks.PUBLIC
         : Networks.TESTNET;
+    this._networkPassphrase = this.network;
     // #185 — balances only exist on a Horizon account response, not on the
     // lightweight object `rpc.Server.getAccount()` returns (that's meant for
     // building transactions: sequence number only, no `.balances`). A
@@ -96,6 +102,7 @@ export class StellarService {
         ? "https://horizon.stellar.org"
         : "https://horizon-testnet.stellar.org");
     this.horizon = new Horizon.Server(horizonUrl);
+    this._horizonUrl = horizonUrl;
     const secret = config.get<string>("KEEPER_SECRET_KEY");
     if (!secret) {
       throw new Error(
@@ -641,9 +648,19 @@ export class StellarService {
     return this.keeperKeypair.publicKey();
   }
 
-  /** Return the current network passphrase. */
+  /** Return the cached network passphrase (#704). */
   get networkPassphrase(): string {
-    return this.network;
+    return this._networkPassphrase;
+  }
+
+  /** Return the cached Horizon URL (#704). */
+  get horizonUrl(): string {
+    return this._horizonUrl;
+  }
+
+  /** Return the cached RPC URL (#704). */
+  get rpcUrl(): string {
+    return this._rpcUrl;
   }
 
   get rpcServer(): StellarRpc.Server {

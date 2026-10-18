@@ -2,6 +2,7 @@ import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
+import { buildProblemDetails } from '../errors/problem-details';
 
 // #438 — Idempotency keys prevent duplicate processing of the same request.
 // A client that retries a POST (e.g. after a network timeout) sends the same
@@ -67,12 +68,17 @@ export class IdempotencyMiddleware implements NestMiddleware {
     // Basic validation — reject keys that are too long or contain newlines
     // (could be used to construct arbitrary Redis keys).
     if (rawKey.length > IDEMPOTENCY_KEY_MAX_LENGTH || /[\r\n]/.test(rawKey)) {
-      res.status(400).json({
-        success: false,
-        errorCode: 'BAD_REQUEST',
-        error: 'Invalid Idempotency-Key header value',
-        statusCode: 400,
-      });
+      res.setHeader('Content-Type', 'application/problem+json');
+      res.status(400).json(
+        buildProblemDetails({
+          status: 400,
+          errorCode: 'BAD_REQUEST',
+          message: 'Invalid Idempotency-Key header value',
+          error: 'Invalid Idempotency-Key header value',
+          path: req.originalUrl || req.url,
+          correlationId: (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined,
+        }),
+      );
       return;
     }
 
@@ -87,7 +93,7 @@ export class IdempotencyMiddleware implements NestMiddleware {
       next(err);
     };
 
-    this.handle(storeKey, rawKey, res, nextOnce).catch((err: unknown) => {
+    this.handle(storeKey, rawKey, req, res, nextOnce).catch((err: unknown) => {
       // Redis unavailable — fail open (process the request normally) so a
       // Redis outage doesn't take down the API. Log as a warning so ops can
       // detect the degradation.
@@ -105,7 +111,7 @@ export class IdempotencyMiddleware implements NestMiddleware {
    * the winner releases the lock without caching (non-2xx — we then retry
    * acquiring the lock and run the handler ourselves), or the wait times out.
    */
-  private async handle(storeKey: string, rawKey: string, res: Response, next: NextFunction): Promise<void> {
+  private async handle(storeKey: string, rawKey: string, req: Request, res: Response, next: NextFunction): Promise<void> {
     const lockKey = `${storeKey}:lock`;
     const lockToken = randomUUID();
     const deadline = Date.now() + IDEMPOTENCY_WAIT_TIMEOUT_MS;
@@ -128,14 +134,20 @@ export class IdempotencyMiddleware implements NestMiddleware {
 
       if (Date.now() >= deadline) {
         this.logger.warn(`Timed out waiting for in-flight request with idempotency key=${rawKey}`);
-        res.status(409).json({
-          success: false,
-          errorCode: 'IDEMPOTENCY_CONFLICT',
-          error: 'A request with this Idempotency-Key is still being processed. Retry later.',
-          statusCode: 409,
-        });
+        res.setHeader('Content-Type', 'application/problem+json');
+        res.status(409).json(
+          buildProblemDetails({
+            status: 409,
+            errorCode: 'IDEMPOTENCY_CONFLICT',
+            message: 'A request with this Idempotency-Key is still being processed. Retry later.',
+            error: 'A request with this Idempotency-Key is still being processed. Retry later.',
+            path: req.originalUrl || req.url,
+            correlationId: (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined,
+          }),
+        );
         return;
       }
+
 
       await new Promise((resolve) => setTimeout(resolve, IDEMPOTENCY_POLL_INTERVAL_MS));
     }
