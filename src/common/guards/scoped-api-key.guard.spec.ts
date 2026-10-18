@@ -1,7 +1,7 @@
-import { ExecutionContext, ForbiddenException, TooManyRequestsException, UnauthorizedException } from "@nestjs/common";
+import { ExecutionContext, ForbiddenException, UnauthorizedException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
-import { RequireApiKeyScopes, ScopedApiKeyGuard } from "./scoped-api-key.guard";
+import { RequireApiKeyScopes, ScopedApiKeyGuard, TooManyRequestsException } from "./scoped-api-key.guard";
 
 function contextFor(request: { headers: Record<string, string> }, scopes: string[] = []): ExecutionContext {
   const handler = () => undefined;

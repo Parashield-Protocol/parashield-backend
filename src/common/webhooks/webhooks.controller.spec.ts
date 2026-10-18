@@ -84,6 +84,18 @@ describe('WebhooksController', () => {
       expect(webhooks.registerWebhook).toHaveBeenCalledWith(body);
     });
 
+    it('#732 — rejects registration pointing to private IP or localhost (SSRF prevention)', async () => {
+      const { controller, webhooks } = build();
+
+      await expect(
+        controller.register({ ...body, url: 'https://127.0.0.1/hook' }),
+      ).rejects.toThrow();
+      await expect(
+        controller.register({ ...body, url: 'https://169.254.169.254/latest/meta-data' }),
+      ).rejects.toThrow();
+      expect(webhooks.registerWebhook).not.toHaveBeenCalled();
+    });
+
     it('is throttled to 10 registrations per 60 s', async () => {
       const guard = await buildGuard(new InMemoryThrottlerStorage());
       const context = contextFor('register');

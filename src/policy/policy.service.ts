@@ -737,6 +737,124 @@ export class PolicyService {
     }
   }
 
+  /**
+   * #740 — Cursor-based query for streaming policies export without high memory usage.
+   */
+  async findAll(params: {
+    take?: number;
+    skip?: number;
+    cursor?: { id: string };
+    orderBy?: { id: 'asc' | 'desc' };
+  }): Promise<Array<{ id: string; status: string; premium: string; coverage: string; createdAt: Date }>> {
+    const policies = await this.prisma.policy.findMany({
+      take: params.take,
+      skip: params.skip,
+      cursor: params.cursor,
+      orderBy: params.orderBy,
+    });
+    return policies.map((p) => ({
+      id: p.id,
+      status: p.status,
+      premium: p.premiumPaid ? p.premiumPaid.toString() : '0',
+      coverage: p.coverageXlm ? p.coverageXlm.toString() : '0',
+      createdAt: p.createdAt,
+    }));
+  }
+
+  /**
+   * #731 — Full-text search for policies using PostgreSQL to_tsvector / to_tsquery and ts_rank.
+   * Leverages GIN index on Policy to avoid seq scans and maintain search relevance.
+   */
+  async searchPolicies(
+    query: string,
+    walletAddress?: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: PolicySummary[]; total: number; page: number; limit: number }> {
+    const clampedLimit = Math.min(Math.max(1, limit), 100);
+    const offset = (Math.max(1, page) - 1) * clampedLimit;
+    const sanitizedQuery = (query || '').trim();
+
+    if (!sanitizedQuery) {
+      return walletAddress
+        ? this.getUserPolicies(walletAddress, page, clampedLimit)
+        : { data: [], total: 0, page, limit: clampedLimit };
+    }
+
+    const start = Date.now();
+    try {
+      const walletClause = walletAddress ? Prisma.sql`AND p."policyholder" = ${walletAddress}` : Prisma.empty;
+
+      const rows = await this.prisma.$queryRaw<Array<any>>`
+        SELECT p.*,
+          ts_rank(to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')), plainto_tsquery('english', ${sanitizedQuery})) AS relevance
+        FROM "Policy" p
+        WHERE to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')) @@ plainto_tsquery('english', ${sanitizedQuery})
+        ${walletClause}
+        ORDER BY relevance DESC, p."createdAt" DESC
+        LIMIT ${clampedLimit} OFFSET ${offset}
+      `;
+
+      const countResult = await this.prisma.$queryRaw<Array<{ count: bigint | number }>>`
+        SELECT count(*)::int AS count
+        FROM "Policy" p
+        WHERE to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')) @@ plainto_tsquery('english', ${sanitizedQuery})
+        ${walletClause}
+      `;
+
+      const total = Number(countResult[0]?.count ?? 0);
+      const elapsedMs = Date.now() - start;
+      this.logger.log(`[#731 perf] Full-text policy search executed in ${elapsedMs}ms for query "${sanitizedQuery}" (found ${total} records)`);
+
+      const data: PolicySummary[] = rows.map((p) => ({
+        id: p.id,
+        productId: p.productId,
+        policyholder: p.policyholder,
+        coverage: p.coverageXlm?.toString() ?? '0',
+        premiumPaid: p.premiumPaid?.toString() ?? '0',
+        oracleKey: p.oracleKey,
+        startTime: Math.floor(new Date(p.startTime).getTime() / 1000),
+        endTime: Math.floor(new Date(p.endTime).getTime() / 1000),
+        status: p.status,
+        claimsCount: 0,
+      }));
+
+      return { data, total, page, limit: clampedLimit };
+    } catch (err) {
+      this.logger.warn(`Full-text search fallback triggered: ${(err as Error).message}`);
+      const where: Prisma.PolicyWhereInput = {
+        ...(walletAddress ? { policyholder: walletAddress } : {}),
+        OR: [
+          { oracleKey: { contains: sanitizedQuery, mode: 'insensitive' } },
+          { policyholder: { contains: sanitizedQuery, mode: 'insensitive' } },
+          { txHash: { contains: sanitizedQuery, mode: 'insensitive' } },
+        ],
+      };
+      const [policies, total] = await Promise.all([
+        this.prisma.policy.findMany({
+          where,
+          take: clampedLimit,
+          skip: offset,
+          orderBy: { createdAt: 'desc' },
+        }),
+        this.prisma.policy.count({ where }),
+      ]);
+      const data: PolicySummary[] = policies.map((p) => ({
+        id: p.id,
+        productId: p.productId,
+        policyholder: p.policyholder,
+        coverage: p.coverageXlm.toString(),
+        premiumPaid: p.premiumPaid.toString(),
+        oracleKey: p.oracleKey,
+        startTime: Math.floor(p.startTime.getTime() / 1000),
+        endTime: Math.floor(p.endTime.getTime() / 1000),
+        status: p.status,
+        claimsCount: 0,
+      }));
+      return { data, total, page, limit: clampedLimit };
+    }
+  }
+
   async getUserPolicies(
     walletAddress: string,
     page: number = 1,

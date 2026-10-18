@@ -182,11 +182,11 @@ export class HealthController {
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
-  async check(@Req() req: Request): Promise<HealthResponseDto> {
+  async check(@Req() req?: Request): Promise<HealthResponseDto> {
     const startTime = Date.now();
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
-    let dbPool: { active: number; idle: number; waiting: number; max: number; utilizationPercent: number; exhausted: boolean } | undefined;
+    let dbPool: { active: number; idle: number; waiting: number; max: number; poolTimeout?: number; connectTimeout?: number; utilizationPercent: number; exhausted: boolean; prismaMetrics?: unknown } | undefined;
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
@@ -727,7 +727,7 @@ export class HealthController {
       checks: (detailed ? checks : this.toPublicChecks(checks)) as any,
     } as HealthResponseDto;
 
-    const statusFormat = this.getStatusFormat(req.headers['accept']);
+    const statusFormat = this.getStatusFormat(req?.headers?.['accept']);
     const responseBody = this.transformStatusFormat(body, statusFormat);
 
     if (!healthy) {

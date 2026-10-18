@@ -19,6 +19,7 @@ import {
   Req,
   Res,
   UnauthorizedException,
+  Logger,
 } from '@nestjs/common';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import type { Response } from 'express';
@@ -61,6 +62,8 @@ const SSE_TCP_KEEPALIVE_MS = 30_000;
 @ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto, CancellationResponseDto)
 @ApiExtraModels(ResponseDto, PaginatedResponseDto, ProductResponseDto, PolicyResponseDto, PolicyStatusEventDto)
 export class PolicyController {
+  private readonly logger = new Logger(PolicyController.name);
+
   constructor(
     private readonly policy: PolicyService,
     private readonly statusEvents: StatusEventsService,
@@ -116,6 +119,12 @@ export class PolicyController {
     description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
     example: 'true',
   })
+  @ApiQuery({
+    name: 'q',
+    required: false,
+    description: 'Optional full-text search query across policy fields',
+    example: 'drought',
+  })
   @ApiResponse({
     status: 200,
     description: 'Returns paginated policies — { success, data, total, page, limit }',
@@ -134,10 +143,59 @@ export class PolicyController {
     @Query('page') page: string = '1',
     @Query('limit') limit: string = '20',
     @Req() req: AuthenticatedRequest,
+    @Query('q') q?: string,
   ) {
     // #345 — wallet used to come from a client-supplied query param, checked
     // only for authorization against the JWT wallet; the JWT wallet was
     // always the one actually used, making the param redundant and confusing.
+    const authedWallet = req?.user?.walletAddress || req?.wallet;
+    if (!authedWallet) {
+      throw new BadRequestException(
+        'Not authenticated. Please log in with a valid JWT token or Stellar wallet signature.',
+      );
+    }
+    const pageNum = Math.max(1, parseInt(page, 10) || 1);
+    const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
+
+    // #731 — if search query is provided, use PostgreSQL full-text search
+    if (q && q.trim()) {
+      const result = await this.policy.searchPolicies(q.trim(), authedWallet, pageNum, limitNum);
+      return { success: true, ...result };
+    }
+
+    const result = await this.policy.getUserPolicies(authedWallet, pageNum, limitNum);
+    return { success: true, ...result };
+  }
+
+  /** GET /api/v1/policies/search?q=... — search policies using PostgreSQL full-text search (#731) */
+  @Get('policies/search')
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(StreamingInterceptor)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Search policies using PostgreSQL full-text search' })
+  @ApiQuery({ name: 'q', required: true, description: 'Search term for full-text search' })
+  @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
+  @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
+  @ApiResponse({
+    status: 200,
+    description: 'Returns paginated search results ranked by relevance',
+    schema: {
+      allOf: [
+        { $ref: getSchemaPath(PaginatedResponseDto) },
+        {
+          properties: {
+            data: { type: 'array', items: { $ref: getSchemaPath(PolicyResponseDto) } },
+          },
+        },
+      ],
+    },
+  })
+  async searchPolicies(
+    @Query('q') q: string,
+    @Query('page') page: string = '1',
+    @Query('limit') limit: string = '20',
+    @Req() req: AuthenticatedRequest,
+  ) {
     const authedWallet = req.user?.walletAddress || req.wallet;
     if (!authedWallet) {
       throw new BadRequestException(
@@ -146,11 +204,11 @@ export class PolicyController {
     }
     const pageNum = Math.max(1, parseInt(page, 10) || 1);
     const limitNum = Math.min(100, Math.max(1, parseInt(limit, 10) || 20));
-    const result = await this.policy.getUserPolicies(authedWallet, pageNum, limitNum);
+    const result = await this.policy.searchPolicies(q, authedWallet, pageNum, limitNum);
     return { success: true, ...result };
   }
 
-  /** GET /api/v1/policies/:id — get a single policy by ID (owner only) */
+  /** GET /api/v1/policies/:id — get a single policy by ID (owner only) (#729) */
   @Get('policies/:id')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
@@ -174,7 +232,12 @@ export class PolicyController {
       throw new NotFoundException(`Policy ${id} not found`);
     }
     const authedWallet = req.user?.walletAddress || req.wallet;
+    // #729 — Check ownership before returning sensitive details (premium rate, coverage, etc.)
+    // and log unauthorized access attempts.
     if (policyData.policyholder !== authedWallet) {
+      this.logger.warn(
+        `Unauthorized access attempt: policy ${id} (owned by ${policyData.policyholder}) requested by wallet ${authedWallet ?? 'anonymous'}`,
+      );
       throw new ForbiddenException('Policy belongs to a different wallet');
     }
     return { success: true, data: policyData };

@@ -2,6 +2,7 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { validateWebhookEndpoint } from '../webhooks/ssrf.validator';
 
 type WebhookEvent = 'policy.status.change' | 'claim.status.change' | 'policy.oracle_key.change';
 
@@ -105,9 +106,7 @@ export class WebhooksService {
   // #606 — signing secrets are encrypted at rest with AES-256-GCM when
   // WEBHOOK_SECRET_KEY is configured.
   async registerWebhook(dto: { url: string; events: WebhookEvent[]; secret?: string }) {
-    if (!dto.url || !dto.url.startsWith('https://')) {
-      throw new BadRequestException('Webhook URL must start with https://');
-    }
+    validateWebhookEndpoint(dto.url);
     const storedSecret = dto.secret ? this.encryptSecret(dto.secret) : dto.secret;
     const registration = await this.prisma.webhookRegistration.create({
       data: { url: dto.url, secret: storedSecret, events: dto.events },
@@ -199,7 +198,14 @@ export class WebhooksService {
     });
   }
 
-  async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }): Promise<WebhookDeliveryResult[]> {
+  async notifyClaimStatusChange(event: {
+    claimId: string;
+    fromStatus: string;
+    toStatus: string;
+    timestamp: number;
+    actorId?: string;
+    reason?: string | null;
+  }): Promise<WebhookDeliveryResult[]> {
     const registrations = await this.getRegistrationsForEvent('claim.status.change');
 
     const payload = {
@@ -207,6 +213,8 @@ export class WebhooksService {
       fromStatus: event.fromStatus,
       toStatus: event.toStatus,
       timestamp: event.timestamp,
+      actorId: event.actorId ?? 'system',
+      reason: event.reason ?? null,
     };
 
     const results = await Promise.allSettled(

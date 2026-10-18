@@ -55,7 +55,7 @@ describe('WebhooksService', () => {
     ]);
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
 
-    const event = { claimId: 'c1', fromStatus: 'PROCESSING', toStatus: 'PAID', timestamp: 1 };
+    const event = { claimId: 'c1', fromStatus: 'PROCESSING', toStatus: 'PAID', timestamp: 1, actorId: 'system', reason: null };
     await service.notifyClaimStatusChange(event);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -63,6 +63,34 @@ describe('WebhooksService', () => {
     expect(url).toBe('https://a.test');
     const expected = crypto.createHmac('sha256', 'topsecret').update(JSON.stringify(event)).digest('base64');
     expect((init.headers as Record<string, string>)['X-Webhook-Signature']).toBe(expected);
+  });
+
+  it('#730 — includes actor identity and reason in claim status change payload', async () => {
+    const { service } = build([
+      { id: 'a', url: 'https://a.test', secret: null, events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+    ]);
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
+
+    const event = {
+      claimId: 'c-123',
+      fromStatus: 'SUBMITTED',
+      toStatus: 'PROCESSING',
+      timestamp: 1234567890,
+      actorId: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+      reason: 'Automated claim triggered by oracle threshold',
+    };
+    await service.notifyClaimStatusChange(event);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sentBody = JSON.parse(init.body as string);
+    expect(sentBody).toMatchObject({
+      claimId: 'c-123',
+      fromStatus: 'SUBMITTED',
+      toStatus: 'PROCESSING',
+      actorId: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+      reason: 'Automated claim triggered by oracle threshold',
+    });
   });
 
   it('does not reject when loading registrations fails (callers fire-and-forget)', async () => {

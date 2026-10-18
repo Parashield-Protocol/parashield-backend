@@ -101,8 +101,8 @@ export async function shutdownOpenTelemetry(options?: {
 
   const timeoutMs =
     options?.timeoutMs ??
-    parseInt(process.env['OTEL_SHUTDOWN_TIMEOUT_MS'] ?? process.env['OTEL_FLUSH_TIMEOUT_MS'] ?? '', 10) ||
-    DEFAULT_OTEL_SHUTDOWN_TIMEOUT_MS;
+    (parseInt(process.env['OTEL_SHUTDOWN_TIMEOUT_MS'] ?? process.env['OTEL_FLUSH_TIMEOUT_MS'] ?? '', 10) ||
+      DEFAULT_OTEL_SHUTDOWN_TIMEOUT_MS);
 
   const sdkToShutdown = activeSdk;
 

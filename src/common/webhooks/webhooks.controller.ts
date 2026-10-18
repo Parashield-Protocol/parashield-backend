@@ -11,6 +11,7 @@ import {
   PolicyStatusChangePayloadDto,
   ClaimStatusChangePayloadDto,
 } from './dto/webhook.dto';
+import { validateWebhookEndpoint } from './ssrf.validator';
 
 /**
  * Registrations are cheap to create but expensive to serve — every status
@@ -59,6 +60,7 @@ export class WebhooksController {
   @ApiErrorResponse(400, 'Request body failed validation (missing url, unsupported event type, etc.).', undefined, 'url must be a URL address; events must contain only supported event types')
   @ApiErrorResponse(429, 'Rate limit exceeded — webhook registration allows 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async register(@Body() dto: RegisterWebhookDto) {
+    validateWebhookEndpoint(dto.url);
     const result = await this.webhooks.registerWebhook({
       url: dto.url,
       events: dto.events,

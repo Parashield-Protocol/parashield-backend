@@ -4,12 +4,19 @@ import {
   ForbiddenException,
   Injectable,
   SetMetadata,
-  TooManyRequestsException,
   UnauthorizedException,
+  HttpException,
+  HttpStatus,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { Reflector } from "@nestjs/core";
 import { createHash, timingSafeEqual } from "crypto";
+
+export class TooManyRequestsException extends HttpException {
+  constructor(message: string = "Too Many Requests") {
+    super(message, HttpStatus.TOO_MANY_REQUESTS);
+  }
+}
 
 export const API_KEY_SCOPES = "apiKeyScopes";
 export const RequireApiKeyScopes = (...scopes: string[]) =>

@@ -11,6 +11,7 @@ import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { ErrorCode } from '../common/errors/error-codes';
 import { financialBatch, financialTransaction, isSerializationFailure } from '../prisma/financial-transaction';
+import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cache.service';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -215,6 +216,22 @@ export class ClaimsService {
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.REJECTED, 'No oracle reading available'),
       ]);
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.REJECTED,
+        timestamp: Date.now(),
+        actorId: 'system',
+        reason: 'No oracle reading available',
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.REJECTED,
+        actorId: 'system',
+        timestamp: Date.now(),
+        reason: 'No oracle reading available',
+      });
       await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
@@ -254,6 +271,16 @@ export class ClaimsService {
         fromStatus: ClaimStatus.PROCESSING,
         toStatus: ClaimStatus.FAILED,
         timestamp: Date.now(),
+        actorId: 'system',
+        reason: 'Product not found',
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.FAILED,
+        actorId: 'system',
+        timestamp: Date.now(),
+        reason: 'Product not found',
       });
       await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
@@ -278,7 +305,7 @@ export class ClaimsService {
           where: gatedPolicy,
           data:  { status: PolicyStatus.ACTIVE, version: { increment: 1 } },
         }),
-this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
+        this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non-numeric product threshold'),
         this.auditOp('Policy', policyId, PolicyStatus.PROCESSING, PolicyStatus.ACTIVE, 'Reverted: non-numeric product threshold'),
       ]);
       this.statusEvents.emitPolicyStatusChange(policyId, PolicyStatus.ACTIVE);
@@ -287,6 +314,16 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         fromStatus: ClaimStatus.PROCESSING,
         toStatus: ClaimStatus.FAILED,
         timestamp: Date.now(),
+        actorId: 'system',
+        reason: 'Non-numeric product threshold',
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.FAILED,
+        actorId: 'system',
+        timestamp: Date.now(),
+        reason: 'Non-numeric product threshold',
       });
       await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
@@ -311,6 +348,22 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.REJECTED, 'Trigger condition not met'),
       ]);
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.REJECTED,
+        timestamp: Date.now(),
+        actorId: 'system',
+        reason: 'Trigger condition not met',
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.REJECTED,
+        actorId: 'system',
+        timestamp: Date.now(),
+        reason: 'Trigger condition not met',
+      });
       await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
     }
@@ -360,6 +413,16 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         fromStatus: ClaimStatus.PROCESSING,
         toStatus: ClaimStatus.FAILED,
         timestamp: Date.now(),
+        actorId: 'system',
+        reason: 'On-chain payout failed',
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.FAILED,
+        actorId: 'system',
+        timestamp: Date.now(),
+        reason: 'On-chain payout failed',
       });
       await this.policyStateCache?.invalidate(policyId);
       return 'Rejected';
@@ -406,6 +469,16 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         fromStatus: ClaimStatus.PROCESSING,
         toStatus: ClaimStatus.PAID,
         timestamp: Date.now(),
+        actorId: 'system',
+        reason: `Payout confirmed, txHash=${txHash}`,
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PROCESSING,
+        toStatus: ClaimStatus.PAID,
+        actorId: 'system',
+        timestamp: Date.now(),
+        reason: `Payout confirmed, txHash=${txHash}`,
       });
       await this.policyStateCache?.invalidate(policyId);
     }
@@ -519,11 +592,22 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.ACTIVE);
         await this.policyStateCache?.invalidate(policy.id);
         for (const c of inFlightClaims) {
+          const reason = `Recovered stuck PROCESSING after ${stuckMinutes} minutes`;
           this.webhooks.notifyClaimStatusChange({
             claimId: c.id,
             fromStatus: ClaimStatus.PROCESSING,
             toStatus: ClaimStatus.FAILED,
             timestamp: Date.now(),
+            actorId: 'system',
+            reason,
+          });
+          this.statusEvents?.emitClaimStatusChange?.({
+            claimId: c.id,
+            fromStatus: ClaimStatus.PROCESSING,
+            toStatus: ClaimStatus.FAILED,
+            actorId: 'system',
+            timestamp: Date.now(),
+            reason,
           });
         }
         summary.revertedToActive++;
@@ -658,6 +742,22 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PENDING, ClaimStatus.PROCESSING, `Submitted on-chain, txHash=${txHash}`),
       ]);
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PENDING,
+        toStatus: ClaimStatus.PROCESSING,
+        timestamp: Date.now(),
+        actorId: claimant,
+        reason: `Submitted on-chain, txHash=${txHash}`,
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PENDING,
+        toStatus: ClaimStatus.PROCESSING,
+        actorId: claimant,
+        timestamp: Date.now(),
+        reason: `Submitted on-chain, txHash=${txHash}`,
+      });
       await this.policyStateCache?.invalidate(policyId);
     } catch (err) {
       this.logger.error(`On-chain submission failed for claim ${claim.id}: ${(err as Error).message}`, err);
@@ -669,6 +769,22 @@ this.auditOp('Claim', claim.id, ClaimStatus.PROCESSING, ClaimStatus.FAILED, 'Non
         }),
         this.auditOp('Claim', claim.id, ClaimStatus.PENDING, ClaimStatus.FAILED, 'On-chain submission failed'),
       ]);
+      this.webhooks.notifyClaimStatusChange({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PENDING,
+        toStatus: ClaimStatus.FAILED,
+        timestamp: Date.now(),
+        actorId: claimant,
+        reason: 'On-chain submission failed',
+      });
+      this.statusEvents?.emitClaimStatusChange?.({
+        claimId: claim.id,
+        fromStatus: ClaimStatus.PENDING,
+        toStatus: ClaimStatus.FAILED,
+        actorId: claimant,
+        timestamp: Date.now(),
+        reason: 'On-chain submission failed',
+      });
       await this.policyStateCache?.invalidate(policyId);
     }
 

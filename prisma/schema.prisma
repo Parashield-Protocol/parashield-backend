@@ -31,6 +31,8 @@ model Policy {
   @@unique([txHash])
   @@index([policyholder])
   @@index([status])
+  // #731 — GIN index on to_tsvector for full-text search is managed via migration
+  // 20261018000001_add_policy_search_gin_index to leverage PostgreSQL full-text search.
 }
 
 model Product {

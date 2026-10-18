@@ -28,6 +28,15 @@ export interface PolicyOracleKeyChangeEvent {
   correlationId?: string | null;
 }
 
+export interface ClaimStatusChangeEvent {
+  claimId:    string;
+  fromStatus: string;
+  toStatus:   string;
+  actorId:    string;
+  timestamp:  number;
+  reason?:    string | null;
+}
+
 const STATUS_EVENTS_CHANNEL = 'policy:status:events';
 const ORACLE_KEY_EVENTS_CHANNEL = 'policy:oracle_key:events';
 const DEFAULT_MAX_LISTENERS = 1000;
@@ -165,6 +174,12 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
+  }
+
+  emitClaimStatusChange(event: ClaimStatusChangeEvent): void {
+    this.logger.log(`Claim status event: ${event.claimId} (${event.fromStatus} → ${event.toStatus}) by ${event.actorId}`);
+    this.emitter.emit(`claim:${event.claimId}`, event);
+    this.emitter.emit('claim:status', event);
   }
 
   subscribeToPolicyStatus(
