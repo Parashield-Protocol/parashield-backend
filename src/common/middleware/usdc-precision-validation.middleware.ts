@@ -89,20 +89,36 @@ export class UsdcPrecisionValidationMiddleware implements NestMiddleware {
     // Skip empty strings
     if (strValue.trim() === '') return;
 
-    // Validate it's a valid number format
+    // Validate it's a valid number format (integer or decimal, not scientific notation)
     if (!/^-?\d+(\.\d+)?$/.test(strValue)) {
       throw new BadRequestException(
         `Invalid amount format at ${path.join('.')}: "${strValue}". Must be a valid numeric value.`
       );
     }
 
-    // Check decimal precision
+    // Check decimal precision (#663) — reject values with > MAX_DECIMAL_PLACES
     const parts = strValue.split('.');
     if (parts.length === 2 && parts[1].length > this.MAX_DECIMAL_PLACES) {
       throw new BadRequestException(
         `Amount precision at ${path.join('.')} exceeds Stellar USDC limit. ` +
         `Maximum ${this.MAX_DECIMAL_PLACES} decimal places allowed, found ${parts[1].length}. ` +
         `Value: "${strValue}"`
+      );
+    }
+
+    // #692 — Reject negative zero (-0) which can cause unexpected arithmetic.
+    // -0 === 0 in JS but has different string representation and bit pattern.
+    if (Object.is(value, -0) || strValue === '-0' || /^-0(\.0*)?$/.test(strValue)) {
+      throw new BadRequestException(
+        `Invalid amount at ${path.join('.')}: negative zero (-0) is not allowed. Use 0 instead.`
+      );
+    }
+
+    // #663 — Also reject numeric values that lose precision when converted
+    // to string (e.g. 0.1 + 0.2 = 0.30000000000000004).
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new BadRequestException(
+        `Invalid amount at ${path.join('.')}: "${strValue}". Must be a finite number.`
       );
     }
   }

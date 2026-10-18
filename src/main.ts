@@ -18,11 +18,14 @@ import { REALTIME_DOCS } from './common/swagger/realtime-docs';
 import { ErrorResponseDto } from './common/swagger/error-response.dto';
 import { initializeOpenTelemetry } from './common/telemetry/opentelemetry';
 import { parseTrustProxy } from './common/network/trust-proxy';
-import helmet from 'helmet';
+import { applySecurityHeaders } from './common/security/response-header-hardening';
+import { createApiVersionMiddleware } from './common/versioning/api-version';
 import compression from 'compression';
 import { ConfigService } from '@nestjs/config';
 import { json, urlencoded } from 'express';
 import Redis from 'ioredis';
+import { validateJwtSecret } from './auth/jwt-secret.validator';
+import { validateAllSecrets } from './common/secrets/secret-validator';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
@@ -64,9 +67,18 @@ async function bootstrap() {
   const logger = new Logger('Bootstrap');
 
   const configService = app.get(ConfigService);
+  const nodeEnv = configService.get<string>('NODE_ENV') || process.env.NODE_ENV || 'development';
+  try {
+    validateAllSecrets(process.env, nodeEnv);
+  } catch (err) {
+    logger.error(`Fatal Error: ${(err as Error).message}`);
+    process.exit(1);
+  }
+
   const jwtSecret = configService.get<string>('JWT_SECRET');
-  if (!jwtSecret) {
-    logger.error('Fatal Error: JWT_SECRET environment variable is required');
+  const jwtSecretValidation = validateJwtSecret(jwtSecret, nodeEnv);
+  if (!jwtSecretValidation.valid) {
+    logger.error(`Fatal Error: ${jwtSecretValidation.error}`);
     process.exit(1);
   }
 
@@ -75,8 +87,22 @@ async function bootstrap() {
   // by a client-supplied header. Defaults to trusting no proxies.
   app.set('trust proxy', parseTrustProxy(configService.get<string>('TRUST_PROXY')));
 
-  // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.)
-  app.use(helmet());
+  // #671 — Framework-level JSON replacer for Express so any direct res.json calls
+  // serialize BigInt values as decimal strings instead of throwing.
+  app.set('json replacer', (_key: string, value: unknown) =>
+    typeof value === 'bigint' ? value.toString() : value,
+  );
+
+  // #713 — Stamp X-API-Version on every response as early as possible so it is
+  // present even on responses that bypass the interceptor/exception-filter
+  // pipeline (CORS preflights, timeouts, static docs).
+  app.use(createApiVersionMiddleware());
+
+  // Security headers (X-Content-Type-Options, X-Frame-Options, HSTS, etc.).
+  // #711 — also disables Express's X-Powered-By and strips leaky headers such
+  // as Server/X-Runtime/Via from every response.
+  // #705 — HSTS is enabled to prevent SSL stripping attacks (see the helper).
+  applySecurityHeaders(app);
 
   // Response compression — gzip/deflate for text-based responses (JSON, HTML,
   // SSE streams). Runs before route handlers so every response is eligible.
@@ -161,6 +187,21 @@ async function bootstrap() {
     process.exit(1);
   }
 
+  // #670 — Reject wildcard origins in all environments, including development.
+  // A wildcard CORS origin allows any website to make authenticated requests
+  // to the API, which is a security risk even in development (e.g., when using
+  // cookies or tokens).
+  const corsOrigins = corsOrigin.split(',').map((o) => o.trim()).filter(Boolean);
+  const hasWildcard = corsOrigins.some((o) => o === '*' || o === 'null' || o.includes('*'));
+  if (hasWildcard) {
+    logger.error(
+      'Fatal Error: CORS_ORIGIN must not contain wildcards (*). ' +
+      'Specify exact origins instead, e.g. CORS_ORIGIN=http://localhost:3000. ' +
+      'See .env.example and the README "CORS configuration" section.',
+    );
+    process.exit(1);
+  }
+
   const operatorApiKey = configService.get<string>('ORACLE_OPERATOR_API_KEY');
   const adminApiKey = configService.get<string>('ADMIN_API_KEY');
   
@@ -190,6 +231,8 @@ async function bootstrap() {
     methods: corsMethods,
     allowedHeaders: corsAllowedHeaders,
     credentials: corsCredentials,
+    // #713 — let browser clients read the version/deprecation headers.
+    exposedHeaders: ['X-API-Version', 'Deprecation', 'Link'],
   });
 
   app.setGlobalPrefix('api/v1');
@@ -288,28 +331,48 @@ async function bootstrap() {
       'paginated JSON envelope for large result sets — see that endpoint\'s own `stream` parameter ' +
       'description for details; pagination metadata is then returned via the `X-Total-Count`, `X-Page`, ' +
       'and `X-Limit` response headers instead of the JSON body.\n\n' +
-      '## Error Response Structure\n\n' +
-      'All error responses follow a consistent envelope format for reliable parsing:\n\n' +
+      '## Error Response Structure (RFC 7807 Problem Details)\n\n' +
+      'All error responses are returned with `Content-Type: application/problem+json` conforming to ' +
+      '[RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807). Legacy envelope fields remain ' +
+      'present for backward compatibility:\n\n' +
       '```json\n' +
       '{\n' +
+      '  "type": "https://parashield.io/errors/not-found",\n' +
+      '  "title": "Not Found",\n' +
+      '  "status": 404,\n' +
+      '  "detail": "Policy not found",\n' +
+      '  "instance": "/api/v1/policies/abc123",\n' +
       '  "success": false,\n' +
       '  "errorCode": "NOT_FOUND",\n' +
       '  "error": "Policy not found",\n' +
+      '  "message": "Policy not found",\n' +
       '  "statusCode": 404,\n' +
       '  "path": "/api/v1/policies/abc123",\n' +
       '  "timestamp": "2024-01-15T10:30:00.000Z"\n' +
       '}\n' +
       '```\n\n' +
-      '### Error Response Fields\n\n' +
+      '### Standard RFC 7807 Members\n\n' +
+      '| Member | Type | Description |\n' +
+      '|---|---|---|\n' +
+      '| `type` | `string (URI)` | Stable URI reference identifying the error type |\n' +
+      '| `title` | `string` | Short human-readable summary of the problem type |\n' +
+      '| `status` | `number` | HTTP status code |\n' +
+      '| `detail` | `string` | Human-readable explanation specific to this occurrence |\n' +
+      '| `instance` | `string (URI)` | Relative or absolute URI identifying the specific request path |\n' +
+      '| `errors` | `array` | (Extension) Validation failure details from class-validator |\n' +
+      '| `correlationId` | `string` | (Extension) Request correlation ID when available |\n\n' +
+      '### Backward Compatibility Fields (Deprecated)\n\n' +
       '| Field | Type | Description |\n' +
       '|-------|------|-------------|\n' +
-      '| `success` | `boolean` | Always `false` for errors |\n' +
-      '| `errorCode` | `string` | Stable machine-readable code (see table below) - key off this, not `error` |\n' +
-      '| `error` | `string` or `object` | Human-readable message, or validation error details for 400s. May change between versions |\n' +
-      '| `statusCode` | `number` | HTTP status code |\n' +
-      '| `path` | `string` | The request path that produced the error |\n' +
+      '| `success` | `boolean` | Always `false` for errors (Deprecated: use `status`) |\n' +
+      '| `errorCode` | `string` | Stable machine-readable code (Deprecated: use `type`) |\n' +
+      '| `error` | `string` or `object` | Error message string (Deprecated: use `detail`) |\n' +
+      '| `message` | `string` | Human-readable message (Deprecated: use `detail`) |\n' +
+      '| `statusCode` | `number` | HTTP status code (Deprecated: use `status`) |\n' +
+      '| `path` | `string` | Request path (Deprecated: use `instance`) |\n' +
       '| `timestamp` | `string` | ISO-8601 UTC timestamp |\n' +
-      '| `retryAfter` | `number` | (Optional) Seconds to wait before retrying - present only on 429 responses |\n\n' +
+      '| `retryAfter` | `number` | (Optional) Seconds to wait before retrying on 429 responses |\n\n' +
+
       '### Error Codes Reference\n\n' +
       '| `errorCode` | HTTP Status | When It Occurs |\n' +
       '|-------------|-------------|----------------|\n' +

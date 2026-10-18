@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, GoneException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, PolicyStatus, ProductStatus, Product } from '@prisma/client';
 import { TransactionBuilder, Transaction, Address, Operation, rpc as StellarRpc, scValToNative, nativeToScVal } from '@stellar/stellar-sdk';
 import { StellarService } from '../stellar/stellar.service';
@@ -8,8 +8,9 @@ import { ConfirmPolicyDto } from './dto/confirm-policy.dto';
 import { ConfigService } from '@nestjs/config';
 import { transition } from './policy-status.machine';
 import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
+import { UpdatePolicyDto } from './dto/update-policy.dto';
 import { WebhooksService } from '../common/events/webhooks.service';
-import { StatusEventsService } from '../common/events/status-events.service';
+import { StatusEventsService, PolicyOracleKeyChangeEvent } from '../common/events/status-events.service';
 
 const STROOPS_PER_XLM = 10_000_000n;
 
@@ -46,12 +47,25 @@ export interface PolicySummary {
   startTime:      number;
   endTime:        number;
   status:         string;
+  claimsCount:    number;
 }
 
 export interface CancellationResult extends PolicySummary {
   /** Pro-rated premium refund owed for the unused coverage period (#351). */
   refundAmountXlm: string;
 }
+
+// #622 — simple in-memory TTL cache for product catalog queries.
+// Products change infrequently and the list is read on every
+// unauthenticated GET /products request; caching avoids a DB round-trip
+// on every hit while staying simple (no Redis dependency for this).
+const PRODUCT_CACHE_TTL_MS = 30_000;
+interface ProductCacheEntry {
+  data: ProductSummary[];
+  total: number;
+  expiresAt: number;
+}
+const productCache = new Map<string, ProductCacheEntry>();
 
 export interface PremiumValidationResult {
   valid: boolean;
@@ -235,20 +249,23 @@ export class PolicyService {
     product: ProductSummary,
     oracleKey?: string,
   ): Promise<PremiumValidationResult> {
-    const min = parseFloat(product.coverageMin);
-    const max = parseFloat(product.coverageMax);
+    // #743 — Use integer comparison for monetary bounds to avoid floating-point
+    // rounding errors. coverageMin/Max are string-formatted integers.
+    const min = BigInt(product.coverageMin.split('.')[0] || '0');
+    const max = BigInt(product.coverageMax.split('.')[0] || '0');
+    const coverage = BigInt(coverageXlm);
 
-    if (coverageXlm < min) {
+    if (coverage < min) {
       return {
         valid: false,
-        reason: `Coverage ${coverageXlm} XLM is below the minimum ${min} XLM for this product`,
+        reason: `Coverage ${coverageXlm} XLM is below the minimum ${product.coverageMin} XLM for this product`,
       };
     }
 
-    if (coverageXlm > max) {
+    if (coverage > max) {
       return {
         valid: false,
-        reason: `Coverage ${coverageXlm} XLM exceeds the maximum ${max} XLM for this product`,
+        reason: `Coverage ${coverageXlm} XLM exceeds the maximum ${product.coverageMax} XLM for this product`,
       };
     }
 
@@ -336,6 +353,19 @@ export class PolicyService {
       throw new BadRequestException(periodValidation.reason);
     }
 
+    // #665 — Validate the oracle key has at least one reading before
+    // persisting the policy. Without this, a policy could reference an
+    // oracle key that has no data source configured, making claim
+    // evaluation impossible.
+    const oracleReading = await this.prisma.oracleReading.findFirst({
+      where: { key: dto.oracleKey },
+    });
+    if (!oracleReading) {
+      throw new BadRequestException(
+        `Oracle key "${dto.oracleKey}" has no data source configured. Cannot create policy with an unknown oracle key.`,
+      );
+    }
+
     const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
 
     try {
@@ -400,16 +430,19 @@ export class PolicyService {
       throw new GoneException('Signed XDR has expired; please request a new transaction to sign');
     }
 
-    // Validate XDR source matches both the JWT-verified wallet and the DTO field (#112)
-    if (tx.source !== authenticatedWallet) {
-      throw new BadRequestException(
-        `Transaction source account (${tx.source}) does not match the authenticated wallet (${authenticatedWallet})`
+    // Validate XDR source matches both the JWT-verified wallet and the DTO field (#112, #687)
+    this.stellar.validateTransactionSource(tx, authenticatedWallet, {
+      method: 'confirmAndCreatePolicy',
+      userId: authenticatedWallet,
+    });
+
+    const canonicalDtoWallet = this.stellar.validateAccountAddress(dto.walletAddress, 'request walletAddress');
+    const canonicalAuthWallet = this.stellar.validateAccountAddress(authenticatedWallet, 'authenticated wallet');
+    if (canonicalDtoWallet !== canonicalAuthWallet) {
+      this.logger.warn(
+        `Request walletAddress mismatch in confirmAndCreatePolicy: user=${authenticatedWallet} attempted=${dto.walletAddress}`,
       );
-    }
-    if (tx.source !== dto.walletAddress) {
-      throw new BadRequestException(
-        `Transaction source account (${tx.source}) does not match the wallet address in the request (${dto.walletAddress})`
-      );
+      throw new ForbiddenException('Forbidden: Transaction source account does not match authenticated user');
     }
 
     // Validate there is at least one operation
@@ -494,7 +527,7 @@ export class PolicyService {
       throw new BadRequestException('Failed to decode buy_policy arguments from XDR');
     }
 
-    const sendResult = await this.stellar.simulateAssembleAndSend(tx);
+    const sendResult = await this.stellar.simulateAssembleAndSend(tx, authenticatedWallet);
     if (sendResult.status === 'ERROR') {
       throw new Error(`On-chain submission failed: ${JSON.stringify(sendResult.errorResult)}`);
     }
@@ -537,6 +570,11 @@ export class PolicyService {
     const [policies, total] = await this.prisma.$transaction([
       this.prisma.policy.findMany({
         where: { policyholder: address },
+        include: {
+          _count: {
+            select: { claims: true },
+          },
+        },
         orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
         take,
         skip,
@@ -574,6 +612,18 @@ export class PolicyService {
   ): Promise<{ data: ProductSummary[]; total: number; page: number; limit: number }> {
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
+
+    // #622 — serve from cache when the query fits the default page (first
+    // page, default limit). Non-default pages always hit the DB because
+    // caching every possible pagination combination is not worthwhile.
+    const cacheKey = `${page}:${take}`;
+    const now = Date.now();
+    const cached = productCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
+      return { data: cached.data, total: cached.total, page, limit: take };
+    }
+
     this.logger.log(`get_active_products: page=${page} limit=${limit}`);
 
     const [dbProducts, total] = await this.prisma.$transaction([
@@ -600,6 +650,9 @@ export class PolicyService {
       status:      product.status,
     }));
 
+    // #622 — store in cache with TTL
+    productCache.set(cacheKey, { data, total, expiresAt: now + PRODUCT_CACHE_TTL_MS });
+
     this.logger.log(`get_active_products: ${data.length}/${total} products (page ${page})`);
     return { data, total, page, limit: take };
   }
@@ -607,7 +660,14 @@ export class PolicyService {
   async getPolicy(policyId: string): Promise<PolicySummary | null> {
     this.logger.log(`get_policy: ${policyId}`);
     // Try database first
-    const dbPolicy = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    const dbPolicy = await this.prisma.policy.findUnique({
+      where: { id: policyId },
+      include: {
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
     if (dbPolicy) {
       return {
         id:           dbPolicy.id,
@@ -619,6 +679,7 @@ export class PolicyService {
         startTime:    Math.floor(dbPolicy.startTime.getTime() / 1000),
         endTime:      Math.floor(dbPolicy.endTime.getTime() / 1000),
         status:       dbPolicy.status,
+        claimsCount:  (dbPolicy as any)._count?.claims ?? 0,
       };
     }
     // #216 — DB is the source of truth for reads, but a policy created directly
@@ -674,10 +735,129 @@ export class PolicyService {
         startTime:    Number(onChain.start_time),
         endTime:      Number(onChain.end_time),
         status:       onChain.status,
+        claimsCount:  0,
       };
     } catch (err) {
       this.logger.warn(`get_policy on-chain fallback failed for ${policyId}: ${(err as Error).message}`);
       return null;
+    }
+  }
+
+  /**
+   * #740 — Cursor-based query for streaming policies export without high memory usage.
+   */
+  async findAll(params: {
+    take?: number;
+    skip?: number;
+    cursor?: { id: string };
+    orderBy?: { id: 'asc' | 'desc' };
+  }): Promise<Array<{ id: string; status: string; premium: string; coverage: string; createdAt: Date }>> {
+    const policies = await this.prisma.policy.findMany({
+      take: params.take,
+      skip: params.skip,
+      cursor: params.cursor,
+      orderBy: params.orderBy,
+    });
+    return policies.map((p) => ({
+      id: p.id,
+      status: p.status,
+      premium: p.premiumPaid ? p.premiumPaid.toString() : '0',
+      coverage: p.coverageXlm ? p.coverageXlm.toString() : '0',
+      createdAt: p.createdAt,
+    }));
+  }
+
+  /**
+   * #731 — Full-text search for policies using PostgreSQL to_tsvector / to_tsquery and ts_rank.
+   * Leverages GIN index on Policy to avoid seq scans and maintain search relevance.
+   */
+  async searchPolicies(
+    query: string,
+    walletAddress?: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ data: PolicySummary[]; total: number; page: number; limit: number }> {
+    const clampedLimit = Math.min(Math.max(1, limit), 100);
+    const offset = (Math.max(1, page) - 1) * clampedLimit;
+    const sanitizedQuery = (query || '').trim();
+
+    if (!sanitizedQuery) {
+      return walletAddress
+        ? this.getUserPolicies(walletAddress, page, clampedLimit)
+        : { data: [], total: 0, page, limit: clampedLimit };
+    }
+
+    const start = Date.now();
+    try {
+      const walletClause = walletAddress ? Prisma.sql`AND p."policyholder" = ${walletAddress}` : Prisma.empty;
+
+      const rows = await this.prisma.$queryRaw<Array<any>>`
+        SELECT p.*,
+          ts_rank(to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')), plainto_tsquery('english', ${sanitizedQuery})) AS relevance
+        FROM "Policy" p
+        WHERE to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')) @@ plainto_tsquery('english', ${sanitizedQuery})
+        ${walletClause}
+        ORDER BY relevance DESC, p."createdAt" DESC
+        LIMIT ${clampedLimit} OFFSET ${offset}
+      `;
+
+      const countResult = await this.prisma.$queryRaw<Array<{ count: bigint | number }>>`
+        SELECT count(*)::int AS count
+        FROM "Policy" p
+        WHERE to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')) @@ plainto_tsquery('english', ${sanitizedQuery})
+        ${walletClause}
+      `;
+
+      const total = Number(countResult[0]?.count ?? 0);
+      const elapsedMs = Date.now() - start;
+      this.logger.log(`[#731 perf] Full-text policy search executed in ${elapsedMs}ms for query "${sanitizedQuery}" (found ${total} records)`);
+
+      const data: PolicySummary[] = rows.map((p) => ({
+        id: p.id,
+        productId: p.productId,
+        policyholder: p.policyholder,
+        coverage: p.coverageXlm?.toString() ?? '0',
+        premiumPaid: p.premiumPaid?.toString() ?? '0',
+        oracleKey: p.oracleKey,
+        startTime: Math.floor(new Date(p.startTime).getTime() / 1000),
+        endTime: Math.floor(new Date(p.endTime).getTime() / 1000),
+        status: p.status,
+        claimsCount: 0,
+      }));
+
+      return { data, total, page, limit: clampedLimit };
+    } catch (err) {
+      this.logger.warn(`Full-text search fallback triggered: ${(err as Error).message}`);
+      const where: Prisma.PolicyWhereInput = {
+        ...(walletAddress ? { policyholder: walletAddress } : {}),
+        OR: [
+          { oracleKey: { contains: sanitizedQuery, mode: 'insensitive' } },
+          { policyholder: { contains: sanitizedQuery, mode: 'insensitive' } },
+          { txHash: { contains: sanitizedQuery, mode: 'insensitive' } },
+        ],
+      };
+      const [policies, total] = await Promise.all([
+        this.prisma.policy.findMany({
+          where,
+          take: clampedLimit,
+          skip: offset,
+          orderBy: { createdAt: 'desc' },
+        }),
+        this.prisma.policy.count({ where }),
+      ]);
+      const data: PolicySummary[] = policies.map((p) => ({
+        id: p.id,
+        productId: p.productId,
+        policyholder: p.policyholder,
+        coverage: p.coverageXlm.toString(),
+        premiumPaid: p.premiumPaid.toString(),
+        oracleKey: p.oracleKey,
+        startTime: Math.floor(p.startTime.getTime() / 1000),
+        endTime: Math.floor(p.endTime.getTime() / 1000),
+        status: p.status,
+        claimsCount: 0,
+      }));
+      return { data, total, page, limit: clampedLimit };
     }
   }
 
@@ -699,6 +879,7 @@ export class PolicyService {
       startTime:    Math.floor(p.startTime.getTime() / 1000),
       endTime:      Math.floor(p.endTime.getTime() / 1000),
       status:       p.status,
+      claimsCount:  (p as any)._count?.claims ?? 0,
     }));
     return { data, total, page, limit: clampedLimit };
   }
@@ -770,7 +951,7 @@ export class PolicyService {
 
     const result = await this.prisma.policy.updateMany({
       where: { id: policyId, status: PolicyStatus.ACTIVE },
-      data:  { status: PolicyStatus.CANCELLED },
+      data:  { status: PolicyStatus.CANCELLED, version: { increment: 1 } },
     });
     if (result.count === 0) {
       throw new ConflictException(
@@ -801,7 +982,14 @@ export class PolicyService {
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
 
-    const updated = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    const updated = await this.prisma.policy.findUnique({
+      where: { id: policyId },
+      include: {
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
     return {
       id:              updated!.id,
       productId:       updated!.productId,
@@ -812,7 +1000,126 @@ export class PolicyService {
       startTime:       Math.floor(updated!.startTime.getTime() / 1000),
       endTime:         Math.floor(updated!.endTime.getTime() / 1000),
       status:          updated!.status,
+      claimsCount:     (updated as any)._count?.claims ?? 0,
       refundAmountXlm,
+    };
+  }
+
+  /**
+   * Update a policy (e.g. change oracleKey) (#717).
+   *
+   * If oracleKey is changing:
+   *  1. Validates the new key against product rules and temporal coverage.
+   *  2. Commits the update to the database.
+   *  3. AFTER the database update succeeds, emits a PolicyOracleKeyChangeEvent
+   *     and notifies webhooks.
+   *  4. If the database update fails/rolls back, no event is emitted.
+   *  5. If oracleKey is omitted or unchanged (no-op), no event is emitted.
+   */
+  async updatePolicy(
+    id: string,
+    dto: UpdatePolicyDto,
+    actor?: string | null,
+    correlationId?: string | null,
+  ): Promise<PolicySummary> {
+    const existing = await this.prisma.policy.findUnique({
+      where: { id },
+      include: {
+        product: true,
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
+
+    if (!existing) {
+      throw new NotFoundException(`Policy ${id} not found`);
+    }
+
+    const isOracleKeyProvided = dto.oracleKey !== undefined && dto.oracleKey !== null;
+    const isOracleKeyChanged = isOracleKeyProvided && dto.oracleKey !== existing.oracleKey;
+
+    if (!isOracleKeyChanged) {
+      return {
+        id:           String(existing.id),
+        productId:    existing.productId,
+        policyholder: existing.policyholder,
+        coverage:     existing.coverageXlm.toString(),
+        premiumPaid:  existing.premiumPaid.toString(),
+        oracleKey:    existing.oracleKey,
+        startTime:    Math.floor(existing.startTime.getTime() / 1000),
+        endTime:      Math.floor(existing.endTime.getTime() / 1000),
+        status:       existing.status,
+        claimsCount:  (existing as any)._count?.claims ?? 0,
+      };
+    }
+
+    const newOracleKey = dto.oracleKey!;
+
+    // Validate oracle key format and temporal coverage
+    const keyValidation = this.validateOracleKey(
+      newOracleKey,
+      this.mapProduct(existing.product),
+      existing.startTime,
+      existing.endTime,
+    );
+    if (!keyValidation.valid) {
+      throw new BadRequestException(keyValidation.reason);
+    }
+
+    // Commit change to DB
+    const updated = await this.prisma.policy.update({
+      where: { id },
+      data: {
+        oracleKey: newOracleKey,
+      },
+      include: {
+        _count: {
+          select: { claims: true },
+        },
+      },
+    });
+
+    const oldOracleKey = existing.oracleKey;
+    const timestamp = Date.now();
+
+    // Emit event ONLY AFTER database change is committed
+    const event: PolicyOracleKeyChangeEvent = {
+      policyId: String(updated.id),
+      oldOracleKey,
+      newOracleKey,
+      actor: actor ?? null,
+      timestamp,
+      correlationId: correlationId ?? null,
+    };
+
+    this.statusEvents.emitPolicyOracleKeyChange(event);
+    this.webhooks.notifyPolicyOracleKeyChange(event).catch((err) => {
+      this.logger.error(`Failed to dispatch oracle key change webhook for policy ${id}: ${err.message}`);
+    });
+
+    // Write audit log
+    await this.prisma.auditLog.create({
+      data: {
+        entityType: 'Policy',
+        entityId:   id,
+        fromStatus: existing.status,
+        toStatus:   existing.status,
+        reason:     `Oracle key changed from "${oldOracleKey}" to "${newOracleKey}" by ${actor ?? 'system'}`,
+      },
+    }).catch((err) => this.logger.error(`Failed to write audit log for policy ${id} oracle key update`, err));
+
+    return {
+      id:           String(updated.id),
+      productId:    updated.productId,
+      policyholder: updated.policyholder,
+      coverage:     updated.coverageXlm.toString(),
+      premiumPaid:  updated.premiumPaid.toString(),
+      oracleKey:    updated.oracleKey,
+      startTime:    Math.floor(updated.startTime.getTime() / 1000),
+      endTime:      Math.floor(updated.endTime.getTime() / 1000),
+      status:       updated.status,
+      claimsCount:  (updated as any)._count?.claims ?? 0,
     };
   }
 
@@ -822,6 +1129,8 @@ export class PolicyService {
   // through the API.
 
   async createProduct(dto: CreateProductDto): Promise<ProductSummary> {
+    // #622 — invalidate product cache after admin mutation
+    productCache.clear();
     const product = await this.prisma.product.create({
       data: {
         name:         dto.name,
@@ -841,6 +1150,8 @@ export class PolicyService {
   }
 
   async updateProduct(id: string, dto: UpdateProductDto): Promise<ProductSummary> {
+    // #622 — invalidate product cache after admin mutation
+    productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
@@ -861,11 +1172,14 @@ export class PolicyService {
       },
     });
     this.logger.log(`Admin updated product ${product.id}`);
+    this.statusEvents.emitProductUpdate(product.id);
     return this.mapProduct(product);
   }
 
   /** Deactivate a product (soft delete — existing policies still reference it). */
   async deactivateProduct(id: string): Promise<ProductSummary> {
+    // #622 — invalidate product cache after admin mutation
+    productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
@@ -875,7 +1189,29 @@ export class PolicyService {
       data: { status: ProductStatus.INACTIVE },
     });
     this.logger.log(`Admin deactivated product ${product.id}`);
+    this.statusEvents.emitProductUpdate(product.id);
     return this.mapProduct(product);
+  }
+
+  async findAll(params?: {
+    take?: number;
+    skip?: number;
+    cursor?: { id: string };
+    orderBy?: { [key: string]: 'asc' | 'desc' };
+  }): Promise<Array<{ id: string; status: string; premium: string; coverage: string; createdAt: Date }>> {
+    const policies = await this.prisma.policy.findMany({
+      take: params?.take,
+      skip: params?.skip,
+      cursor: params?.cursor,
+      orderBy: params?.orderBy,
+    });
+    return policies.map((p) => ({
+      id: p.id,
+      status: p.status,
+      premium: p.premiumPaid.toString(),
+      coverage: p.coverageXlm.toString(),
+      createdAt: p.createdAt,
+    }));
   }
 
   private mapProduct(product: Product): ProductSummary {

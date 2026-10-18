@@ -5,6 +5,13 @@ import { UnauthorizedException } from '@nestjs/common';
 import * as jwt from 'jsonwebtoken';
 
 describe('JwtService', () => {
+  const redisStub = () => ({
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+    exists: jest.fn().mockResolvedValue(0),
+  });
+
   const mockConfigService = (secret?: string) => ({
     get: jest.fn((key: string) => {
       if (key === 'JWT_SECRET') return secret;
@@ -12,14 +19,40 @@ describe('JwtService', () => {
     }),
   });
 
+  const VALID_SECRET = 'valid-test-jwt-secret-at-least-32-characters-long!';
+
   it('should throw an Error on initialization if JWT_SECRET is not set', async () => {
     expect(() => {
-      new JwtService(mockConfigService(undefined) as any);
+      new JwtService(mockConfigService(undefined) as any, redisStub() as any);
     }).toThrow('JWT_SECRET environment variable is required');
   });
 
-  it('should initialize successfully if JWT_SECRET is set', () => {
-    const service = new JwtService(mockConfigService('my-secret-key') as any);
+  it('should throw an Error if JWT_SECRET is shorter than 32 characters', () => {
+    expect(() => {
+      new JwtService(mockConfigService('too-short-key') as any, redisStub() as any);
+    }).toThrow(/at least 32 characters long/);
+  });
+
+  it('should throw an Error if JWT_SECRET uses the old default dev value', () => {
+    expect(() => {
+      new JwtService(
+        mockConfigService('parashield-dev-secret-change-in-production') as any,
+        redisStub() as any,
+      );
+    }).toThrow(/weak or placeholder values/);
+  });
+
+  it('should throw an Error if JWT_SECRET uses weak placeholder values', () => {
+    expect(() => {
+      new JwtService(mockConfigService('changeme') as any, redisStub() as any);
+    }).toThrow();
+    expect(() => {
+      new JwtService(mockConfigService('secret') as any, redisStub() as any);
+    }).toThrow();
+  });
+
+  it('should initialize successfully if valid JWT_SECRET is set', () => {
+    const service = new JwtService(mockConfigService(VALID_SECRET) as any, redisStub() as any);
     expect(service).toBeDefined();
   });
 
@@ -27,7 +60,7 @@ describe('JwtService', () => {
     let service: JwtService;
 
     beforeEach(() => {
-      service = new JwtService(mockConfigService('my-secret-key') as any);
+      service = new JwtService(mockConfigService(VALID_SECRET) as any, redisStub() as any);
     });
 
     it('should sign a token and verify it successfully', () => {
@@ -40,7 +73,7 @@ describe('JwtService', () => {
     });
 
     it('should expose the configured token expiry', () => {
-      expect(service.expiresIn).toBe('7d');
+      expect(service.expiresIn).toBe('1h');
     });
 
     it('should throw UnauthorizedException for an invalid token', () => {
@@ -52,7 +85,7 @@ describe('JwtService', () => {
     // #555 — tokens with wrong issuer or audience must be rejected
     it('should reject a token signed with a different issuer', () => {
       const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
-      const token = jwt.sign({ walletAddress, iss: 'wrong-issuer' }, 'my-secret-key', {
+      const token = jwt.sign({ walletAddress, iss: 'wrong-issuer' }, VALID_SECRET, {
         algorithm: 'HS256',
         expiresIn: '1h',
       });
@@ -61,7 +94,7 @@ describe('JwtService', () => {
 
     it('should reject a token signed with a different audience', () => {
       const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
-      const token = jwt.sign({ walletAddress, aud: 'wrong-audience' }, 'my-secret-key', {
+      const token = jwt.sign({ walletAddress, aud: 'wrong-audience' }, VALID_SECRET, {
         algorithm: 'HS256',
         expiresIn: '1h',
       });
@@ -73,7 +106,7 @@ describe('JwtService', () => {
     // secret the service uses, rather than only testing malformed strings.
     it('should throw UnauthorizedException for a legitimately expired token', () => {
       const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
-      const expiredToken = jwt.sign({ walletAddress }, 'my-secret-key', { expiresIn: -10 });
+      const expiredToken = jwt.sign({ walletAddress }, VALID_SECRET, { expiresIn: -10 });
 
       expect(() => service.verify(expiredToken)).toThrow(UnauthorizedException);
       expect(() => service.verify(expiredToken)).toThrow(/expired/i);
@@ -85,7 +118,7 @@ describe('JwtService', () => {
     // "Invalid token" message for the expired path is caught.
     it('should surface "Token has expired" (not generic "Invalid token") for an expired token', () => {
       const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
-      const expiredToken = jwt.sign({ walletAddress }, 'my-secret-key', { expiresIn: '-1s' });
+      const expiredToken = jwt.sign({ walletAddress }, VALID_SECRET, { expiresIn: '-1s' });
 
       // Must be the *expired* message, not the generic JsonWebTokenError one
       expect(() => service.verify(expiredToken)).toThrow('Token has expired');
@@ -155,7 +188,7 @@ describe('JwtService', () => {
       it('rejects a token signed with HS384 (algorithm outside the allow-list)', () => {
         // Signed with the same secret but a different algorithm — should fail
         // because HS384 is not in the ['HS256'] allow-list.
-        const hs384Token = jwt.sign({ walletAddress }, 'my-secret-key', {
+        const hs384Token = jwt.sign({ walletAddress }, VALID_SECRET, {
           algorithm: 'HS384',
           expiresIn: '7d',
         } as any);

@@ -13,6 +13,7 @@ describe('HealthController', () => {
     poolActive?: number;
     connectionLimit?: string;
     poolWarnPercent?: string;
+    operatorKey?: string;
   }) {
     const prisma = {
       $queryRaw: overrides?.dbFails
@@ -55,6 +56,7 @@ describe('HealthController', () => {
         if (key === 'KEEPER_MIN_BALANCE_XLM') return overrides?.minBalance;
         if (key === 'DATABASE_CONNECTION_LIMIT') return overrides?.connectionLimit;
         if (key === 'DB_POOL_EXHAUSTION_WARN_PERCENT') return overrides?.poolWarnPercent;
+        if (key === 'ORACLE_OPERATOR_API_KEY') return overrides?.operatorKey;
         return undefined;
       }),
     };
@@ -258,6 +260,39 @@ describe('HealthController', () => {
           }),
         }),
       });
+    });
+  });
+  // #546 — detailed infrastructure information is only for callers that
+  // present the operator API key.
+  describe('#546 — public vs. detailed output', () => {
+    it('returns only overall and per-component status to unauthenticated callers', async () => {
+      const controller = build({ operatorKey: 'secret-key' });
+
+      const body = await controller.check({ headers: {} } as any);
+
+      expect(body.status).toBe('ok');
+      expect(body.checks.database).toEqual({ status: 'ok' });
+      expect(body.checks.stellar).toEqual({ status: 'ok' });
+      expect(body.checks.queue).toEqual({ status: 'ok' });
+      expect((body as any).versions).toBeUndefined();
+    });
+
+    it('does not reveal details for a wrong API key', async () => {
+      const controller = build({ operatorKey: 'secret-key' });
+
+      const body = await controller.check({ headers: { 'x-api-key': 'wrong-key' } } as any);
+
+      expect(body.checks.database).toEqual({ status: 'ok' });
+    });
+
+    it('includes pool, queue and version details when the operator API key is presented', async () => {
+      const controller = build({ operatorKey: 'secret-key' });
+
+      const body = await controller.check({ headers: { 'x-api-key': 'secret-key' } } as any);
+
+      expect(body.checks.database.pool).toBeDefined();
+      expect(body.checks.stellar.keeperBalanceXlm).toBeDefined();
+      expect((body as any).versions).toBeDefined();
     });
   });
 });

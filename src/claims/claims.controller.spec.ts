@@ -7,7 +7,7 @@ describe('ClaimsController', () => {
   const OTHER_WALLET = 'GBXY7KLMNOPQRSTUVWXYZAB2CDEFGHIJKLMNOPQRSTUVWXYZAB2CDEF';
 
   let controller: ClaimsController;
-  let mockClaims: jest.Mocked<Pick<ClaimsService, 'submitClaim' | 'getClaimsByWallet' | 'autoProcess' | 'getClaim'>>;
+  let mockClaims: jest.Mocked<Pick<ClaimsService, 'submitClaim' | 'getClaimsByWallet' | 'autoProcess' | 'getClaim' | 'getDerivedPolicyState'>>;
 
   function reqWith(wallet?: string) {
     return { user: undefined, wallet } as any;
@@ -19,6 +19,7 @@ describe('ClaimsController', () => {
       getClaimsByWallet: jest.fn(),
       autoProcess: jest.fn(),
       getClaim: jest.fn(),
+      getDerivedPolicyState: jest.fn(),
     };
     controller = new ClaimsController(mockClaims as unknown as ClaimsService);
   });
@@ -72,6 +73,27 @@ describe('ClaimsController', () => {
 
       expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
     });
+
+    it('passes cursor to ClaimsService when cursor is provided (#749)', async () => {
+      mockClaims.getClaimsByWallet.mockResolvedValue({
+        data: [{ id: 'c2' }],
+        total: 2,
+        page: 1,
+        limit: 1,
+        nextCursor: null,
+        hasMore: false,
+      } as any);
+
+      const result = await controller.getClaimsByWalletQuery(WALLET, '1', '1', 'cursor-123', reqWith(WALLET));
+
+      expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 1, 'cursor-123');
+      expect(result).toMatchObject({
+        success: true,
+        data: [{ id: 'c2' }],
+        nextCursor: null,
+        hasMore: false,
+      });
+    });
   });
 
   describe('autoProcess', () => {
@@ -82,6 +104,24 @@ describe('ClaimsController', () => {
 
       expect(mockClaims.autoProcess).toHaveBeenCalledWith('policy-1');
       expect(result).toEqual({ success: true, data: { result: 'Paid' } });
+    });
+  });
+
+  describe('getPolicyDerivedState', () => {
+    it('returns derived policy state when found', async () => {
+      const mockState = { policyId: 'policy-1', effectiveStatus: 'ACTIVE' } as any;
+      mockClaims.getDerivedPolicyState.mockResolvedValue(mockState);
+
+      const result = await controller.getPolicyDerivedState('policy-1');
+
+      expect(mockClaims.getDerivedPolicyState).toHaveBeenCalledWith('policy-1');
+      expect(result).toEqual({ success: true, data: mockState });
+    });
+
+    it('throws NotFoundException when policy state is not found', async () => {
+      mockClaims.getDerivedPolicyState.mockResolvedValue(null);
+
+      await expect(controller.getPolicyDerivedState('missing-policy')).rejects.toThrow(NotFoundException);
     });
   });
 
@@ -123,6 +163,27 @@ describe('ClaimsController', () => {
       await controller.getClaimHistory(WALLET, 'invalid', 'invalid', reqWith(WALLET));
 
       expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 20);
+    });
+
+    it('passes cursor to ClaimsService when cursor is provided (#749)', async () => {
+      mockClaims.getClaimsByWallet.mockResolvedValue({
+        data: [{ id: 'c2' }],
+        total: 2,
+        page: 1,
+        limit: 1,
+        nextCursor: null,
+        hasMore: false,
+      } as any);
+
+      const result = await controller.getClaimHistory(WALLET, '1', '1', 'cursor-123', reqWith(WALLET));
+
+      expect(mockClaims.getClaimsByWallet).toHaveBeenCalledWith(WALLET, 1, 1, 'cursor-123');
+      expect(result).toMatchObject({
+        success: true,
+        data: [{ id: 'c2' }],
+        nextCursor: null,
+        hasMore: false,
+      });
     });
 
     it('throws Forbidden when reading claims for another wallet', async () => {

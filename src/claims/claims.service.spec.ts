@@ -67,6 +67,11 @@ describe('ClaimsService', () => {
     $transaction: jest.fn(),
   };
 
+  // Interactive transactions run their callback against the same mocked
+  // client; array batches resolve each (already-invoked) operation.
+  const runTransaction = async (arg: unknown) =>
+    typeof arg === 'function' ? (arg as (tx: unknown) => unknown)(mockPrismaService) : Promise.all(arg as unknown[]);
+
   const POLICY_ID = '3f2b8c1e-5a4d-4e7f-9b6a-1c2d3e4f5a6b';
   const CLAIMANT  = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
 
@@ -77,6 +82,7 @@ describe('ClaimsService', () => {
     coverageXlm:  new Prisma.Decimal("100"),
     oracleKey:    'rainfall:1',
     status:       'ACTIVE',
+    version:      0,
   };
 
   const MOCK_PRODUCT = {
@@ -109,6 +115,7 @@ describe('ClaimsService', () => {
 
     service = module.get<ClaimsService>(ClaimsService);
     jest.clearAllMocks();
+    mockPrismaService.$transaction.mockImplementation(runTransaction);
   });
 
   describe('submitClaim — duplicate claim prevention', () => {
@@ -351,9 +358,8 @@ describe('ClaimsService', () => {
 
   describe('autoProcess', () => {
     beforeEach(() => {
-      // Default: atomic gate succeeds (count=1) and $transaction resolves
+      // Default: atomic gate succeeds (count=1)
       mockPrismaService.policy.updateMany = jest.fn().mockResolvedValue({ count: 1 });
-      mockPrismaService.$transaction = jest.fn().mockResolvedValue([{}, {}]);
     });
 
     it('should return PolicyNotActive when policy does not exist in DB', async () => {
@@ -391,9 +397,10 @@ describe('ClaimsService', () => {
 
       await service.autoProcess(POLICY_ID);
 
+      // Optimistic lock: the gate only matches the version that was validated.
       expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith({
-        where: { id: POLICY_ID, status: 'ACTIVE' },
-        data:  { status: 'PROCESSING' },
+        where: { id: POLICY_ID, status: 'ACTIVE', version: 0 },
+        data:  { status: 'PROCESSING', version: { increment: 1 } },
       });
     });
 
@@ -490,6 +497,7 @@ describe('ClaimsService', () => {
 
       expect(mockPrismaService.$transaction).toHaveBeenCalledWith(
         expect.arrayContaining([expect.anything(), expect.anything()]),
+        expect.objectContaining({ isolationLevel: 'Serializable' }),
       );
     });
 
@@ -555,8 +563,9 @@ describe('ClaimsService', () => {
       // than an unconditional update({ where: { id } }).
       expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: POLICY_ID, status: 'PROCESSING' },
-          data: expect.objectContaining({ status: 'CLAIMED' }),
+          // Guarded on the version set by this flow's own gate (0 → 1).
+          where: { id: POLICY_ID, status: 'PROCESSING', version: 1 },
+          data: expect.objectContaining({ status: 'CLAIMED', version: { increment: 1 } }),
         }),
       );
     });
@@ -622,6 +631,95 @@ describe('ClaimsService', () => {
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
     });
 
+    // #712 — The threshold comparison must be exact. A reading equal to a
+    // LessThan threshold is NOT a trigger (strict), and this must hold at full
+    // 7-decimal resolution rather than via parseFloat's binary rounding.
+    it('#712 — a reading exactly equal to the LessThan threshold does not trigger', async () => {
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-eq-lt', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(500_000_000), // exactly 50.0000000 — equal to the threshold
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(MOCK_PRODUCT); // threshold 50.0000000, LessThan
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+      expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ status: 'REJECTED', triggerMet: false }),
+        }),
+      );
+    });
+
+    it('#712 — a reading exactly equal to the GreaterThan threshold does not trigger', async () => {
+      const GT_PRODUCT = { ...MOCK_PRODUCT, comparison: 'GreaterThan', threshold: '30.0000000' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-eq-gt', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(300_000_000), // exactly 30.0000000 — equal to the threshold
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(GT_PRODUCT);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+    });
+
+    it('#712 — the last decimal place of the threshold is honoured (one unit below triggers)', async () => {
+      // Reading is exactly 1e-7 below the threshold — must trigger LessThan.
+      const PRODUCT = { ...MOCK_PRODUCT, threshold: '50.0000001' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-last-dp', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        value:      BigInt(500_000_000), // 50.0000000 < 50.0000001
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(PRODUCT);
+      mockStellarService.invokeContract.mockResolvedValue('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Paid');
+      expect(mockStellarService.invokeContract).toHaveBeenCalled();
+    });
+
+    // #712 regression: with the old `parseFloat(threshold) * 1e7` path, a large
+    // threshold loses low-order digits to double rounding, so a reading exactly
+    // equal to the threshold can drift below it and pay out. The scaled BigInt
+    // comparison keeps the boundary exact.
+    it('#712 — exact comparison holds for large thresholds (no float drift)', async () => {
+      const PRODUCT = { ...MOCK_PRODUCT, threshold: '1000000000000.0000001' };
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'claim-large', status: 'PROCESSING' });
+      mockOracleService.getLatestReading.mockResolvedValue({
+        key:        ACTIVE_POLICY.oracleKey,
+        // Exactly equal to the threshold, as scaled BigInt.
+        value:      BigInt('10000000000000000001'),
+        confidence: 90,
+      });
+      mockPolicyService.getProductById.mockResolvedValue(PRODUCT);
+      mockPrismaService.claim.update.mockResolvedValue({});
+
+      const result = await service.autoProcess(POLICY_ID);
+
+      expect(result).toBe('Rejected');
+      expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
+    });
+
     // #259 — When getProductById returns null/undefined (product deactivated after
     // the policy was sold), the claim must fail loud for manual review rather than
     // silently substituting a threshold/comparison that may not match what the
@@ -648,9 +746,10 @@ describe('ClaimsService', () => {
           data:  expect.objectContaining({ status: 'FAILED' }),
         }),
       );
-      expect(mockPrismaService.policy.update).toHaveBeenCalledWith(
+      // #260 — the revert is a guarded updateMany, scoped to this flow's gate.
+      expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: { id: POLICY_ID },
+          where: { id: POLICY_ID, status: 'PROCESSING', version: 1 },
           data:  expect.objectContaining({ status: 'ACTIVE' }),
         }),
       );
@@ -672,8 +771,6 @@ describe('ClaimsService', () => {
         confidence: 90,
       });
       mockPolicyService.getProductById.mockResolvedValue(BAD_THRESHOLD_PRODUCT);
-      // $transaction is called for the FAILED-claim + ACTIVE-policy revert
-      mockPrismaService.$transaction.mockResolvedValue([{}, {}]);
 
       const result = await service.autoProcess(POLICY_ID);
 
@@ -694,7 +791,6 @@ describe('ClaimsService', () => {
         confidence: 90,
       });
       mockPolicyService.getProductById.mockResolvedValue(EMPTY_THRESHOLD_PRODUCT);
-      mockPrismaService.$transaction.mockResolvedValue([{}, {}]);
 
       // Must not throw a RangeError from BigInt(NaN)
       await expect(service.autoProcess(POLICY_ID)).resolves.toBe('Rejected');
@@ -793,7 +889,7 @@ describe('ClaimsService', () => {
       expect(summary.revertedToActive).toBe(1);
       expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith({
         where: { id: POLICY_ID, status: 'PROCESSING', updatedAt: { lt: expect.any(Date) } },
-        data:  { status: 'ACTIVE' },
+        data:  { status: 'ACTIVE', version: { increment: 1 } },
       });
       expect(mockPrismaService.claim.updateMany).toHaveBeenCalledWith({
         where: { id: { in: ['c1'] }, status: 'PROCESSING' },
@@ -829,7 +925,7 @@ describe('ClaimsService', () => {
 
       expect(summary.markedClaimed).toBe(1);
       expect(mockPrismaService.policy.updateMany).toHaveBeenCalledWith(expect.objectContaining({
-        data: { status: 'CLAIMED' },
+        data: { status: 'CLAIMED', version: { increment: 1 } },
       }));
       expect(mockPrismaService.claim.updateMany).not.toHaveBeenCalled();
     });

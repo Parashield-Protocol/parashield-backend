@@ -2,6 +2,7 @@ import { Module, MiddlewareConsumer, NestModule, RequestMethod } from '@nestjs/c
 import { AuthMiddleware }  from './auth.middleware';
 import { AuthController }  from './auth.controller';
 import { AuthCleanupWorker } from './auth-cleanup.worker';
+import { AdminRoleGuard }  from './admin-role.guard';
 import { JwtService }      from './jwt.service';
 import { JwtAuthGuard }    from './jwt-auth.guard';
 import { OperatorAuthGuard } from './operator-auth.guard';
@@ -17,8 +18,8 @@ import { PrismaModule }    from '../prisma/prisma.module';
 @Module({
   imports:     [PrismaModule],
   controllers: [AuthController],
-  providers:   [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard, AuthCleanupWorker],
-  exports:     [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard],
+  providers:   [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard, AdminRoleGuard, AuthCleanupWorker],
+  exports:     [AuthMiddleware, JwtService, JwtAuthGuard, OperatorAuthGuard, AdminRoleGuard],
 })
 export class AuthModule implements NestModule {
   configure(consumer: MiddlewareConsumer) {

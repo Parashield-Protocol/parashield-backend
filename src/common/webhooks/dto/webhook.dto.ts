@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsUrl, IsArray, ArrayNotEmpty, ArrayUnique, IsOptional, IsString, IsEnum } from 'class-validator';
+import { IsNotPrivateUrl } from '../ssrf.validator';
 
 export enum WebhookEventType {
   POLICY_STATUS_CHANGE = 'policy.status.change',
@@ -9,6 +10,7 @@ export enum WebhookEventType {
 export class RegisterWebhookDto {
   @ApiProperty({ description: 'URL to receive webhook POST requests', example: 'https://example.com/webhook' })
   @IsUrl()
+  @IsNotPrivateUrl()
   url: string;
 
   @ApiProperty({
@@ -83,4 +85,10 @@ export class ClaimStatusChangePayloadDto {
 
   @ApiProperty({ description: 'Unix timestamp in milliseconds', example: 1700000000000 })
   timestamp: number;
+
+  @ApiProperty({ description: 'Actor who triggered the status change (wallet address or "system")', example: 'system' })
+  actorId: string;
+
+  @ApiPropertyOptional({ description: 'Reason or note for status change', example: 'Payout confirmed' })
+  reason?: string;
 }

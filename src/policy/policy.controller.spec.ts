@@ -4,6 +4,7 @@ import { EventEmitter } from "events";
 import { PolicyService } from "./policy.service";
 import { JwtAuthGuard } from "../auth/jwt-auth.guard";
 import { OperatorAuthGuard } from "../auth/operator-auth.guard";
+import { AdminRoleGuard } from "../auth/admin-role.guard";
 import { AuthenticatedRequest } from "../auth/authenticated-request";
 import { StatusEventsService } from "../common/events/status-events.service";
 import { ForbiddenException, BadRequestException, NotFoundException, UnauthorizedException } from "@nestjs/common";
@@ -22,6 +23,10 @@ describe("PolicyController", () => {
     validatePoolCapacity: jest.fn(),
     calculatePremium: jest.fn(),
     confirmAndCreatePolicy: jest.fn(),
+    createProduct: jest.fn(),
+    updateProduct: jest.fn(),
+    deactivateProduct: jest.fn(),
+    searchPolicies: jest.fn(),
   };
 
   const mockStatusEventsService = {
@@ -46,6 +51,8 @@ describe("PolicyController", () => {
       .overrideGuard(JwtAuthGuard)
       .useValue({ canActivate: () => true })
       .overrideGuard(OperatorAuthGuard)
+      .useValue({ canActivate: () => true })
+      .overrideGuard(AdminRoleGuard)
       .useValue({ canActivate: () => true })
       .compile();
 
@@ -481,6 +488,45 @@ describe("PolicyController", () => {
     });
   });
 
+  // Product management is admin-only: OperatorAuthGuard authenticates the
+  // caller (admin key or admin JWT), then AdminRoleGuard authorizes — so a
+  // non-admin JWT or the oracle-only operator key cannot manage products.
+  describe("admin product endpoints authorization", () => {
+    const reflector = new Reflector();
+
+    function expectAdminGuards(handler: (...args: never[]) => unknown) {
+      const guards = reflector.get<unknown[]>("__guards__", handler);
+      expect(guards).toBeDefined();
+      expect(guards).toContain(OperatorAuthGuard);
+      expect(guards).toContain(AdminRoleGuard);
+      expect(guards!.indexOf(OperatorAuthGuard)).toBeLessThan(
+        guards!.indexOf(AdminRoleGuard),
+      );
+    }
+
+    it("createProduct runs OperatorAuthGuard before AdminRoleGuard", () => {
+      expectAdminGuards(controller.createProduct);
+    });
+
+    it("updateProduct runs OperatorAuthGuard before AdminRoleGuard", () => {
+      expectAdminGuards(controller.updateProduct);
+    });
+
+    it("deactivateProduct runs OperatorAuthGuard before AdminRoleGuard", () => {
+      expectAdminGuards(controller.deactivateProduct);
+    });
+
+    it("returns the created product when the service succeeds", async () => {
+      const dto = { name: "Crop Insurance" } as any;
+      mockPolicyService.createProduct.mockResolvedValue({ id: "prod-1" });
+
+      const result = await controller.createProduct(dto);
+
+      expect(mockPolicyService.createProduct).toHaveBeenCalledWith(dto);
+      expect(result).toEqual({ success: true, data: { id: "prod-1" } });
+    });
+  });
+
   describe("buyPolicy (POST /policies/buy)", () => {
     const WALLET = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
 
@@ -671,4 +717,105 @@ describe("PolicyController", () => {
       expect(events).toHaveLength(countAfterClose);
     });
   });
+
+  describe("#729 — getPolicy ownership check and security logging", () => {
+    const ownerWallet = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+    const attackerWallet = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const mockPolicy = {
+      id: "policy-uuid-1234",
+      policyholder: ownerWallet,
+      premium: "100",
+      premiumRate: "0.05",
+      coverageAmount: "2000",
+      status: "ACTIVE",
+    };
+
+    it("returns policy details when requested by the policy owner", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(mockPolicy);
+      const req = {
+        user: { walletAddress: ownerWallet },
+        wallet: ownerWallet,
+      } as AuthenticatedRequest;
+
+      const result = await controller.getPolicy("policy-uuid-1234", req);
+
+      expect(mockPolicyService.getPolicy).toHaveBeenCalledWith("policy-uuid-1234");
+      expect(result).toEqual({ success: true, data: mockPolicy });
+    });
+
+    it("throws ForbiddenException and logs warning when requested by a different wallet", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(mockPolicy);
+      const req = {
+        user: { walletAddress: attackerWallet },
+        wallet: attackerWallet,
+      } as AuthenticatedRequest;
+
+      const loggerWarnSpy = jest.spyOn((controller as any).logger, "warn");
+
+      await expect(controller.getPolicy("policy-uuid-1234", req)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(loggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Unauthorized access attempt"),
+      );
+    });
+
+    it("throws NotFoundException when the policy does not exist", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(null);
+      const req = {
+        user: { walletAddress: ownerWallet },
+        wallet: ownerWallet,
+      } as AuthenticatedRequest;
+
+      await expect(controller.getPolicy("nonexistent-policy", req)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe("#731 — searchPolicies PostgreSQL full-text search", () => {
+    const wallet = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+    const req = {
+      user: { walletAddress: wallet },
+      wallet,
+    } as AuthenticatedRequest;
+
+    const mockSearchResults = {
+      data: [
+        { id: "policy-1", policyholder: wallet, status: "ACTIVE" },
+      ],
+      total: 1,
+      page: 1,
+      limit: 20,
+    };
+
+    it("calls policyService.searchPolicies with parsed query parameters", async () => {
+      mockPolicyService.searchPolicies.mockResolvedValue(mockSearchResults);
+
+      const result = await controller.searchPolicies("drought insurance", "1", "20", req);
+
+      expect(mockPolicyService.searchPolicies).toHaveBeenCalledWith(
+        "drought insurance",
+        wallet,
+        1,
+        20,
+      );
+      expect(result).toEqual({ success: true, ...mockSearchResults });
+    });
+
+    it("getMyPolicies delegates to searchPolicies when q parameter is provided", async () => {
+      mockPolicyService.searchPolicies.mockResolvedValue(mockSearchResults);
+
+      const result = await controller.getMyPolicies("1", "20", req, "flood");
+
+      expect(mockPolicyService.searchPolicies).toHaveBeenCalledWith(
+        "flood",
+        wallet,
+        1,
+        20,
+      );
+      expect(result).toEqual({ success: true, ...mockSearchResults });
+    });
+  });
 });
+

@@ -3,6 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 import { timingSafeEqual } from 'crypto';
 import { Keypair } from '@stellar/stellar-sdk';
 import { PrismaService } from '../prisma/prisma.service';
+import { buildProblemDetails } from '../common/errors/problem-details';
 
 /**
  * AuthMiddleware — verifies a Stellar wallet signature on incoming requests.
@@ -30,8 +31,14 @@ export class AuthMiddleware implements NestMiddleware {
   /** #572 — 401 responses must never be cached or replayed. */
   private unauthorized(res: Response, body: { statusCode: number; message: string }): void {
     res.setHeader('Cache-Control', 'no-store, no-cache');
-    res.status(401).json(body);
+    res.setHeader('Content-Type', 'application/problem+json');
+    res.status(401).json(buildProblemDetails({
+      status: 401,
+      message: body.message,
+      error: body.message,
+    }));
   }
+
 
   /** Truncate a wallet address to first 8 + last 4 characters for safe logging. */
   private truncateAddress(address: string): string {
@@ -39,10 +46,32 @@ export class AuthMiddleware implements NestMiddleware {
     return `${address.slice(0, 8)}...${address.slice(-4)}`;
   }
 
+  /** #742 — detect infrastructure errors (connection refused, timeout, DNS) vs auth errors. */
+  private isInfrastructureError(err: unknown): boolean {
+    const message = err instanceof Error ? err.message : String(err);
+    return /ECONNREFUSED|ETIMEDOUT|ECONNRESET|ENOTFOUND|EAI_AGAIN|connection|timeout|unavailable/i.test(message);
+  }
+
   async use(req: Request & { wallet?: string }, res: Response, next: NextFunction): Promise<void> {
     const address   = req.headers['x-wallet-address'] as string | undefined;
     const signature = req.headers['x-wallet-signature'] as string | undefined;
     const message   = req.headers['x-wallet-message'] as string | undefined;
+    const authHeader = req.headers['authorization'] as string | undefined;
+
+    // #733 — Validate JWT Authorization header format before processing.
+    // Malformed headers (wrong scheme, missing Bearer prefix, empty token)
+    // must return 401, not cause unhandled errors downstream.
+    if (authHeader !== undefined) {
+      const parts = authHeader.split(' ');
+      if (parts.length !== 2 || parts[0] !== 'Bearer' || parts[1].length === 0) {
+        this.logger.warn('Malformed Authorization header received: missing Bearer prefix or empty token');
+        this.unauthorized(res, {
+          statusCode: 401,
+          message: 'Malformed Authorization header. Expected format: Bearer <token>',
+        });
+        return;
+      }
+    }
 
     // If no auth headers present, pass through as anonymous request
     if (!address && !signature && !message) {
@@ -80,6 +109,24 @@ export class AuthMiddleware implements NestMiddleware {
         select: { nonce: true, expiresAt: true },
       });
     } catch (err) {
+      // #742 — distinguish infrastructure failures (network partition, DB/Redis
+      // outage) from auth failures. Infrastructure errors get 503 so clients
+      // know to retry; auth errors get 401.
+      const isInfraError = this.isInfrastructureError(err);
+      if (isInfraError) {
+        this.logger.error(`Infrastructure error during token verification for ${this.truncateAddress(address)}: ${err}`);
+        res.setHeader('Cache-Control', 'no-store, no-cache');
+        res.setHeader('Content-Type', 'application/problem+json');
+        res.status(503).json(
+          buildProblemDetails({
+            status: 503,
+            message: 'Authentication service temporarily unavailable',
+            error: 'Authentication service temporarily unavailable',
+          }),
+        );
+        return;
+
+      }
       this.logger.warn(`Challenge lookup failed for ${this.truncateAddress(address)}: ${err}`);
       this.unauthorized(res, { statusCode: 401, message: 'Authentication service unavailable' });
       return;

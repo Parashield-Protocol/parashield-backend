@@ -1,12 +1,24 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { ConfigModule } from '@nestjs/config';
+import { Global, Module } from '@nestjs/common';
 import { AuthModule } from './auth.module';
 import { AuthController } from './auth.controller';
 import { AuthMiddleware } from './auth.middleware';
 import { JwtService } from './jwt.service';
 import { JwtAuthGuard } from './jwt-auth.guard';
 import { OperatorAuthGuard } from './operator-auth.guard';
+import { AdminRoleGuard } from './admin-role.guard';
 import { PrismaService } from '../prisma/prisma.service';
+
+
+// RedisModule is @Global in the real app; this test module stands in for it
+// so REDIS_CLIENT-dependent guards/workers resolve without a live Redis.
+@Global()
+@Module({
+  providers: [{ provide: 'REDIS_CLIENT', useValue: {} }],
+  exports: ['REDIS_CLIENT'],
+})
+class StubRedisModule {}
 
 describe('AuthModule', () => {
   let module: TestingModule;
@@ -15,6 +27,7 @@ describe('AuthModule', () => {
     module = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({ isGlobal: true, ignoreEnvFile: true }),
+        StubRedisModule,
         AuthModule,
       ],
     })
@@ -67,5 +80,14 @@ describe('AuthModule', () => {
   it('exports OperatorAuthGuard for use in other modules', () => {
     const exportedServices = Reflect.getMetadata('exports', AuthModule) ?? [];
     expect(exportedServices).toContain(OperatorAuthGuard);
+  });
+
+  it('provides AdminRoleGuard', () => {
+    expect(module.get(AdminRoleGuard)).toBeDefined();
+  });
+
+  it('exports AdminRoleGuard for use in other modules', () => {
+    const exportedServices = Reflect.getMetadata('exports', AuthModule) ?? [];
+    expect(exportedServices).toContain(AdminRoleGuard);
   });
 });

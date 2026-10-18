@@ -3,7 +3,7 @@ import { PolicyService, ProductSummary, OracleKeyValidationResult } from "./poli
 import { StellarService } from "../stellar/stellar.service";
 import { PrismaService } from "../prisma/prisma.service";
 import { ConfigService } from "@nestjs/config";
-import { BadRequestException, ConflictException, GoneException } from "@nestjs/common";
+import { BadRequestException, ConflictException, ForbiddenException, GoneException } from "@nestjs/common";
 import { Prisma } from "@prisma/client";
 import { StatusEventsService } from "../common/events/status-events.service";
 import { WebhooksService } from "../common/events/webhooks.service";
@@ -23,17 +23,47 @@ describe("PolicyService.calculatePremium", () => {
   const mockStellarService = {
     simulateInvoke: jest.fn(),
     simulateAssembleAndSend: jest.fn(),
+    validateTransactionSource: jest.fn((tx: any, authWallet: string) => {
+      if (!authWallet) throw new ForbiddenException("Forbidden: No linked wallet found for authenticated user");
+      if (tx.source !== authWallet) {
+        throw new ForbiddenException("Forbidden: Transaction source account does not match authenticated user");
+      }
+      if (tx.operations) {
+        for (const op of tx.operations) {
+          if (op.source && op.source !== authWallet) {
+            throw new ForbiddenException("Forbidden: Operation source account does not match authenticated user");
+          }
+        }
+      }
+    }),
+    validateAccountAddress: jest.fn((addr: string) => {
+      if (!addr || typeof addr !== 'string') throw new BadRequestException("Invalid account");
+      return addr.trim().toUpperCase();
+    }),
     keeperPublicKey: "GABC",
     networkPassphrase: "Test SDF Network ; September 2015",
   };
 
   const mockPrismaService = {
+    $transaction: jest.fn(async (arg: any) => {
+      if (Array.isArray(arg)) {
+        return Promise.all(arg);
+      }
+      if (typeof arg === 'function') {
+        return arg(mockPrismaService);
+      }
+      return arg;
+    }),
     policy: {
       create: jest.fn(),
       findMany: jest.fn(),
       findUnique: jest.fn(),
       count: jest.fn(),
       aggregate: jest.fn(),
+      updateMany: jest.fn(),
+    },
+    claim: {
+      count: jest.fn(),
     },
     product: {
       findMany: jest.fn(),
@@ -73,6 +103,15 @@ describe("PolicyService.calculatePremium", () => {
 
     service = module.get<PolicyService>(PolicyService);
     jest.clearAllMocks();
+    mockPrismaService.$transaction.mockImplementation(async (arg: any) => {
+      if (Array.isArray(arg)) {
+        return Promise.all(arg);
+      }
+      if (typeof arg === 'function') {
+        return arg(mockPrismaService);
+      }
+      return arg;
+    });
     mockPrismaService.policy.aggregate.mockResolvedValue({ _sum: { coverageXlm: null } });
     // Default: pool balance simulation returns null retval => Infinity (no cap)
     mockStellarService.simulateInvoke.mockResolvedValue({
@@ -657,6 +696,84 @@ describe("PolicyService.calculatePremium", () => {
       expect(p.premiumPaid).toBe("25");
       expect(typeof p.startTime).toBe("number");
       expect(typeof p.endTime).toBe("number");
+      expect(p.claimsCount).toBe(0);
+    });
+  });
+
+  describe("getUserPolicies N+1 query prevention (#672)", () => {
+    const wallet = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+
+    it("fetches 50 policies with a constant 2 queries using relation-count aggregate", async () => {
+      let queryCount = 0;
+      mockPrismaService.policy.findMany.mockImplementation(async (args: any) => {
+        queryCount++;
+        expect(args.include).toEqual({
+          _count: {
+            select: { claims: true },
+          },
+        });
+        return Array.from({ length: 50 }, (_, i) => ({
+          id: `policy-${i}`,
+          productId: "prod-1",
+          policyholder: wallet,
+          coverageXlm: new Prisma.Decimal("500"),
+          premiumPaid: new Prisma.Decimal("25"),
+          oracleKey: "rainfall:0,0:2026-06",
+          startTime: new Date("2026-01-01"),
+          endTime: new Date("2026-04-01"),
+          status: "ACTIVE",
+          txHash: `tx-${i}`,
+          createdAt: new Date("2026-01-01"),
+          _count: {
+            claims: i % 3 === 0 ? 0 : (i % 5) + 1,
+          },
+        }));
+      });
+
+      mockPrismaService.policy.count.mockImplementation(async () => {
+        queryCount++;
+        return 50;
+      });
+
+      const result = await service.getUserPolicies(wallet, 1, 50);
+
+      // Verify constant query count: exactly 2 queries (1 findMany with _count + 1 count in transaction)
+      // vs 51 queries in an unoptimized N+1 implementation (1 findMany + 50 separate claim.count queries)
+      expect(queryCount).toBe(2);
+      expect(result.data).toHaveLength(50);
+      expect(result.total).toBe(50);
+
+      // Verify zero claims return count 0, not null, undefined, or missing
+      const zeroClaimPolicy = result.data.find((p) => p.id === "policy-0");
+      expect(zeroClaimPolicy).toBeDefined();
+      expect(zeroClaimPolicy?.claimsCount).toBe(0);
+
+      // Verify non-zero claims return exact count
+      const nonZeroPolicy = result.data.find((p) => p.id === "policy-1");
+      expect(nonZeroPolicy).toBeDefined();
+      expect(nonZeroPolicy?.claimsCount).toBe(2);
+    });
+
+    it("handles policies where _count is missing by defaulting claimsCount to 0", async () => {
+      mockPrismaService.policy.findMany.mockResolvedValue([
+        {
+          id: "policy-no-count",
+          productId: "prod-1",
+          policyholder: wallet,
+          coverageXlm: new Prisma.Decimal("500"),
+          premiumPaid: new Prisma.Decimal("25"),
+          oracleKey: "rainfall:0,0:2026-06",
+          startTime: new Date("2026-01-01"),
+          endTime: new Date("2026-04-01"),
+          status: "ACTIVE",
+          txHash: "tx-nocount",
+          createdAt: new Date("2026-01-01"),
+        },
+      ]);
+      mockPrismaService.policy.count.mockResolvedValue(1);
+
+      const result = await service.getUserPolicies(wallet, 1, 20);
+      expect(result.data[0].claimsCount).toBe(0);
     });
   });
 
@@ -832,7 +949,7 @@ describe("PolicyService.calculatePremium", () => {
       ).rejects.toThrow(GoneException);
     });
 
-    it("should throw BadRequestException if source account does not match wallet address", async () => {
+    it("should throw ForbiddenException (403) if source account does not match wallet address (#687)", async () => {
       const otherKey = Keypair.random().publicKey();
       const mismatchedXdr = buildTestTxXdr({ source: otherKey });
 
@@ -847,9 +964,50 @@ describe("PolicyService.calculatePremium", () => {
 
       await expect(
         service.confirmAndCreatePolicy(dto, validWallet),
-      ).rejects.toThrow(
-        /Transaction source account.*does not match the authenticated wallet/,
-      );
+      ).rejects.toThrow(ForbiddenException);
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(/Transaction source account does not match authenticated user/);
+    });
+
+    it("should throw ForbiddenException (403) if operation-level source does not match wallet address (#687)", async () => {
+      const otherKey = Keypair.random().publicKey();
+      const account = new Account(validWallet, "1");
+      const op = Operation.invokeContractFunction({
+        contract: validContract,
+        function: "buy_policy",
+        args: [
+          nativeToScVal("prod-1", { type: "string" }),
+          nativeToScVal("500", { type: "i128" }),
+          nativeToScVal("rainfall:-0.0917,34.7679:2026-06", { type: "string" }),
+        ],
+        source: otherKey,
+      });
+      const tx = new TransactionBuilder(account, {
+        fee: "100",
+        networkPassphrase: "Test SDF Network ; September 2015",
+      })
+        .addOperation(op)
+        .setTimeout(300)
+        .build();
+
+      const dto = {
+        signedXdr: tx.toXDR(),
+        productId: "prod-1",
+        coverageXlm: 500,
+        walletAddress: validWallet,
+        duration: 90,
+        oracleKey: "rainfall:-0.0917,34.7679:2026-06",
+      };
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(ForbiddenException);
+
+      await expect(
+        service.confirmAndCreatePolicy(dto, validWallet),
+      ).rejects.toThrow(/Operation source account does not match authenticated user/);
     });
 
     it("should throw BadRequestException if first operation is not invokeHostFunction", async () => {
@@ -1106,6 +1264,7 @@ describe("PolicyService.calculatePremium", () => {
         startTime:    1700000000,
         endTime:      1700086400,
         status:       "ACTIVE",
+        claimsCount:  0,
       });
     });
 

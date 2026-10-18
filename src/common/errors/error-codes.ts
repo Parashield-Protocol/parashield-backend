@@ -30,6 +30,8 @@ export enum ErrorCode {
   CLAIM_POLICY_NOT_OWNED    = 'CLAIM_POLICY_NOT_OWNED',
   CLAIM_POLICY_NOT_ACTIVE   = 'CLAIM_POLICY_NOT_ACTIVE',
   CLAIM_POLICY_EXPIRED      = 'CLAIM_POLICY_EXPIRED',
+  // The policy or its claims changed concurrently; safe to retry.
+  CLAIM_CONCURRENT_MODIFICATION = 'CLAIM_CONCURRENT_MODIFICATION',
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   TOO_MANY_REQUESTS     = 'TOO_MANY_REQUESTS',

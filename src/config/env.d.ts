@@ -19,6 +19,11 @@ export interface EnvironmentVariables {
   HORIZON_URL?: string;
   STELLAR_NETWORK?: string;
   REDIS_URL?: string;
+  // #710 — Redis startup connection retry tuning (defaults in src/redis/redis-startup.ts)
+  REDIS_STARTUP_MAX_ATTEMPTS?: string;
+  REDIS_STARTUP_INITIAL_DELAY_MS?: string;
+  REDIS_STARTUP_MAX_DELAY_MS?: string;
+  REDIS_STARTUP_ATTEMPT_TIMEOUT_MS?: string;
   ADMIN_API_KEY?: string;
   ORACLE_OPERATOR_API_KEY?: string;
   AVIATIONSTACK_API_KEY?: string;
@@ -46,6 +51,11 @@ export interface EnvironmentVariables {
   VAULT_ADDR?: string;
   VAULT_TOKEN?: string;
   VAULT_KV_PATH?: string;
+  VAULT_TIMEOUT_MS?: string;
+  VAULT_REQUIRED_KEYS?: string;
+  // Database credential rotation (see src/prisma/database-credential-rotation.service.ts)
+  VAULT_REFRESH_INTERVAL_MS?: string;
+  DATABASE_ROTATION_DRAIN_MS?: string;
   OTEL_SERVICE_NAME?: string;
   OTEL_EXPORTER_OTLP_ENDPOINT?: string;
   OTEL_EXPORTER_OTLP_HEADERS?: string;

@@ -4,10 +4,11 @@ import { PolicyController }    from './policy.controller';
 import { PrismaModule }        from '../prisma/prisma.module';
 import { StellarModule }       from '../stellar/stellar.module';
 import { AuthModule }          from '../auth/auth.module';
+import { WebhooksModule }      from '../common/webhooks/webhooks.module';
 import { StatusEventsService } from '../common/events/status-events.service';
 
 @Module({
-  imports:     [PrismaModule, StellarModule, AuthModule],
+  imports:     [PrismaModule, StellarModule, AuthModule, WebhooksModule],
   controllers: [PolicyController],
   providers:   [PolicyService, StatusEventsService],
   exports:     [PolicyService, StatusEventsService],

@@ -2,8 +2,9 @@ import { Injectable, Logger, BadRequestException } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { validateWebhookEndpoint } from '../webhooks/ssrf.validator';
 
-type WebhookEvent = 'policy.status.change' | 'claim.status.change';
+type WebhookEvent = 'policy.status.change' | 'claim.status.change' | 'policy.oracle_key.change';
 
 export interface WebhookRegistration {
   id: string;
@@ -14,17 +15,31 @@ export interface WebhookRegistration {
   isActive: boolean;
 }
 
+export interface WebhookDeliveryResult {
+  registrationId: string;
+  url: string;
+  success: boolean;
+  statusCode?: number;
+  error?: string;
+}
+
 // #437 — Retry configuration for failed webhook deliveries.
 // Up to MAX_RETRY_ATTEMPTS additional attempts after the initial failure,
 // with exponential backoff starting at RETRY_BASE_DELAY_MS and doubling
 // each attempt (1 s → 2 s → 4 s by default).
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
+const WEBHOOK_TIMEOUT_MS = 10_000;
 
 // #606 — AES-256-GCM parameters for encrypting webhook secrets at rest.
 // SHA-256 of WEBHOOK_SECRET_KEY always yields the 32-byte key AES-256 requires.
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12;
+
+// #624 — Maximum webhook payload size (1 MB). Payloads exceeding this
+// limit are rejected before being sent to avoid memory exhaustion on
+// the sender and HTTP 413 / connection issues on the receiver.
+const MAX_WEBHOOK_PAYLOAD_BYTES = 1_048_576;
 
 @Injectable()
 export class WebhooksService {
@@ -91,6 +106,7 @@ export class WebhooksService {
   // #606 — signing secrets are encrypted at rest with AES-256-GCM when
   // WEBHOOK_SECRET_KEY is configured.
   async registerWebhook(dto: { url: string; events: WebhookEvent[]; secret?: string }) {
+    validateWebhookEndpoint(dto.url);
     const storedSecret = dto.secret ? this.encryptSecret(dto.secret) : dto.secret;
     const registration = await this.prisma.webhookRegistration.create({
       data: { url: dto.url, secret: storedSecret, events: dto.events },
@@ -141,46 +157,145 @@ export class WebhooksService {
     }
   }
 
-  async notifyPolicyStatusChange(event: { policyId: string; fromStatus: string; toStatus: string; timestamp: number }) {
+  async notifyPolicyStatusChange(event: { policyId: string; fromStatus: string; toStatus: string; timestamp: number }): Promise<WebhookDeliveryResult[]> {
     const registrations = await this.getRegistrationsForEvent('policy.status.change');
 
-    for (const registration of registrations) {
-      const payload = {
-        policyId: event.policyId,
-        fromStatus: event.fromStatus,
-        toStatus: event.toStatus,
-        timestamp: event.timestamp,
-      };
+    const payload = {
+      policyId: event.policyId,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      timestamp: event.timestamp,
+    };
 
-      try {
-        await this.deliverWithRetry(registration, payload);
-      } catch (err) {
-        this.logger.error(
-          `All delivery attempts failed for policy webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
-        );
-      }
-    }
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for policy webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
   }
 
-  async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }) {
+  async notifyClaimStatusChange(event: {
+    claimId: string;
+    fromStatus: string;
+    toStatus: string;
+    timestamp: number;
+    actorId?: string;
+    reason?: string | null;
+  }): Promise<WebhookDeliveryResult[]> {
     const registrations = await this.getRegistrationsForEvent('claim.status.change');
 
-    for (const registration of registrations) {
-      const payload = {
-        claimId: event.claimId,
-        fromStatus: event.fromStatus,
-        toStatus: event.toStatus,
-        timestamp: event.timestamp,
-      };
+    const payload = {
+      claimId: event.claimId,
+      fromStatus: event.fromStatus,
+      toStatus: event.toStatus,
+      timestamp: event.timestamp,
+      actorId: event.actorId ?? 'system',
+      reason: event.reason ?? null,
+    };
 
-      try {
-        await this.deliverWithRetry(registration, payload);
-      } catch (err) {
-        this.logger.error(
-          `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
-        );
-      }
-    }
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
+  }
+
+  async notifyPolicyOracleKeyChange(event: {
+    policyId: string;
+    oldOracleKey: string;
+    newOracleKey: string;
+    actor?: string | null;
+    timestamp: number;
+    correlationId?: string | null;
+  }): Promise<WebhookDeliveryResult[]> {
+    const registrations = await this.getRegistrationsForEvent('policy.oracle_key.change');
+
+    const payload = {
+      policyId: event.policyId,
+      oldOracleKey: event.oldOracleKey,
+      newOracleKey: event.newOracleKey,
+      actor: event.actor ?? null,
+      timestamp: event.timestamp,
+      correlationId: event.correlationId ?? null,
+    };
+
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for policy oracle key change webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
   }
 
   /**
@@ -192,14 +307,32 @@ export class WebhooksService {
    *   - Attempt 2: wait RETRY_BASE_DELAY_MS * 2  (2 s)
    *   - Attempt 3: wait RETRY_BASE_DELAY_MS * 4  (4 s)
    *
+   * #667 — Uses exponential backoff with full jitter to prevent thundering
+   * herd when many webhooks fail simultaneously. The delay is randomized
+   * between 0 and the exponential ceiling.
+   *
    * Throws on the last attempt so callers can log the final failure.
    */
   private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
     let lastError: Error | undefined;
 
+    // #719 — Serialize and sign the payload once before the retry loop
+    // so each retry reuses the cached body and signature instead of
+    // re-computing JSON.stringify + HMAC per attempt.
+    const payloadStr = JSON.stringify(payload);
+    if (Buffer.byteLength(payloadStr, 'utf8') > MAX_WEBHOOK_PAYLOAD_BYTES) {
+      throw new Error(
+        `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
+      );
+    }
+    const signature = registration.secret
+      ? this.signPayloadString(payloadStr, registration.secret)
+      : undefined;
+
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        const exponentialDelay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+        const delayMs = Math.floor(Math.random() * exponentialDelay);
         this.logger.warn(
           `Retrying webhook ${registration.id} → ${registration.url} ` +
           `(attempt ${attempt}/${MAX_RETRY_ATTEMPTS}, backoff ${delayMs} ms): ${lastError?.message}`,
@@ -208,7 +341,7 @@ export class WebhooksService {
       }
 
       try {
-        await this.deliverWebhook(registration, payload);
+        await this.deliverWebhook(registration, payloadStr, signature);
         if (attempt > 0) {
           this.logger.log(
             `Webhook ${registration.id} → ${registration.url} succeeded on attempt ${attempt}`,
@@ -223,29 +356,105 @@ export class WebhooksService {
     throw lastError!;
   }
 
-  private async deliverWebhook(registration: WebhookRegistration, payload: unknown): Promise<void> {
-    const secret = registration.secret;
+  private async deliverWebhook(
+    registration: WebhookRegistration,
+    payloadStr: string,
+    signature?: string,
+  ): Promise<void> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    if (secret) {
-      headers['X-Webhook-Signature'] = this.signPayload(payload, secret);
+    if (signature) {
+      headers['X-Webhook-Signature'] = signature;
     }
 
-    const response = await fetch(registration.url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(payload),
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), WEBHOOK_TIMEOUT_MS);
 
-    if (!response.ok) {
-      throw new Error(`Webhook responded with ${response.status}`);
+    let response: Response;
+    try {
+      // #751 — Disable automatic redirect following to prevent leaking signed payloads
+      // to unintended or malicious hosts.
+      response = await fetch(registration.url, {
+        method: 'POST',
+        headers,
+        body: payloadStr,
+        signal: controller.signal,
+        redirect: 'manual',
+      });
+
+      // #751 — Handle redirect attempts explicitly and block redirect following.
+      const isRedirect =
+        (response.status >= 300 && response.status < 400) ||
+        response.type === 'opaqueredirect';
+
+      if (isRedirect) {
+        const location =
+          typeof response.headers?.get === 'function'
+            ? response.headers.get('location')
+            : (response.headers as unknown as Record<string, string>)?.[
+                'location'
+              ];
+
+        let targetHostname = 'unknown';
+        let isDifferentDomain = false;
+        if (location) {
+          try {
+            const targetUrl = new URL(location, registration.url);
+            const originalUrl = new URL(registration.url);
+            targetHostname = targetUrl.hostname;
+            isDifferentDomain = targetUrl.origin !== originalUrl.origin;
+          } catch {
+            isDifferentDomain = true;
+          }
+        }
+
+        if (isDifferentDomain) {
+          this.logger.warn(
+            `Blocked redirect to different domain for webhook ${registration.id}: ${registration.url} -> ${location ?? 'unknown'}`,
+          );
+          throw new Error(
+            `Webhook redirect to different domain blocked: ${targetHostname}`,
+          );
+        }
+
+        this.logger.warn(
+          `Webhook delivery to ${registration.url} attempted redirect (${response.status}) to ${location ?? 'unknown'}; redirects are disabled to prevent payload leakage`,
+        );
+        throw new Error(
+          `Webhook delivery failed: redirects are not followed (${response.status})`,
+        );
+      }
+
+      if (!response.ok) {
+        throw new Error(`Webhook responded with ${response.status}`);
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    // #613 — Verify response signature if the endpoint provides one.
+    if (registration.secret) {
+      const responseSignature = response.headers.get('x-webhook-signature-response');
+      if (responseSignature) {
+        const responseBody = await response.text();
+        const expectedSignature = crypto
+          .createHmac('sha256', registration.secret)
+          .update(responseBody)
+          .digest('base64');
+
+        const sigBuf = Buffer.from(responseSignature);
+        const expBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+          throw new Error('Webhook response signature verification failed');
+        }
+      }
     }
   }
 
-  private signPayload(payload: unknown, secret: string): string {
-    const payloadStr = JSON.stringify(payload);
+  // #719 — Sign a pre-serialized payload string (avoids redundant JSON.stringify).
+  private signPayloadString(payloadStr: string, secret: string): string {
     return crypto.createHmac('sha256', secret).update(payloadStr).digest('base64');
   }
 
