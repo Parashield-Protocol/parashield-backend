@@ -713,6 +713,7 @@ export class HealthController {
       timestamp: new Date().toISOString(),
       service:   'parashield-api',
       version:   this.config.get<string>('npm_package_version') ?? process.env.npm_package_version ?? 'unknown',
+      commitSha: this.config.get<string>('GIT_COMMIT_SHA') ?? process.env.GIT_COMMIT_SHA ?? 'unknown',
       responseTimeMs: Date.now() - startTime,
       uptimeMs: Math.round(process.uptime() * 1000),
       ...(detailed

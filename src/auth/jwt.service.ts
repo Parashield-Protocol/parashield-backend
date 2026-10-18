@@ -16,6 +16,8 @@ export interface JwtPayload {
   iat?: number;
   exp?: number;
   jti?: string;
+  /** #724 — Token family ID for refresh token rotation tracking. */
+  family?: string;
 }
 
 /**
@@ -138,5 +140,102 @@ export class JwtService {
     if (!decoded?.jti || !decoded.exp) throw new UnauthorizedException("Invalid token");
     const ttl = Math.max(decoded.exp - Math.floor(Date.now() / 1000), 1);
     await this.redis.set(`jwt:revoked:${decoded.jti}`, '1', 'EX', ttl);
+  }
+
+  // ── #724 — Refresh token rotation with family invalidation ──────────────
+
+  /**
+   * Issue a refresh token tied to a token family. The family ID is shared
+   * across all rotations so reuse of any token in the family can invalidate
+   * the entire chain.
+   */
+  signRefresh(walletAddress: string, family?: string): string {
+    const tokenFamily = family ?? crypto.randomUUID();
+    const payload: JwtPayload = {
+      walletAddress,
+      type: "refresh",
+      family: tokenFamily,
+      jti: crypto.randomUUID(),
+    };
+    const options: jwt.SignOptions = {
+      algorithm: 'HS256',
+      expiresIn: '7d',
+      issuer: this.issuer,
+      audience: this.audience,
+    };
+    return jwt.sign(payload, this.secret, options);
+  }
+
+  /**
+   * Rotate a refresh token: verify the old token, detect reuse (token
+   * already rotated), invalidate the entire family on reuse, and issue a
+   * new refresh token in the same family.
+   *
+   * #724 — When a refresh token is reused (already rotated), the entire
+   * token family is invalidated to prevent attackers from keeping stolen
+   * tokens valid after rotation.
+   */
+  async rotateRefresh(oldToken: string): Promise<{ accessToken: string; refreshToken: string }> {
+    let decoded: JwtPayload & { jti?: string };
+    try {
+      decoded = jwt.verify(oldToken, this.secret, {
+        algorithms: ['HS256'],
+        issuer: this.issuer,
+        audience: this.audience,
+      }) as JwtPayload & { jti?: string };
+    } catch {
+      throw new UnauthorizedException("Invalid refresh token");
+    }
+
+    if (decoded.type !== "refresh") {
+      throw new UnauthorizedException("Not a refresh token");
+    }
+
+    const jti = decoded.jti;
+    const family = decoded.family;
+
+    if (!jti || !family) {
+      throw new UnauthorizedException("Invalid refresh token");
+    }
+
+    // Check if this token was already rotated (reuse detection)
+    const rotationKey = `jwt:rotated:${jti}`;
+    const wasRotated = await this.redis.exists(rotationKey);
+
+    if (wasRotated) {
+      // #724 — Token reuse detected: invalidate the entire family.
+      this.logger.warn(
+        `Refresh token reuse detected for family ${family} — invalidating entire token family`,
+      );
+      await this.invalidateFamily(family);
+      throw new UnauthorizedException("Refresh token reuse detected — all tokens in this family have been invalidated");
+    }
+
+    // Mark this token as rotated (consumed)
+    const ttl = Math.max(decoded.exp! - Math.floor(Date.now() / 1000), 1);
+    await this.redis.set(rotationKey, '1', 'EX', ttl);
+
+    // Issue new tokens in the same family
+    const accessToken = this.sign(decoded.walletAddress);
+    const refreshToken = this.signRefresh(decoded.walletAddress, family);
+
+    return { accessToken, refreshToken };
+  }
+
+  /**
+   * Invalidate all tokens in a family (used on reuse detection).
+   * Marks the family as revoked; all subsequent tokens in the family
+   * are rejected.
+   */
+  async invalidateFamily(family: string): Promise<void> {
+    await this.redis.set(`jwt:family:revoked:${family}`, '1', 'EX', 7 * 24 * 3600);
+    this.logger.warn(`Token family ${family} has been invalidated`);
+  }
+
+  /**
+   * Check if a token family has been revoked.
+   */
+  async isFamilyRevoked(family: string): Promise<boolean> {
+    return (await this.redis.exists(`jwt:family:revoked:${family}`)) === 1;
   }
 }

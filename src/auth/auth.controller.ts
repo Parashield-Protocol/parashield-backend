@@ -156,6 +156,23 @@ export class AuthController {
       throw new UnauthorizedException('Invalid or expired authentication challenge');
     }
 
+    // #723 — Check account lockout before processing login.
+    const lockoutKey = `auth:lockout:${walletAddress}`;
+    const lockoutCount = await this.redis.get(lockoutKey);
+    const maxFailedAttempts = parseInt(
+      this.configService?.get<string>('AUTH_MAX_FAILED_ATTEMPTS') ?? '5',
+      10,
+    );
+    const lockoutDurationSec = parseInt(
+      this.configService?.get<string>('AUTH_LOCKOUT_DURATION_SECONDS') ?? '900',
+      10,
+    );
+
+    if (lockoutCount && parseInt(lockoutCount, 10) >= maxFailedAttempts) {
+      this.logger.warn(`Login rejected: account locked for ${walletAddress} (${lockoutCount} failed attempts)`);
+      throw new UnauthorizedException('Account temporarily locked due to repeated failed login attempts');
+    }
+
     // Atomically consume the nonce from Redis keyed by wallet address.
     // Decision: We deliberately consume the nonce BEFORE signature verification.
     // This is safer because consuming the nonce on any verification attempt
@@ -205,13 +222,29 @@ export class AuthController {
 
       if (!isValid) {
         this.logger.warn(`Login rejected: invalid signature from ${walletAddress}`);
+        // #723 — Record failed attempt and check for lockout.
+        const failures = await this.redis.incr(lockoutKey);
+        if (failures === 1) {
+          await this.redis.expire(lockoutKey, lockoutDurationSec);
+        }
+        if (failures >= maxFailedAttempts) {
+          this.logger.warn(`Account locked after ${failures} failed attempts: ${walletAddress}`);
+        }
         throw new UnauthorizedException('Invalid or expired authentication challenge');
       }
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err;
       this.logger.warn(`Signature verification error: ${err}`);
+      // #723 — Record failed attempt on verification error.
+      const failures = await this.redis.incr(lockoutKey);
+      if (failures === 1) {
+        await this.redis.expire(lockoutKey, lockoutDurationSec);
+      }
       throw new UnauthorizedException('Invalid or expired authentication challenge');
     }
+
+    // #723 — Reset failed attempt counter on successful login.
+    await this.redis.del(lockoutKey);
 
     const token = this.jwtService.sign(walletAddress);
     this.logger.log(`Login successful: wallet=${walletAddress}`);

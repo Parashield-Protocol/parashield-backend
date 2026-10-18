@@ -215,6 +215,9 @@ export class HealthResponseDto {
   @ApiProperty({ description: 'Application version from package.json', example: '0.1.0' })
   version: string;
 
+  @ApiProperty({ description: 'Git commit SHA of the deployed build', example: 'abc123def', required: false })
+  commitSha?: string;
+
   @ApiProperty({ description: 'Total health check duration in milliseconds', example: 125 })
   responseTimeMs: number;
 
