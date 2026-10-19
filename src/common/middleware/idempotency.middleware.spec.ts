@@ -12,6 +12,7 @@ function fakeRedis() {
       store.set(key, value);
       return 'OK';
     }),
+    del: jest.fn(async (key: string) => (store.delete(key) ? 1 : 0)),
     eval: jest.fn(async (_script: string, _n: number, key: string, token: string) => {
       if (store.get(key) === token) {
         store.delete(key);
@@ -105,6 +106,50 @@ describe('IdempotencyMiddleware', () => {
 
     expect(next).not.toHaveBeenCalled();
     expect(res.body).toEqual({ id: 'x' });
+  });
+
+  describe('#736 — corrupted cache entries', () => {
+    const storeKey = 'idempotency:POST:/api/v1/policies:abc';
+
+    it.each([
+      ['invalid JSON', '{"status":201,"body":'],
+      ['JSON null', 'null'],
+      ['missing body', JSON.stringify({ status: 201 })],
+      ['non-numeric status', JSON.stringify({ status: 'ok', body: {} })],
+      ['out-of-range status', JSON.stringify({ status: 42, body: {} })],
+    ])('treats %s as a cache miss, deletes it and runs the handler', async (_label, corrupted) => {
+      const redis = fakeRedis();
+      redis.store.set(storeKey, corrupted);
+      const mw = new IdempotencyMiddleware(redis as any);
+      const res = fakeRes();
+      const next = jest.fn(() => res.status(201).json({ id: 'fresh' }));
+
+      mw.use(req(), res, next);
+      await tick(20);
+
+      expect(redis.del).toHaveBeenCalledWith(storeKey);
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(201);
+      expect(res.body).toEqual({ id: 'fresh' });
+      expect(res.headers['X-Idempotent-Replayed']).toBeUndefined();
+      // The fresh response replaces the corrupted entry.
+      expect(JSON.parse(redis.store.get(storeKey)!)).toEqual({ status: 201, body: { id: 'fresh' } });
+    });
+
+    it('still processes the request when deleting the corrupted entry fails', async () => {
+      const redis = fakeRedis();
+      redis.store.set(storeKey, 'not-json');
+      redis.del.mockRejectedValue(new Error('ECONNRESET'));
+      const mw = new IdempotencyMiddleware(redis as any);
+      const res = fakeRes();
+      const next = jest.fn(() => res.status(201).json({ id: 'fresh' }));
+
+      mw.use(req(), res, next);
+      await tick(20);
+
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(res.statusCode).toBe(201);
+    });
   });
 
   it('fails open when Redis is unavailable', async () => {

@@ -157,17 +157,38 @@ export class IdempotencyMiddleware implements NestMiddleware {
   private async replayCached(storeKey: string, rawKey: string, res: Response): Promise<boolean> {
     const cached = await this.redis.get(storeKey);
     if (!cached) return false;
-    try {
-      const { status, body } = JSON.parse(cached) as { status: number; body: unknown };
-      this.logger.debug(`Replaying idempotent response for key=${rawKey}`);
-      res.setHeader('X-Idempotent-Replayed', 'true');
-      res.status(status).json(body);
-      return true;
-    } catch {
-      // Corrupted cache entry — fall through to normal processing.
-      this.logger.warn(`Failed to parse cached idempotency entry for key=${rawKey}`);
+
+    const entry = this.parseCachedEntry(cached);
+    if (!entry) {
+      // #736 — corrupted cache entry: treat as a cache miss and delete it so
+      // the next request can run the handler and store a fresh response.
+      this.logger.warn(`Discarding corrupted cached idempotency entry for key=${rawKey}`);
+      await this.redis.del(storeKey).catch((err: unknown) =>
+        this.logger.warn(
+          `Failed to delete corrupted idempotency entry for key=${rawKey}: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
       return false;
     }
+
+    this.logger.debug(`Replaying idempotent response for key=${rawKey}`);
+    res.setHeader('X-Idempotent-Replayed', 'true');
+    res.status(entry.status).json(entry.body);
+    return true;
+  }
+
+  /** Parse and shape-check a cached entry. Returns null for invalid JSON or an unexpected shape. */
+  private parseCachedEntry(cached: string): { status: number; body: unknown } | null {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(cached);
+    } catch {
+      return null;
+    }
+    if (typeof parsed !== 'object' || parsed === null || !('body' in parsed)) return null;
+    const { status, body } = parsed as { status: unknown; body: unknown };
+    if (typeof status !== 'number' || !Number.isInteger(status) || status < 100 || status > 599) return null;
+    return { status, body };
   }
 
   private runWithLock(
