@@ -493,6 +493,11 @@ CONCURRENCY_TEST_DATABASE_URL=postgresql://.../parashield_test npx jest claims.c
 
 **Threshold evaluation (#712):** oracle readings are 7-decimal fixed point (e.g. `324000000` = 32.4) and product thresholds are `Decimal(20,7)`. Trigger comparisons are done on exact scaled `BigInt` values (`src/common/utils/decimal.ts`) rather than `parseFloat`, so the last decimal place is never lost and a reading exactly equal to the threshold never triggers (strict `LessThan` / greater-than).
 
+**Claim evaluation isolation:** the policy and its latest oracle reading are
+loaded inside one PostgreSQL `REPEATABLE READ` transaction. Updates committed
+after evaluation begins are intentionally deferred to the next evaluation, so
+a decision never combines an old policy with a new oracle-key state.
+
 ---
 
 ## Project layout

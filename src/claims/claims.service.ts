@@ -13,6 +13,7 @@ import { ErrorCode } from '../common/errors/error-codes';
 import { compareScaledToThreshold, parseDecimalScaled, parseFixedPointBigInt } from '../common/utils/decimal';
 import { financialBatch, financialTransaction, isSerializationFailure } from '../prisma/financial-transaction';
 import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cache.service';
+import { readClaimEvaluationSnapshot } from './claim-evaluation-snapshot';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -109,8 +110,9 @@ export class ClaimsService {
   async autoProcess(policyId: string, productsMap?: Map<string, ProductSummary>): Promise<ClaimResult> {
     this.logger.log(`auto_process policy: ${policyId}`);
 
-    // Fetch policy from DB to verify it exists and is active
-    const policy = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    // Policy and oracle input must come from the same database snapshot. At
+    // REPEATABLE READ, a concurrent update cannot produce a mixed decision.
+    const { policy, reading } = await readClaimEvaluationSnapshot(this.prisma, policyId);
     if (!policy) {
       this.logger.warn(`Policy ${policyId} not found in DB`);
       return 'PolicyNotActive';
@@ -206,8 +208,8 @@ export class ClaimsService {
     this.claimCountCache.delete(policy.policyholder);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
-    // Fetch latest oracle reading for this policy's oracle key
-    const reading = await this.oracleService.getLatestReading(policy.oracleKey);
+    // Use the oracle row captured with the policy above; do not issue a second,
+    // independently committed read here.
     if (!reading) {
       this.logger.warn(`No oracle reading for key=${policy.oracleKey} — rejecting claim ${claim.id}`);
       await financialBatch(this.prisma, `claim ${claim.id}`, () => [
