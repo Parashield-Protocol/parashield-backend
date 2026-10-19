@@ -567,10 +567,23 @@ export class PolicyService {
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
 
+    // #779 — use select instead of include so the query fetches only the
+    // columns that PolicySummary actually maps, avoiding an eager load of
+    // full relation rows (product, etc.) that the list view never displays.
+    // _count.claims is a lightweight aggregate, not a full relation load.
     const [policies, total] = await this.prisma.$transaction([
       this.prisma.policy.findMany({
         where: { policyholder: address },
-        include: {
+        select: {
+          id: true,
+          productId: true,
+          policyholder: true,
+          coverageXlm: true,
+          premiumPaid: true,
+          oracleKey: true,
+          startTime: true,
+          endTime: true,
+          status: true,
           _count: {
             select: { claims: true },
           },

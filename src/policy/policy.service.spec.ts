@@ -707,11 +707,24 @@ describe("PolicyService.calculatePremium", () => {
       let queryCount = 0;
       mockPrismaService.policy.findMany.mockImplementation(async (args: any) => {
         queryCount++;
-        expect(args.include).toEqual({
+        // #779 — list query now uses select (not include) so it doesn't
+        // eagerly load full relation rows (product, etc.) — only the scalar
+        // fields that PolicySummary maps plus a lightweight claim _count.
+        expect(args.select).toEqual({
+          id: true,
+          productId: true,
+          policyholder: true,
+          coverageXlm: true,
+          premiumPaid: true,
+          oracleKey: true,
+          startTime: true,
+          endTime: true,
+          status: true,
           _count: {
             select: { claims: true },
           },
         });
+        expect(args.include).toBeUndefined();
         return Array.from({ length: 50 }, (_, i) => ({
           id: `policy-${i}`,
           productId: "prod-1",

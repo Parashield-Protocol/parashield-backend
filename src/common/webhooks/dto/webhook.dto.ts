@@ -57,6 +57,12 @@ export class WebhookListItemDto {
 
   @ApiProperty({ description: 'Registration timestamp' })
   createdAt: Date;
+
+  @ApiPropertyOptional({
+    description: 'Masked signing secret (last 4 characters). The full secret is only available at registration time (#782).',
+    example: '****1234',
+  })
+  secretMasked?: string;
 }
 
 export class PolicyStatusChangePayloadDto {
