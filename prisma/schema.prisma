@@ -14,6 +14,9 @@ model Policy {
   policyholder  String
   coverageXlm   Decimal   @db.Decimal(20, 7)
   premiumPaid   Decimal   @db.Decimal(20, 7)
+  // Immutable snapshot of the product's premium template at purchase time.
+  premiumRate   Int       @default(0)
+  premiumRateVersion Int  @default(1)
   oracleKey     String
   startTime     DateTime
   endTime       DateTime
@@ -45,6 +48,7 @@ model Product {
   coverageMin  Decimal       @db.Decimal(20, 7)
   coverageMax  Decimal       @db.Decimal(20, 7)
   premiumRate  Int
+  premiumRateVersion Int       @default(1)
   maxDuration  Int
   status       ProductStatus @default(ACTIVE)
   policies     Policy[]

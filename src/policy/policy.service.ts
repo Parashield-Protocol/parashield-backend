@@ -11,6 +11,7 @@ import { CreateProductDto, UpdateProductDto } from './dto/admin-product.dto';
 import { UpdatePolicyDto } from './dto/update-policy.dto';
 import { WebhooksService } from '../common/events/webhooks.service';
 import { StatusEventsService, PolicyOracleKeyChangeEvent } from '../common/events/status-events.service';
+import { nextPremiumRateVersion, snapshotPremiumRate } from './premium-rate-versioning';
 
 const STROOPS_PER_XLM = 10_000_000n;
 
@@ -33,6 +34,7 @@ export interface ProductSummary {
   coverageMin:  string;
   coverageMax:  string;
   premiumRate:  number;
+  premiumRateVersion?: number;
   maxDuration:  number;
   status:       string;
 }
@@ -367,6 +369,10 @@ export class PolicyService {
     }
 
     const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
+    const rateSnapshot = snapshotPremiumRate({
+      premiumRate: product.premiumRate,
+      premiumRateVersion: product.premiumRateVersion ?? 1,
+    });
 
     try {
       const policy = await this.prisma.policy.create({
@@ -375,6 +381,7 @@ export class PolicyService {
           policyholder: dto.walletAddress,
           coverageXlm:  dto.coverageXlm,
           premiumPaid,
+          ...rateSnapshot,
           oracleKey:    dto.oracleKey,
           startTime:    now,
           endTime,
@@ -601,6 +608,7 @@ export class PolicyService {
       coverageMin: product.coverageMin.toString(),
       coverageMax: product.coverageMax.toString(),
       premiumRate: product.premiumRate,
+      premiumRateVersion: product.premiumRateVersion,
       maxDuration: product.maxDuration,
       status:      product.status,
     };
@@ -634,7 +642,8 @@ export class PolicyService {
         select: {
           id: true, name: true, category: true, triggerType: true,
           threshold: true, comparison: true, coverageMin: true,
-          coverageMax: true, premiumRate: true, maxDuration: true, status: true,
+          coverageMax: true, premiumRate: true, premiumRateVersion: true,
+          maxDuration: true, status: true,
         },
         take,
         skip,
@@ -653,6 +662,7 @@ export class PolicyService {
       coverageMin: product.coverageMin.toString(),
       coverageMax: product.coverageMax.toString(),
       premiumRate: product.premiumRate,
+      premiumRateVersion: product.premiumRateVersion,
       maxDuration: product.maxDuration,
       status:      product.status,
     }));
@@ -1151,6 +1161,7 @@ export class PolicyService {
         coverageMin:  dto.coverageMin,
         coverageMax:  dto.coverageMax,
         premiumRate:  dto.premiumRate,
+        premiumRateVersion: 1,
         maxDuration:  dto.maxDuration,
         status:       (dto.status as ProductStatus) ?? ProductStatus.ACTIVE,
       },
@@ -1176,7 +1187,10 @@ export class PolicyService {
         ...(dto.comparison   !== undefined ? { comparison: dto.comparison } : {}),
         ...(dto.coverageMin  !== undefined ? { coverageMin: dto.coverageMin } : {}),
         ...(dto.coverageMax  !== undefined ? { coverageMax: dto.coverageMax } : {}),
-        ...(dto.premiumRate  !== undefined ? { premiumRate: dto.premiumRate } : {}),
+        ...(dto.premiumRate  !== undefined ? {
+          premiumRate: dto.premiumRate,
+          premiumRateVersion: nextPremiumRateVersion(existing, dto.premiumRate),
+        } : {}),
         ...(dto.maxDuration  !== undefined ? { maxDuration: dto.maxDuration } : {}),
         ...(dto.status       !== undefined ? { status: dto.status as ProductStatus } : {}),
       },
@@ -1235,6 +1249,7 @@ export class PolicyService {
       coverageMin: product.coverageMin.toString(),
       coverageMax: product.coverageMax.toString(),
       premiumRate: product.premiumRate,
+      premiumRateVersion: product.premiumRateVersion,
       maxDuration: product.maxDuration,
       status:      product.status,
     };

@@ -428,6 +428,14 @@ For reference, successful responses use the complementary envelope:
 
 Monetary values are returned as strings in 7-decimal fixed-point format matching Stellar asset precision (e.g. `"10.0000000"`).
 
+### Premium-rate changes
+
+Each product premium-rate template has a monotonically increasing version.
+Changing `premiumRate` creates the next version; edits to unrelated product
+fields do not. A policy records both the rate and template version in effect at
+purchase time. Later product updates affect new quotes and policies only—an
+existing policy's premium terms are never changed retroactively.
+
 ### BigInt serialization & API contract change (#671)
 
 All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit timestamps or token amounts) are centrally serialized as decimal strings across all JSON responses, SSE streams, logging paths, and error envelopes.

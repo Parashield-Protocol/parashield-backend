@@ -28,6 +28,9 @@ export class ProductResponseDto {
   @ApiProperty({ description: 'Premium rate in basis points (500 = 5%)' })
   premiumRate: number;
 
+  @ApiProperty({ description: 'Version of the premium-rate template' })
+  premiumRateVersion: number;
+
   @ApiProperty({ description: 'Maximum policy duration in days' })
   maxDuration: number;
 
