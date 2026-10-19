@@ -21,7 +21,8 @@ Supporting infrastructure:
 - **PrismaService** — PostgreSQL integration for policy and oracle data storage
 - **AuthModule** — Stellar wallet signature verification + JWT issuance
 - **LoggingInterceptor** — Request/response duration logging
-- **ThrottleGuard** — IP-based rate limiting (60 req/min)
+- **UserThrottlerGuard** — anonymous callers use per-IP rate limiting (60 req/min);
+  authenticated callers use isolated per-wallet buckets with a 5× higher quota
 
 Server configuration validates `PORT` during startup. It must be an integer in
 the TCP port range `1`–`65535`; when omitted, the API uses port `3001`.
