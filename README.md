@@ -239,6 +239,27 @@ BASE_URL=http://localhost:3001/api/v1 k6 run loadtest/k6/pool-stress.js
 
 ---
 
+## Stellar Horizon timeouts & retries
+
+Horizon requests made by `StellarService` (currently the account-balance fallback in `getAccountBalance`) go through a resilience wrapper defined in `src/stellar/horizon-resilience.ts`, so a transient network issue no longer surfaces as an unhandled exception or a 500.
+
+**Retry with exponential backoff.** Each attempt has a 10s timeout (callers may pass a shorter one). Up to 3 attempts are made, with backoff of 500ms → 1s (capped at 5s); rate-limited responses (429) back off longer, 5s → 10s (capped at 30s).
+
+| Failure | Retried? |
+|---|---|
+| Timeout (per-attempt deadline, `ETIMEDOUT`, `ECONNABORTED`) | Yes |
+| Network errors (`ECONNRESET`, `ECONNREFUSED`, `EAI_AGAIN`, …) | Yes |
+| `429` / `5xx` responses | Yes |
+| Other `4xx` (e.g. `404` account not found) | No — returned to the caller immediately |
+
+**Typed errors.** When every attempt times out, the service throws `HorizonTimeoutError` (HTTP 504, `errorCode: HORIZON_TIMEOUT`). Non-timeout failures that exhaust their retries rethrow the original error.
+
+**Timeout circuit breaker.** After 3 consecutive calls exhaust their retries on timeouts, the circuit opens and Horizon calls fail fast with `HorizonUnavailableError` (HTTP 503, `errorCode: HORIZON_UNAVAILABLE`) for 30s without touching the network. After that window, a single probe request is allowed through: any response within the deadline closes the circuit, another timeout reopens it.
+
+**Health checks** make a single Horizon attempt (no retries) with the 3s health-check timeout, so a slow Horizon can't multiply probe latency and trigger pod restarts.
+
+---
+
 ## Error handling (RFC 7807 Problem Details)
 
 All error responses use `Content-Type: application/problem+json` conforming to [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807). Legacy fields remain present in the response body for backward compatibility, but are deprecated:
@@ -298,6 +319,8 @@ All error responses use `Content-Type: application/problem+json` conforming to [
 | `GONE` | 410 | Resource existed but is no longer accessible (e.g. an expired policy). |
 | `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `Retry-After` header value. |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC). |
+| `HORIZON_TIMEOUT` | 504 | Stellar Horizon did not respond in time after all retry attempts. Transient — safe to retry. See [Stellar Horizon timeouts](#stellar-horizon-timeouts--retries). |
+| `HORIZON_UNAVAILABLE` | 503 | The Horizon circuit breaker is open after repeated timeouts, so the request was not sent. Retry after ~30s. |
 | `BAD_REQUEST` | 400 | Generic bad request not covered by validation (malformed path param, unsupported value, etc.). |
 | `INTERNAL_ERROR` | 500 | Unexpected server-side failure. The error is logged server-side; the response body intentionally omits internal details. |
 
