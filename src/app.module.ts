@@ -20,6 +20,7 @@ import { WebhooksModule } from './common/webhooks/webhooks.module';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
 import { validateAllSecrets } from './common/secrets/secret-validator';
 import { OpenTelemetryShutdownHook } from './common/telemetry/opentelemetry';
+import { validatePortEnv } from './common/utils/config.utils';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -28,6 +29,12 @@ import { OpenTelemetryShutdownHook } from './common/telemetry/opentelemetry';
 function validateConfig(config: Record<string, unknown>) {
   const errors: string[] = [];
   const logger = new Logger('ConfigValidation');
+
+  try {
+    config['PORT'] = validatePortEnv(config['PORT']);
+  } catch (err) {
+    errors.push((err as Error).message);
+  }
 
   // #343 — not a hard requirement (a localhost fallback is fine for local
   // dev), but the ThrottlerModule storage below falls back to it silently,

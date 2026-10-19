@@ -22,6 +22,9 @@ Supporting infrastructure:
 - **AuthModule** — Stellar wallet signature verification + JWT issuance
 - **LoggingInterceptor** — Request/response duration logging
 - **ThrottleGuard** — IP-based rate limiting (60 req/min)
+
+Server configuration validates `PORT` during startup. It must be an integer in
+the TCP port range `1`–`65535`; when omitted, the API uses port `3001`.
 - **Vault bootstrap** — optional HashiCorp Vault KV loading before Nest validates env vars
 - **OpenTelemetry** — optional distributed tracing when OTEL packages are installed/configured
 

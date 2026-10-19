@@ -73,3 +73,12 @@ export function validateOptionalUrlEnv(value: string | undefined, name: string):
   }
   return validateUrlEnv(value, name);
 }
+
+/** Validate a TCP port and return its numeric value. */
+export function validatePortEnv(value: unknown, name = 'PORT', defaultValue = 3001): number {
+  const candidate = value === undefined || value === null || value === '' ? defaultValue : Number(value);
+  if (!Number.isInteger(candidate) || candidate < 1 || candidate > 65_535) {
+    throw new Error(`${name} must be an integer between 1 and 65535`);
+  }
+  return candidate;
+}

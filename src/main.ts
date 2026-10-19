@@ -26,6 +26,7 @@ import { json, urlencoded } from 'express';
 import Redis from 'ioredis';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
 import { validateAllSecrets } from './common/secrets/secret-validator';
+import { validatePortEnv } from './common/utils/config.utils';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
@@ -479,7 +480,7 @@ async function bootstrap() {
 
   app.enableShutdownHooks();
 
-  const port = configService.get<string>('PORT') ?? 3001;
+  const port = validatePortEnv(configService.get('PORT'));
   const server = await app.listen(port);
   server.timeout = SERVER_TIMEOUT_MS;
   logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
