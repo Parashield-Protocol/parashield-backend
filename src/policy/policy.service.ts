@@ -627,8 +627,15 @@ export class PolicyService {
     this.logger.log(`get_active_products: page=${page} limit=${limit}`);
 
     const [dbProducts, total] = await this.prisma.$transaction([
+      // #757 — select only the columns mapProduct/the response actually uses,
+      // instead of fetching full rows on this high-traffic public endpoint.
       this.prisma.product.findMany({
         where: { status: 'ACTIVE' },
+        select: {
+          id: true, name: true, category: true, triggerType: true,
+          threshold: true, comparison: true, coverageMin: true,
+          coverageMax: true, premiumRate: true, maxDuration: true, status: true,
+        },
         take,
         skip,
         orderBy: [{ name: 'asc' }],
@@ -660,12 +667,15 @@ export class PolicyService {
   async getPolicy(policyId: string): Promise<PolicySummary | null> {
     this.logger.log(`get_policy: ${policyId}`);
     // Try database first
+    // #757 — select only what the PolicySummary mapping below reads, instead
+    // of the full row (this runs on every detail view and every SSE heartbeat).
     const dbPolicy = await this.prisma.policy.findUnique({
       where: { id: policyId },
-      include: {
-        _count: {
-          select: { claims: true },
-        },
+      select: {
+        id: true, productId: true, policyholder: true, coverageXlm: true,
+        premiumPaid: true, oracleKey: true, startTime: true, endTime: true,
+        status: true,
+        _count: { select: { claims: true } },
       },
     });
     if (dbPolicy) {

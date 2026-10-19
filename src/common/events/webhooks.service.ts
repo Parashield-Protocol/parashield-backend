@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, OnApplicationShutdown } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
@@ -41,10 +41,17 @@ const IV_BYTES = 12;
 // the sender and HTTP 413 / connection issues on the receiver.
 const MAX_WEBHOOK_PAYLOAD_BYTES = 1_048_576;
 
+// #777 — how long onApplicationShutdown waits for in-flight deliveries to
+// finish before giving up. Deliveries are fired without being awaited by
+// their callers (so webhook delivery never delays the request), so nothing
+// else would otherwise keep them alive past SIGTERM.
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+
 @Injectable()
-export class WebhooksService {
+export class WebhooksService implements OnApplicationShutdown {
   private readonly logger = new Logger(WebhooksService.name);
   private readonly encryptionKey: Buffer | null;
+  private readonly inFlightDeliveries = new Set<Promise<unknown>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -313,7 +320,20 @@ export class WebhooksService {
    *
    * Throws on the last attempt so callers can log the final failure.
    */
+  // #777 — tracks the actual attempt (below) in inFlightDeliveries so
+  // onApplicationShutdown can drain it instead of the process exiting with
+  // the retry loop's sleep/fetch cycle still running.
   private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
+    const attempt = this.deliverWithRetryAttempt(registration, payload);
+    this.inFlightDeliveries.add(attempt);
+    try {
+      await attempt;
+    } finally {
+      this.inFlightDeliveries.delete(attempt);
+    }
+  }
+
+  private async deliverWithRetryAttempt(registration: WebhookRegistration, payload: unknown): Promise<void> {
     let lastError: Error | undefined;
 
     // #719 — Serialize and sign the payload once before the retry loop
@@ -460,5 +480,36 @@ export class WebhooksService {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * #777 — drain in-flight webhook deliveries before the app finishes
+   * shutting down, instead of letting SIGTERM abort them mid-request.
+   * Bounded by WEBHOOK_SHUTDOWN_DRAIN_TIMEOUT_MS so a stuck delivery can't
+   * hang shutdown forever; deliveries still pending at the timeout are
+   * logged (with enough detail to replay manually) rather than retried
+   * automatically — there's no persistent delivery queue to resume them from.
+   */
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    const pending = this.inFlightDeliveries.size;
+    if (pending === 0) return;
+
+    const timeoutMs =
+      this.config.get<number>('WEBHOOK_SHUTDOWN_DRAIN_TIMEOUT_MS') ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
+    this.logger.log(
+      `Draining ${pending} in-flight webhook deliveries (signal: ${signal || 'none'}, timeout: ${timeoutMs}ms)`,
+    );
+
+    const drained = await Promise.race([
+      Promise.allSettled([...this.inFlightDeliveries]).then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    ]);
+
+    if (!drained) {
+      this.logger.warn(
+        `Shutdown drain timed out with ${this.inFlightDeliveries.size} webhook deliveries still in flight; ` +
+        'not retried automatically — check logs above for registration id/url to replay manually.',
+      );
+    }
   }
 }
