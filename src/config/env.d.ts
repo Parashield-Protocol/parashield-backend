@@ -24,6 +24,9 @@ export interface EnvironmentVariables {
   REDIS_STARTUP_INITIAL_DELAY_MS?: string;
   REDIS_STARTUP_MAX_DELAY_MS?: string;
   REDIS_STARTUP_ATTEMPT_TIMEOUT_MS?: string;
+  // JWT `iss` / `aud` claims (defaults in src/auth/jwt.service.ts)
+  JWT_ISSUER?: string;
+  JWT_AUDIENCE?: string;
   ADMIN_API_KEY?: string;
   ORACLE_OPERATOR_API_KEY?: string;
   AVIATIONSTACK_API_KEY?: string;

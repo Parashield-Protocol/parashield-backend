@@ -82,23 +82,102 @@ describe('JwtService', () => {
       }).toThrow(UnauthorizedException);
     });
 
-    // #555 — tokens with wrong issuer or audience must be rejected
-    it('should reject a token signed with a different issuer', () => {
+    // #555 — tokens with wrong issuer or audience must be rejected.
+    // Each case keeps every other claim valid so the rejection is attributable
+    // to the claim under test (a token missing `aud` would otherwise mask a
+    // broken issuer check, and vice versa).
+    describe('iss / aud claim validation', () => {
       const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
-      const token = jwt.sign({ walletAddress, iss: 'wrong-issuer' }, VALID_SECRET, {
-        algorithm: 'HS256',
-        expiresIn: '1h',
-      });
-      expect(() => service.verify(token)).toThrow(UnauthorizedException);
-    });
+      const ISSUER = 'parashield-api';
+      const AUDIENCE = 'parashield-clients';
 
-    it('should reject a token signed with a different audience', () => {
-      const walletAddress = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
-      const token = jwt.sign({ walletAddress, aud: 'wrong-audience' }, VALID_SECRET, {
-        algorithm: 'HS256',
-        expiresIn: '1h',
+      const mint = (claims: { iss?: string; aud?: string; type?: string; family?: string; jti?: string }) =>
+        jwt.sign({ walletAddress, type: 'access', ...claims }, VALID_SECRET, {
+          algorithm: 'HS256',
+          expiresIn: '1h',
+        });
+
+      it('embeds iss and aud in every issued token', () => {
+        for (const token of [
+          service.sign(walletAddress),
+          service.signWithRole(walletAddress, 'operator'),
+          service.signRefresh(walletAddress),
+        ]) {
+          const decoded = jwt.decode(token) as jwt.JwtPayload;
+          expect(decoded.iss).toBe(ISSUER);
+          expect(decoded.aud).toBe(AUDIENCE);
+        }
       });
-      expect(() => service.verify(token)).toThrow(UnauthorizedException);
+
+      it('accepts a token with the correct iss and aud', () => {
+        const token = mint({ iss: ISSUER, aud: AUDIENCE });
+        expect(service.verify(token).walletAddress).toBe(walletAddress);
+      });
+
+      it('rejects a token with the correct aud but a different issuer', () => {
+        const token = mint({ iss: 'other-service', aud: AUDIENCE });
+        expect(() => service.verify(token)).toThrow(UnauthorizedException);
+        expect(() => service.verify(token)).toThrow('Invalid token');
+      });
+
+      it('rejects a token with the correct iss but a different audience', () => {
+        const token = mint({ iss: ISSUER, aud: 'other-service-clients' });
+        expect(() => service.verify(token)).toThrow(UnauthorizedException);
+        expect(() => service.verify(token)).toThrow('Invalid token');
+      });
+
+      it('rejects a token missing the iss claim', () => {
+        const token = mint({ aud: AUDIENCE });
+        expect(() => service.verify(token)).toThrow(UnauthorizedException);
+      });
+
+      it('rejects a token missing the aud claim', () => {
+        const token = mint({ iss: ISSUER });
+        expect(() => service.verify(token)).toThrow(UnauthorizedException);
+      });
+
+      it('rejects a token missing both iss and aud', () => {
+        const token = mint({});
+        expect(() => service.verify(token)).toThrow(UnauthorizedException);
+      });
+
+      it('verifyAsync rejects a token with a wrong audience', async () => {
+        const token = mint({ iss: ISSUER, aud: 'other-service-clients' });
+        await expect(service.verifyAsync(token)).rejects.toThrow(UnauthorizedException);
+      });
+
+      it('rotateRefresh rejects a refresh token with a wrong issuer or audience', async () => {
+        const base = { type: 'refresh', family: 'fam-1', jti: 'jti-1' };
+        await expect(
+          service.rotateRefresh(mint({ ...base, iss: 'other-service', aud: AUDIENCE })),
+        ).rejects.toThrow('Invalid refresh token');
+        await expect(
+          service.rotateRefresh(mint({ ...base, iss: ISSUER, aud: 'other-service-clients' })),
+        ).rejects.toThrow('Invalid refresh token');
+        await expect(service.rotateRefresh(mint({ ...base }))).rejects.toThrow('Invalid refresh token');
+      });
+
+      it('honours JWT_ISSUER / JWT_AUDIENCE and rejects tokens minted for the defaults', () => {
+        const config = {
+          get: jest.fn((key: string) => {
+            if (key === 'JWT_SECRET') return VALID_SECRET;
+            if (key === 'JWT_ISSUER') return 'parashield-api-staging';
+            if (key === 'JWT_AUDIENCE') return 'parashield-staging-clients';
+            return undefined;
+          }),
+        };
+        const custom = new JwtService(config as any, redisStub() as any);
+
+        const token = custom.sign(walletAddress);
+        const decoded = jwt.decode(token) as jwt.JwtPayload;
+        expect(decoded.iss).toBe('parashield-api-staging');
+        expect(decoded.aud).toBe('parashield-staging-clients');
+        expect(custom.verify(token).walletAddress).toBe(walletAddress);
+
+        // Same secret, different service identity: tokens must not cross over.
+        expect(() => custom.verify(service.sign(walletAddress))).toThrow(UnauthorizedException);
+        expect(() => service.verify(token)).toThrow(UnauthorizedException);
+      });
     });
 
     // #182 — the whole point of a 7-day expiry is that expired tokens are

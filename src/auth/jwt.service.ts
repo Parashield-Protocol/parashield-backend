@@ -33,8 +33,11 @@ export class JwtService {
   private readonly logger = new Logger(JwtService.name);
   private readonly secret: string;
   private readonly tokenExpiry = "1h";
-  private readonly issuer = "parashield-api";
-  private readonly audience = "parashield-clients";
+  // Tokens are bound to this service via `iss` and `aud`. Both are required on
+  // every verification so a token minted for another service sharing the same
+  // secret (or the same signing infrastructure) cannot be replayed here.
+  private readonly issuer: string;
+  private readonly audience: string;
 
   constructor(private readonly config: ConfigService, @Inject('REDIS_CLIENT') private readonly redis: Redis) {
     const secret = config.get<string>("JWT_SECRET");
@@ -44,6 +47,20 @@ export class JwtService {
       throw new Error(validation.error);
     }
     this.secret = secret!;
+    this.issuer = config.get<string>("JWT_ISSUER")?.trim() || "parashield-api";
+    this.audience = config.get<string>("JWT_AUDIENCE")?.trim() || "parashield-clients";
+  }
+
+  /**
+   * Options shared by every verification path. jsonwebtoken rejects a token
+   * whose `iss`/`aud` is missing or does not match when these are set.
+   */
+  private get verifyOptions(): jwt.VerifyOptions {
+    return {
+      algorithms: ['HS256'],
+      issuer: this.issuer,
+      audience: this.audience,
+    };
   }
 
   get expiresIn(): string {
@@ -96,11 +113,10 @@ export class JwtService {
       // falls back to trusting the `alg` header in the token itself, which opens
       // the door to algorithm-confusion attacks (e.g. `alg: none`, or a token
       // re-signed with RS256 using the HMAC secret as the public key).
-      const decoded = jwt.verify(token, this.secret, {
-        algorithms: ['HS256'],
-        issuer: this.issuer,
-        audience: this.audience,
-      }) as JwtPayload & { jti?: string; type?: string };
+      const decoded = jwt.verify(token, this.secret, this.verifyOptions) as JwtPayload & {
+        jti?: string;
+        type?: string;
+      };
 
       if (decoded.type === "refresh") {
         throw new UnauthorizedException("Cannot use refresh token as access token");
@@ -178,11 +194,7 @@ export class JwtService {
   async rotateRefresh(oldToken: string): Promise<{ accessToken: string; refreshToken: string }> {
     let decoded: JwtPayload & { jti?: string };
     try {
-      decoded = jwt.verify(oldToken, this.secret, {
-        algorithms: ['HS256'],
-        issuer: this.issuer,
-        audience: this.audience,
-      }) as JwtPayload & { jti?: string };
+      decoded = jwt.verify(oldToken, this.secret, this.verifyOptions) as JwtPayload & { jti?: string };
     } catch {
       throw new UnauthorizedException("Invalid refresh token");
     }
