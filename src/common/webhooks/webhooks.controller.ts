@@ -11,6 +11,7 @@ import {
   PolicyStatusChangePayloadDto,
   ClaimStatusChangePayloadDto,
 } from './dto/webhook.dto';
+import { validateWebhookEndpoint } from './ssrf.validator';
 
 /**
  * Registrations are cheap to create but expensive to serve — every status
@@ -59,6 +60,7 @@ export class WebhooksController {
   @ApiErrorResponse(400, 'Request body failed validation (missing url, unsupported event type, etc.).', undefined, 'url must be a URL address; events must contain only supported event types')
   @ApiErrorResponse(429, 'Rate limit exceeded — webhook registration allows 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async register(@Body() dto: RegisterWebhookDto) {
+    validateWebhookEndpoint(dto.url);
     const result = await this.webhooks.registerWebhook({
       url: dto.url,
       events: dto.events,
@@ -86,8 +88,17 @@ export class WebhooksController {
     },
   })
   async list() {
-    // Never echo the HMAC signing secret back to API callers.
+    // #782 — never echo the full HMAC signing secret back to API callers.
+    // Show only the last 4 characters as a hint so the subscriber can tell
+    // they got the right one without exposing it; the full secret is only
+    // ever returned (if at all) at creation time.
     const registrations = await this.webhooks.getRegistrations();
-    return { success: true, data: registrations.map(({ secret: _secret, ...rest }) => rest) };
+    return {
+      success: true,
+      data: registrations.map(({ secret, ...rest }) => ({
+        ...rest,
+        ...(secret ? { secretMasked: `****${secret.slice(-4)}` } : {}),
+      })),
+    };
   }
 }

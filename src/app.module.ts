@@ -18,6 +18,9 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
 import { WebhooksModule } from './common/webhooks/webhooks.module';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
+import { validateAllSecrets } from './common/secrets/secret-validator';
+import { OpenTelemetryShutdownHook } from './common/telemetry/opentelemetry';
+import { validatePortEnv } from './common/utils/config.utils';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -27,6 +30,12 @@ function validateConfig(config: Record<string, unknown>) {
   const errors: string[] = [];
   const logger = new Logger('ConfigValidation');
 
+  try {
+    config['PORT'] = validatePortEnv(config['PORT']);
+  } catch (err) {
+    errors.push((err as Error).message);
+  }
+
   // #343 — not a hard requirement (a localhost fallback is fine for local
   // dev), but the ThrottlerModule storage below falls back to it silently,
   // which is easy to miss in a real deployment that meant to point at a
@@ -35,9 +44,44 @@ function validateConfig(config: Record<string, unknown>) {
     logger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
   }
 
-  const jwtSecretValidation = validateJwtSecret(config['JWT_SECRET'] as string | undefined);
+  // #710 — Validate Redis startup-retry tuning. All optional; defaults live in
+  // src/redis/redis-startup.ts and are documented in .env.example / README.
+  const redisRetryBounds: Array<{ key: string; min: number; max: number }> = [
+    { key: 'REDIS_STARTUP_MAX_ATTEMPTS', min: 1, max: 100 },
+    { key: 'REDIS_STARTUP_INITIAL_DELAY_MS', min: 0, max: 60000 },
+    { key: 'REDIS_STARTUP_MAX_DELAY_MS', min: 0, max: 300000 },
+    { key: 'REDIS_STARTUP_ATTEMPT_TIMEOUT_MS', min: 1, max: 120000 },
+  ];
+  for (const { key, min, max } of redisRetryBounds) {
+    const raw = config[key] as string | undefined;
+    if (raw !== undefined && raw !== '') {
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+        errors.push(`${key} must be an integer between ${min} and ${max}`);
+      }
+    }
+  }
+
+  // #716 — Validate all secrets for length, format, entropy, and placeholders
+  const nodeEnv = (config['NODE_ENV'] as string) || process.env.NODE_ENV || 'development';
+  try {
+    validateAllSecrets(config, nodeEnv);
+  } catch (err) {
+    errors.push((err as Error).message);
+  }
+
+  const jwtSecretValidation = validateJwtSecret(config['JWT_SECRET'] as string | undefined, nodeEnv);
   if (!jwtSecretValidation.valid) {
     errors.push(jwtSecretValidation.error!);
+  }
+
+  // #681 — Validate AUTH_NONCE_TTL_SECONDS if configured
+  const nonceTtl = config['AUTH_NONCE_TTL_SECONDS'] as string | undefined;
+  if (nonceTtl !== undefined && nonceTtl !== '') {
+    const parsed = Number(nonceTtl);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 86400) {
+      errors.push('AUTH_NONCE_TTL_SECONDS must be a positive integer between 1 and 86400');
+    }
   }
 
   if (!config['DATABASE_URL']) {
@@ -49,6 +93,57 @@ function validateConfig(config: Record<string, unknown>) {
       errors.push('DATABASE_URL must be a valid PostgreSQL connection string (postgresql:// or postgres://)');
     }
   }
+
+  // #676 — Validate Prisma connection pool tuning environment variables
+  const connLimit = config['DATABASE_CONNECTION_LIMIT'] as string | undefined;
+  if (connLimit !== undefined && connLimit !== '') {
+    const parsed = Number(connLimit);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 500) {
+      errors.push('DATABASE_CONNECTION_LIMIT must be a positive integer between 1 and 500');
+    }
+  }
+
+  const poolTimeout = config['DATABASE_POOL_TIMEOUT'] as string | undefined;
+  if (poolTimeout !== undefined && poolTimeout !== '') {
+    const parsed = Number(poolTimeout);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 300) {
+      errors.push('DATABASE_POOL_TIMEOUT must be a positive integer between 1 and 300');
+    }
+  }
+
+  const connectTimeout = config['DATABASE_CONNECT_TIMEOUT'] as string | undefined;
+  if (connectTimeout !== undefined && connectTimeout !== '') {
+    const parsed = Number(connectTimeout);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 120) {
+      errors.push('DATABASE_CONNECT_TIMEOUT must be a positive integer between 1 and 120');
+    }
+  }
+
+  // #686 — Validate oracle batching environment variables
+  const oracleBatchSize = config['ORACLE_BATCH_SIZE'] as string | undefined;
+  if (oracleBatchSize !== undefined && oracleBatchSize !== '') {
+    const parsed = Number(oracleBatchSize);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 1000) {
+      errors.push('ORACLE_BATCH_SIZE must be a positive integer between 1 and 1000');
+    }
+  }
+
+  const oracleFlushInterval = config['ORACLE_FLUSH_INTERVAL_MS'] as string | undefined;
+  if (oracleFlushInterval !== undefined && oracleFlushInterval !== '') {
+    const parsed = Number(oracleFlushInterval);
+    if (!Number.isInteger(parsed) || parsed < 10 || parsed > 60000) {
+      errors.push('ORACLE_FLUSH_INTERVAL_MS must be an integer between 10 and 60000');
+    }
+  }
+
+  const oracleMaxBuffer = config['ORACLE_BUFFER_MAX_SIZE'] as string | undefined;
+  if (oracleMaxBuffer !== undefined && oracleMaxBuffer !== '') {
+    const parsed = Number(oracleMaxBuffer);
+    if (!Number.isInteger(parsed) || parsed < 10 || parsed > 10000) {
+      errors.push('ORACLE_BUFFER_MAX_SIZE must be an integer between 10 and 10000');
+    }
+  }
+
 
   if (!config['STELLAR_RPC_URL']) {
     errors.push('STELLAR_RPC_URL is required');
@@ -141,6 +236,7 @@ function validateConfig(config: Record<string, unknown>) {
       provide: APP_INTERCEPTOR,
       useClass: VersioningInterceptor,
     },
+    OpenTelemetryShutdownHook,
   ],
 })
 export class AppModule {}

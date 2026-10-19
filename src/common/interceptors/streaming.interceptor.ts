@@ -209,6 +209,9 @@ export class StreamingInterceptor implements NestInterceptor {
           const items = envelope['data'] as unknown[];
 
           response.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+          // #702 — set SSE-compatible headers for streaming responses
+          response.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+          response.setHeader('Connection', 'keep-alive');
 
           passThrough = new PassThrough();
 

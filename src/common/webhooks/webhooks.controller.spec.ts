@@ -84,6 +84,18 @@ describe('WebhooksController', () => {
       expect(webhooks.registerWebhook).toHaveBeenCalledWith(body);
     });
 
+    it('#732 — rejects registration pointing to private IP or localhost (SSRF prevention)', async () => {
+      const { controller, webhooks } = build();
+
+      await expect(
+        controller.register({ ...body, url: 'https://127.0.0.1/hook' }),
+      ).rejects.toThrow();
+      await expect(
+        controller.register({ ...body, url: 'https://169.254.169.254/latest/meta-data' }),
+      ).rejects.toThrow();
+      expect(webhooks.registerWebhook).not.toHaveBeenCalled();
+    });
+
     it('is throttled to 10 registrations per 60 s', async () => {
       const guard = await buildGuard(new InMemoryThrottlerStorage());
       const context = contextFor('register');
@@ -124,15 +136,35 @@ describe('WebhooksController', () => {
       expect(limit).toBeUndefined();
     });
 
-    it('never echoes stored signing secrets', async () => {
+    it('#782 — never echoes the full signing secret in the list response', async () => {
       const { controller } = build();
 
       const result = await controller.list();
 
-      expect(result).toEqual({
-        success: true,
-        data: [expect.not.objectContaining({ secret: expect.anything() })],
-      });
+      expect(result.data[0]).not.toHaveProperty('secret');
+    });
+
+    it('#782 — shows last 4 characters of the secret as a masked hint', async () => {
+      const { controller } = build();
+
+      const result = await controller.list();
+
+      // stored secret is 'topsecret' → last 4 chars are 'cret'
+      expect(result.data[0]).toHaveProperty('secretMasked', '****cret');
+    });
+
+    it('#782 — omits secretMasked entirely when the registration has no secret', async () => {
+      const webhooks = {
+        registerWebhook: jest.fn(),
+        getRegistrations: jest.fn().mockResolvedValue([
+          { id: 'wh-2', url: 'https://example.com/hook', secret: undefined, events: [], isActive: true, createdAt: new Date() },
+        ]),
+      };
+      const controller = new WebhooksController(webhooks as any, {} as any);
+
+      const result = await controller.list();
+
+      expect(result.data[0]).not.toHaveProperty('secretMasked');
     });
   });
 });

@@ -1,4 +1,5 @@
 import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { CacheControlInterceptor } from '../common/interceptors/cache-control.interceptor';
 import { Throttle } from '@nestjs/throttler';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
 import {
@@ -22,6 +23,7 @@ import { ErrorCode } from '../common/errors/error-codes';
 
 @ApiTags('claims')
 @Controller('claims')
+@UseInterceptors(CacheControlInterceptor)
 @ApiExtraModels(ResponseDto, PaginatedResponseDto)
 export class ClaimsController {
   constructor(private readonly claims: ClaimsService) {}
@@ -61,20 +63,38 @@ export class ClaimsController {
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Cursor pointing to the ID of the last item from the previous page for keyset pagination (#749)',
+    example: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
+  })
+  @ApiQuery({
     name: 'stream',
     required: false,
     description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
     example: 'true',
   })
-  @ApiResponse({ status: 200, description: 'Returns paginated claim history — { success, data, total, page, limit }', schema: { $ref: getSchemaPath(PaginatedResponseDto) } })
+  @ApiResponse({ status: 200, description: 'Returns paginated claim history — { success, data, total, page, limit, nextCursor, hasMore }', schema: { $ref: getSchemaPath(PaginatedResponseDto) } })
   @ApiErrorResponse(403, 'Wallet query parameter does not match the authenticated wallet.', undefined, 'Wallet address does not match authenticated user')
   async getClaimsByWalletQuery(
     @Query('wallet') wallet: string,
-    @Query('page') page: string,
-    @Query('limit') limit: string,
-    @Req() req: AuthenticatedRequest,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursorOrReq?: string | AuthenticatedRequest,
+    @Req() maybeReq?: AuthenticatedRequest,
   ) {
-    const authedWallet = req.user?.walletAddress || req.wallet;
+    let cursor: string | undefined;
+    let req: AuthenticatedRequest;
+
+    if (cursorOrReq && typeof cursorOrReq === 'object') {
+      req = cursorOrReq as AuthenticatedRequest;
+      cursor = undefined;
+    } else {
+      cursor = typeof cursorOrReq === 'string' ? cursorOrReq : undefined;
+      req = maybeReq!;
+    }
+
+    const authedWallet = req?.user?.walletAddress || req?.wallet;
     if (!authedWallet) {
       throw new UnauthorizedException('Not authenticated');
     }
@@ -82,11 +102,13 @@ export class ClaimsController {
     if (targetWallet !== authedWallet) {
       throw new ForbiddenException({ message: 'Wallet address does not match authenticated user', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
-    const result = await this.claims.getClaimsByWallet(
-      targetWallet,
-      page ? parseInt(page, 10) || 1 : 1,
-      limit ? parseInt(limit, 10) || 20 : 20,
-    );
+    const parsedPage = page ? parseInt(page, 10) || 1 : 1;
+    const parsedLimit = limit ? parseInt(limit, 10) || 20 : 20;
+
+    const result = cursor !== undefined
+      ? await this.claims.getClaimsByWallet(targetWallet, parsedPage, parsedLimit, cursor)
+      : await this.claims.getClaimsByWallet(targetWallet, parsedPage, parsedLimit);
+
     return { success: true, ...result };
   }
 
@@ -102,6 +124,22 @@ export class ClaimsController {
   async autoProcess(@Param('policyId', ParseUUIDPipe) policyId: string) {
     const result = await this.claims.autoProcess(policyId);
     return { success: true, data: { result } };
+  }
+
+  /** GET /api/v1/claims/policy/:policyId/state — get derived policy state (#714) */
+  @Get('policy/:policyId/state')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Get cached derived policy state for claim evaluation' })
+  @ApiParam({ name: 'policyId', description: 'Policy UUID' })
+  @ApiResponse({ status: 200, description: 'Returns cached derived policy state', schema: { $ref: getSchemaPath(ResponseDto) } })
+  @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')
+  async getPolicyDerivedState(@Param('policyId', ParseUUIDPipe) policyId: string) {
+    const state = await this.claims.getDerivedPolicyState(policyId);
+    if (!state) {
+      throw new NotFoundException({ message: 'Policy not found', errorCode: ErrorCode.CLAIM_POLICY_NOT_FOUND });
+    }
+    return { success: true, data: state };
   }
 
   /** GET /api/v1/claims/:id — get claim status by ID (owner only) */
@@ -135,6 +173,12 @@ export class ClaimsController {
   @ApiQuery({ name: 'page', required: false, description: 'Page number (default 1)', example: 1 })
   @ApiQuery({ name: 'limit', required: false, description: 'Items per page, max 100 (default 20)', example: 20 })
   @ApiQuery({
+    name: 'cursor',
+    required: false,
+    description: 'Cursor pointing to the ID of the last item from the previous page for keyset pagination (#749)',
+    example: 'd290f1ee-6c54-4b01-90e6-d701748f0851',
+  })
+  @ApiQuery({
     name: 'stream',
     required: false,
     description: "Set to 'true' to receive the data array as NDJSON (one item per line). Alternatively send Accept: application/x-ndjson. Pagination metadata available in X-Total-Count, X-Page, X-Limit headers.",
@@ -142,16 +186,28 @@ export class ClaimsController {
   })
   @ApiResponse({
     status: 200,
-    description: 'Returns paginated claim history — { success, data, total, page, limit }',
+    description: 'Returns paginated claim history — { success, data, total, page, limit, nextCursor, hasMore }',
     schema: { $ref: getSchemaPath(PaginatedResponseDto) },
   })
   async getClaimHistory(
     @Param('wallet') wallet: string,
-    @Query('page') page: string,
-    @Query('limit') limit: string,
-    @Req() req: AuthenticatedRequest,
+    @Query('page') page?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursorOrReq?: string | AuthenticatedRequest,
+    @Req() maybeReq?: AuthenticatedRequest,
   ) {
-    const authedWallet = req.user?.walletAddress || req.wallet;
+    let cursor: string | undefined;
+    let req: AuthenticatedRequest;
+
+    if (cursorOrReq && typeof cursorOrReq === 'object') {
+      req = cursorOrReq as AuthenticatedRequest;
+      cursor = undefined;
+    } else {
+      cursor = typeof cursorOrReq === 'string' ? cursorOrReq : undefined;
+      req = maybeReq!;
+    }
+
+    const authedWallet = req?.user?.walletAddress || req?.wallet;
     if (!authedWallet) {
       throw new UnauthorizedException('Not authenticated');
     }
@@ -159,11 +215,13 @@ export class ClaimsController {
     if (targetWallet !== authedWallet) {
       throw new ForbiddenException({ message: 'Cannot read claims for another wallet', errorCode: ErrorCode.CLAIM_WALLET_MISMATCH });
     }
-    const result = await this.claims.getClaimsByWallet(
-      targetWallet,
-      page ? parseInt(page, 10) || 1 : 1,
-      limit ? parseInt(limit, 10) || 20 : 20,
-    );
+    const parsedPage = page ? parseInt(page, 10) || 1 : 1;
+    const parsedLimit = limit ? parseInt(limit, 10) || 20 : 20;
+
+    const result = cursor !== undefined
+      ? await this.claims.getClaimsByWallet(targetWallet, parsedPage, parsedLimit, cursor)
+      : await this.claims.getClaimsByWallet(targetWallet, parsedPage, parsedLimit);
+
     return { success: true, ...result };
   }
 }

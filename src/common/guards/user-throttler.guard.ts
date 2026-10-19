@@ -6,6 +6,7 @@ import {
   ThrottlerStorage,
   InjectThrottlerOptions,
   InjectThrottlerStorage,
+  ThrottlerRequest,
 } from '@nestjs/throttler';
 import { JwtService } from '../../auth/jwt.service';
 
@@ -30,6 +31,8 @@ import { JwtService } from '../../auth/jwt.service';
  */
 @Injectable()
 export class UserThrottlerGuard extends ThrottlerGuard {
+  private static readonly AUTHENTICATED_LIMIT_MULTIPLIER = 5;
+
   constructor(
     @InjectThrottlerOptions() options: ThrottlerModuleOptions,
     @InjectThrottlerStorage() storageService: ThrottlerStorage,
@@ -58,5 +61,23 @@ export class UserThrottlerGuard extends ThrottlerGuard {
     }
 
     return super.getTracker(req);
+  }
+
+  /**
+   * Anonymous requests retain the configured IP quota. Authenticated requests
+   * receive a separate, per-wallet bucket with a five-times-higher quota.
+   */
+  protected async handleRequest(requestProps: ThrottlerRequest): Promise<boolean> {
+    const { req } = this.getRequestResponse(requestProps.context);
+    const tracker = await this.getTracker(req);
+    const authenticated = tracker.startsWith('user:');
+
+    return super.handleRequest({
+      ...requestProps,
+      limit: authenticated
+        ? requestProps.limit * UserThrottlerGuard.AUTHENTICATED_LIMIT_MULTIPLIER
+        : requestProps.limit,
+      getTracker: async () => tracker,
+    });
   }
 }

@@ -21,7 +21,11 @@ Supporting infrastructure:
 - **PrismaService** — PostgreSQL integration for policy and oracle data storage
 - **AuthModule** — Stellar wallet signature verification + JWT issuance
 - **LoggingInterceptor** — Request/response duration logging
-- **ThrottleGuard** — IP-based rate limiting (60 req/min)
+- **UserThrottlerGuard** — anonymous callers use per-IP rate limiting (60 req/min);
+  authenticated callers use isolated per-wallet buckets with a 5× higher quota
+
+Server configuration validates `PORT` during startup. It must be an integer in
+the TCP port range `1`–`65535`; when omitted, the API uses port `3001`.
 - **Vault bootstrap** — optional HashiCorp Vault KV loading before Nest validates env vars
 - **OpenTelemetry** — optional distributed tracing when OTEL packages are installed/configured
 
@@ -63,6 +67,8 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | `GET` | `/api/v1/products` | List all active insurance products |
 | `GET` | `/api/v1/policies/me?wallet=<address>` | Get policies for a wallet address |
 | `GET` | `/api/v1/policies/:id` | Get a single policy by UUID |
+| `PATCH` | `/api/v1/policies/:id` | Update a policy (e.g. change oracleKey, emits status change event) |
+| `POST` | `/api/v1/policies/:id/cancel` | Cancel an active policy |
 | `POST` | `/api/v1/policies/buy` | Calculate premium and get a purchase quote |
 
 ### Claims
@@ -130,6 +136,26 @@ npm run start:prod
 
 ---
 
+## API versioning (#713)
+
+Every response carries an `X-API-Version` header advertising the semantic
+version that served it (`v1` → `1.0.0`, `v2` → `2.0.0`), including error
+responses, streamed responses (SSE/NDJSON) and responses that never reach a
+route handler (CORS preflights, request timeouts).
+
+- The version is taken from the route's `vN` segment (`/api/v1/...`), falling
+  back to a request `x-api-version` header, then to `v1`.
+- Requests for an unknown version (`/api/v3/...`) are rejected with `400`.
+- `v1` responses also include `Deprecation: true` and
+  `Link: </api/v2>; rel="successor"`.
+- The header is exposed via CORS so browser clients can read it.
+
+Resolution lives in `src/common/versioning/api-version.ts` and is applied by the
+versioning interceptor (success paths), the global exception filter (error
+paths) and an early middleware (everything else).
+
+---
+
 ## CORS configuration
 
 CORS is enabled in `src/main.ts` and controlled entirely via environment variables (see `.env.example`):
@@ -154,31 +180,137 @@ Multiple origins are comma-separated. The server logs the active origin list at 
 
 ---
 
-## Error handling
+## Database Connection Pool Sizing (#676)
 
-All error responses follow the same envelope shape regardless of endpoint:
+Prisma connection pool sizing and timeouts are configurable via environment variables or directly as query parameters on `DATABASE_URL`.
+
+| Environment Variable | Default | Description | Valid Range |
+|---|---|---|---|
+| `DATABASE_CONNECTION_LIMIT` | `10` | Maximum connections in the pool per application instance | 1 – 500 |
+| `DATABASE_POOL_TIMEOUT` | `10` | Seconds a query waits for an available pool connection before throwing a timeout error | 1 – 300 |
+| `DATABASE_CONNECT_TIMEOUT` | `5` | Seconds establishing a new TCP connection to PostgreSQL may take before timing out | 1 – 120 |
+
+### Precedence
+
+Explicit query parameters in `DATABASE_URL` (e.g. `postgresql://user:pass@host:5432/db?connection_limit=25&pool_timeout=15`) always take precedence over the environment variables. Environment variables are used only when the corresponding query parameter is not present in the URL.
+
+Startup validation verifies all values are positive integers within sane bounds and fails fast with a clear error on misconfiguration.
+
+### Sizing Guidance
+
+When running multiple backend instances (e.g., in Kubernetes, ECS, or behind a load balancer), ensure the aggregate connections from all instances do not exceed PostgreSQL's `max_connections`:
+
+$$\text{Total Connections} = (\text{Number of Instances} \times \text{DATABASE\_CONNECTION\_LIMIT}) + \text{Reserved Connections}$$
+
+**Rule**: $\text{Total Connections} < \text{PostgreSQL } \texttt{max\_connections}$
+
+- **Example 1 (Default)**: 5 instances $\times$ 10 connections = 50 connections. Fits comfortably within a default PostgreSQL `max_connections = 100` setting, leaving 50 connections for database migrations, administrative tasks, and replicas.
+- **Example 2 (High Throughput)**: 10 instances $\times$ 25 connections = 250 connections. Requires PostgreSQL `max_connections` configured to $\ge 300$.
+
+### Pool Monitoring & Health Checks
+
+Pool utilization is monitored continuously via `/api/v1/health`:
+- Exposes `active`, `idle`, `waiting`, `max`, `poolTimeout`, and `connectTimeout`.
+- Flags health as degraded when connection utilization reaches `DB_POOL_EXHAUSTION_WARN_PERCENT` (default 90%) to detect exhaustion before queries queue or fail.
+- Exposes genuine Prisma runtime engine metrics when supported.
+- The effective pool configuration is logged at server startup.
+
+---
+
+## Oracle Reading Batch Persistence (#686)
+
+To minimize database round-trips when storing high-frequency oracle readings, `OracleService` batches database inserts using multi-query transactions and a bounded in-memory buffer.
+
+| Environment Variable | Default | Description | Valid Range |
+|---|---|---|---|
+| `ORACLE_BATCH_SIZE` | `50` | Maximum number of readings written in a single multi-row database transaction | 1 – 1000 |
+| `ORACLE_FLUSH_INTERVAL_MS` | `1000` | Maximum time in milliseconds before pending buffered readings are flushed | 10 – 60000 |
+| `ORACLE_BUFFER_MAX_SIZE` | `1000` | Maximum in-memory buffer capacity before backpressure is applied | 10 – 10000 |
+
+Setting `ORACLE_BATCH_SIZE=1` disables buffering and executes immediate 1:1 inserts matching legacy behavior. Graceful shutdown hooks flush any remaining buffered readings before process termination.
+
+### Load Testing
+
+A k6 stress test script is provided in `loadtest/k6/pool-stress.js` to evaluate pool behavior and latency under concurrent load:
+
+```bash
+# Run pool stress test with k6
+npm run test:load:pool
+
+# Or with custom target URL and thresholds
+BASE_URL=http://localhost:3001/api/v1 k6 run loadtest/k6/pool-stress.js
+```
+
+---
+
+## Stellar Horizon timeouts & retries
+
+Horizon requests made by `StellarService` (currently the account-balance fallback in `getAccountBalance`) go through a resilience wrapper defined in `src/stellar/horizon-resilience.ts`, so a transient network issue no longer surfaces as an unhandled exception or a 500.
+
+**Retry with exponential backoff.** Each attempt has a 10s timeout (callers may pass a shorter one). Up to 3 attempts are made, with backoff of 500ms → 1s (capped at 5s); rate-limited responses (429) back off longer, 5s → 10s (capped at 30s).
+
+| Failure | Retried? |
+|---|---|
+| Timeout (per-attempt deadline, `ETIMEDOUT`, `ECONNABORTED`) | Yes |
+| Network errors (`ECONNRESET`, `ECONNREFUSED`, `EAI_AGAIN`, …) | Yes |
+| `429` / `5xx` responses | Yes |
+| Other `4xx` (e.g. `404` account not found) | No — returned to the caller immediately |
+
+**Typed errors.** When every attempt times out, the service throws `HorizonTimeoutError` (HTTP 504, `errorCode: HORIZON_TIMEOUT`). Non-timeout failures that exhaust their retries rethrow the original error.
+
+**Timeout circuit breaker.** After 3 consecutive calls exhaust their retries on timeouts, the circuit opens and Horizon calls fail fast with `HorizonUnavailableError` (HTTP 503, `errorCode: HORIZON_UNAVAILABLE`) for 30s without touching the network. After that window, a single probe request is allowed through: any response within the deadline closes the circuit, another timeout reopens it.
+
+**Health checks** make a single Horizon attempt (no retries) with the 3s health-check timeout, so a slow Horizon can't multiply probe latency and trigger pod restarts.
+
+---
+
+## Error handling (RFC 7807 Problem Details)
+
+All error responses use `Content-Type: application/problem+json` conforming to [RFC 7807](https://datatracker.ietf.org/doc/html/rfc7807). Legacy fields remain present in the response body for backward compatibility, but are deprecated:
 
 ```json
 {
+  "type": "https://parashield.io/errors/not-found",
+  "title": "Not Found",
+  "status": 404,
+  "detail": "Policy not found",
+  "instance": "/api/v1/policies/abc123",
   "success": false,
   "errorCode": "NOT_FOUND",
   "error": "Policy not found",
+  "message": "Policy not found",
   "statusCode": 404,
   "path": "/api/v1/policies/abc123",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
 ```
 
+### RFC 7807 Members
+
+| Member | Type | Description |
+|---|---|---|
+| `type` | `string (URI)` | Stable URI reference identifying the error type. |
+| `title` | `string` | Short human-readable summary of problem type. |
+| `status` | `number` | HTTP status code. |
+| `detail` | `string` | Human-readable explanation specific to this occurrence. |
+| `instance` | `string (URI)` | Request path that generated the error. |
+| `errors` | `array` | (Extension) Validation error details on 400 validation failures. |
+| `correlationId` | `string` | (Extension) Request correlation ID when header is provided. |
+
+### Legacy Fields (Deprecated)
+
 | Field | Type | Description |
 |---|---|---|
-| `success` | `boolean` | Always `false` for errors. |
-| `errorCode` | `string` | Stable machine-readable code (see table below). Key off this, not `error`. |
-| `error` | `string` \| `object` | Human-readable message, or NestJS validation error details for 400s. May change between versions. |
-| `statusCode` | `number` | Mirrors the HTTP status code. |
-| `path` | `string` | The request path that produced the error. |
+| `success` | `boolean` | Always `false` for errors (Deprecated: use `status`). |
+| `errorCode` | `string` | Stable machine-readable code (Deprecated: use `type`). |
+| `error` | `string` \| `object` | Error message string (Deprecated: use `detail`). |
+| `message` | `string` | Human-readable message (Deprecated: use `detail`). |
+| `statusCode` | `number` | Mirrors the HTTP status code (Deprecated: use `status`). |
+| `path` | `string` | The request path (Deprecated: use `instance`). |
 | `timestamp` | `string` | ISO-8601 UTC timestamp. |
 
 ### Error codes
+
 
 | `errorCode` | HTTP status | When it occurs |
 |---|---|---|
@@ -187,9 +319,12 @@ All error responses follow the same envelope shape regardless of endpoint:
 | `FORBIDDEN` | 403 | Authenticated but not allowed (e.g. accessing another wallet's policy, calling an operator-only endpoint without an API key). |
 | `NOT_FOUND` | 404 | Resource does not exist (policy ID, claim ID, oracle key, etc.). |
 | `CONFLICT` | 409 | Duplicate resource (e.g. submitting a claim when one is already active for the same policy). |
+| `CLAIM_CONCURRENT_MODIFICATION` | 409 | The policy changed (or another claim was filed) while a claim was being submitted. Re-read the policy and retry. |
 | `GONE` | 410 | Resource existed but is no longer accessible (e.g. an expired policy). |
 | `TOO_MANY_REQUESTS` | 429 | Rate limit exceeded (60 requests per minute per IP). Back off and retry after the `Retry-After` header value. |
 | `SERVICE_UNAVAILABLE` | 503 | Downstream dependency unavailable (database, Redis, Stellar RPC). |
+| `HORIZON_TIMEOUT` | 504 | Stellar Horizon did not respond in time after all retry attempts. Transient — safe to retry. See [Stellar Horizon timeouts](#stellar-horizon-timeouts--retries). |
+| `HORIZON_UNAVAILABLE` | 503 | The Horizon circuit breaker is open after repeated timeouts, so the request was not sent. Retry after ~30s. |
 | `BAD_REQUEST` | 400 | Generic bad request not covered by validation (malformed path param, unsupported value, etc.). |
 | `INTERNAL_ERROR` | 500 | Unexpected server-side failure. The error is logged server-side; the response body intentionally omits internal details. |
 
@@ -246,6 +381,16 @@ If none of the three are set, Vault is skipped. Once any of them is set, the ser
 
 On success the loaded key names (never values) are logged.
 
+#### Database credential rotation
+
+When Vault is configured, the server re-reads the Vault secret every `VAULT_REFRESH_INTERVAL_MS` (default `300000`, i.e. 5 minutes; `0` disables polling). If `DATABASE_URL` or `DATABASE_REPLICA_URL` changed, it reconnects without a restart:
+
+1. A new Prisma client is built from the new URL and connected **before** anything is swapped. If Vault is unreachable or the database rejects the new credentials, the error is logged, the existing connections stay in use, and the next refresh retries.
+2. Once connected, the new client takes over all new queries.
+3. The previous client is disconnected after `DATABASE_ROTATION_DRAIN_MS` (default `30000`) so in-flight queries and transactions can finish. Keep the old credentials valid in the database for at least that long after rotating them in Vault.
+
+Only the database URLs are applied at runtime; other secrets are still read once at startup.
+
 ### OpenTelemetry tracing
 
 Tracing is enabled when the OpenTelemetry packages are installed and the following variables are set:
@@ -283,6 +428,14 @@ For reference, successful responses use the complementary envelope:
 
 Monetary values are returned as strings in 7-decimal fixed-point format matching Stellar asset precision (e.g. `"10.0000000"`).
 
+### Premium-rate changes
+
+Each product premium-rate template has a monotonically increasing version.
+Changing `premiumRate` creates the next version; edits to unrelated product
+fields do not. A policy records both the rate and template version in effect at
+purchase time. Later product updates affect new quotes and policies only—an
+existing policy's premium terms are never changed retroactively.
+
 ### BigInt serialization & API contract change (#671)
 
 All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit timestamps or token amounts) are centrally serialized as decimal strings across all JSON responses, SSE streams, logging paths, and error envelopes.
@@ -296,6 +449,37 @@ All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit times
 
 - **Input sanitization**: a global middleware (`InputSanitizationMiddleware`, registered in `src/main.ts`) trims every string in JSON/urlencoded request bodies and escapes `<`/`>` before validation and persistence, so markup cannot survive into stored values or reflected responses.
 - **Connection pooling**: Prisma pool sizing is applied at runtime to the datasource URL (`connection_limit=10`, `pool_timeout=10`, `connect_timeout=5`). Override each value with `DATABASE_CONNECTION_LIMIT`, `DATABASE_POOL_TIMEOUT`, `DATABASE_CONNECT_TIMEOUT`, or by putting the parameter directly in `DATABASE_URL`.
+- **Response header hardening (#711)**: `applySecurityHeaders()` (`src/common/security/response-header-hardening.ts`, called from `src/main.ts`) disables Express's `X-Powered-By`, applies [helmet](https://helmetjs.github.io/) and strips implementation-revealing headers (`Server`, `X-Powered-By`, `X-AspNet-Version`, `X-AspNetMvc-Version`, `X-Runtime`, `Via`) from every response. Stripping is done at the header level, so headers added later by the framework or an upstream proxy are removed too. Extra names can be added via `extraHeadersToStrip`.
+
+---
+
+## Transaction strategy
+
+Postgres defaults to `READ COMMITTED`. Under it, two concurrent "check for an existing claim, then insert one" transactions can both pass the check, which can double-pay a policy. Every write that can lead to or record a payout therefore goes through `src/prisma/financial-transaction.ts`:
+
+- **`financialTransaction(prisma, label, fn)`** (interactive) and **`financialBatch(prisma, label, () => [...ops])`** (array form) run at **`SERIALIZABLE`** isolation (`maxWait` 5s, `timeout` 10s). When transactions conflict, Postgres aborts one of them with a serialization failure (SQLSTATE `40001`, Prisma `P2034`) rather than letting both commit.
+- **Serialization failures are retried** up to 3 attempts in total, with jittered exponential backoff. The retry re-runs the whole transaction, so it sees the winner's committed rows (for example, the duplicate guard now finds the claim and returns `AlreadyProcessed` / 409). Interactive callbacks must therefore have no side effects outside `tx`: contract calls, SSE events and webhooks happen after the transaction commits. `financialBatch` takes a factory because a `PrismaPromise` can't be re-run. If a submission is still conflicting after the last attempt, `submitClaim` returns 409 `CLAIM_CONCURRENT_MODIFICATION`.
+- **Optimistic locking** uses `Policy.version`. Every policy status write increments it. Claim flows guard their policy writes on the version they read:
+  - `autoProcess` gates `ACTIVE → PROCESSING` only on the version it validated, and its later `→ CLAIMED` / `→ ACTIVE` writes match only the version its own gate produced. A policy that the stuck-`PROCESSING` sweep reverted and another worker re-gated is back in `PROCESSING` but at a higher version, so the stale attempt's writes miss instead of clobbering it (the ABA case a status-only guard can't detect).
+  - `submitClaim` re-reads the policy inside its transaction and rejects the submission if the status or version changed after validation.
+
+| Operation | Isolation | Guard |
+|---|---|---|
+| `autoProcess` reservation: duplicate guard, `ACTIVE → PROCESSING` gate, claim insert (one transaction) | Serializable + retry | status + `version` |
+| `autoProcess` outcome writes (`PAID`/`CLAIMED`, `REJECTED`, `FAILED` + revert) | Serializable + retry | `status = PROCESSING` + gated `version` |
+| `submitClaim`: policy re-check, duplicate guard, claim insert (one transaction) | Serializable + retry | `version` + partial unique index on non-terminal claims |
+| Stuck-`PROCESSING` recovery | Serializable + retry | status + `updatedAt` cutoff |
+| Cancel / expire policy | single-statement `updateMany` (atomic on its own) | status; bumps `version` |
+| Read-only pagination (`findMany` + `count`) | default | — |
+
+The database-level partial unique index on `Claim(policyId) WHERE status IN ('PENDING','PROCESSING')` remains as a backstop. It does not cover terminal statuses such as `PAID`, which is why the isolation level matters.
+
+Concurrency tests in `src/claims/claims.concurrency.spec.ts` run against a real Postgres. They are skipped unless `CONCURRENCY_TEST_DATABASE_URL` points at a **disposable** database (its tables are truncated):
+
+```bash
+DATABASE_URL=postgresql://.../parashield_test npx prisma db push
+CONCURRENCY_TEST_DATABASE_URL=postgresql://.../parashield_test npx jest claims.concurrency
+```
 
 ---
 
@@ -306,6 +490,13 @@ All `BigInt` values (such as oracle readings, large policy IDs, and 64-bit times
 | Rainfall, temperature, wind | [Open-Meteo](https://open-meteo.com) | No |
 | Flight delay | [AviationStack](https://aviationstack.com) | Yes (`AVIATIONSTACK_API_KEY`) |
 | DeFi exploit | Stellar RPC event stream | No |
+
+**Threshold evaluation (#712):** oracle readings are 7-decimal fixed point (e.g. `324000000` = 32.4) and product thresholds are `Decimal(20,7)`. Trigger comparisons are done on exact scaled `BigInt` values (`src/common/utils/decimal.ts`) rather than `parseFloat`, so the last decimal place is never lost and a reading exactly equal to the threshold never triggers (strict `LessThan` / greater-than).
+
+**Claim evaluation isolation:** the policy and its latest oracle reading are
+loaded inside one PostgreSQL `REPEATABLE READ` transaction. Updates committed
+after evaluation begins are intentionally deferred to the next evaluation, so
+a decision never combines an old policy with a new oracle-key state.
 
 ---
 
@@ -366,6 +557,36 @@ The keeper is a Stellar account (`KEEPER_SECRET_KEY`) that signs:
 - `claims-processor.auto_process(policy_id)` — one tx per active policy per hour
 
 Fee per tx: ~0.00001 XLM. Fund via `stellar keys fund <address> --network testnet` on testnet.
+
+---
+
+## Redis connection & startup retry (#710)
+
+The app creates a single shared Redis client (`REDIS_URL`) used for rate limiting,
+idempotency, distributed locks and the policy-state cache. The client is created
+with `lazyConnect`, so construction never blocks; the first connection is performed
+during startup by `RedisConnectionService` (`src/redis/redis-connection.service.ts`).
+
+Startup behaviour:
+
+- The first connection is retried with exponential backoff, a capped delay and
+  jitter. A per-attempt timeout guarantees a hung connect cannot stall startup.
+- If every attempt fails, startup fails fast with one actionable error naming the
+  Redis `host:port` (never the username/password or full URL).
+- Once connected, runtime reconnection is handed back to ioredis (its
+  `retryStrategy`/`reconnectOnError` handle transient drops).
+
+Tuning (all optional — defaults shown):
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REDIS_STARTUP_MAX_ATTEMPTS` | `5` | Total connection attempts, including the first. |
+| `REDIS_STARTUP_INITIAL_DELAY_MS` | `200` | Delay before the second attempt; doubles each retry. |
+| `REDIS_STARTUP_MAX_DELAY_MS` | `3000` | Upper bound for the backoff delay. |
+| `REDIS_STARTUP_ATTEMPT_TIMEOUT_MS` | `5000` | Per-attempt timeout. |
+
+Invalid values (negative, non-integer or out of range) fail startup with a clear
+validation error. Credentials embedded in `REDIS_URL` are never logged.
 
 ---
 

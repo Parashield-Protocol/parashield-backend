@@ -99,6 +99,23 @@ This is the preferred pattern for backend integrations where \`EventSource\` is 
 |------------|----------------|
 | \`policy.status.change\` | A policy transitions to any new status |
 | \`claim.status.change\` | A claim transitions to any new status |
+| \`policy.oracle_key.change\` | A policy's oracle key changes to a new data feed identifier |
+
+#### Event Payloads
+
+##### \`policy.oracle_key.change\`
+Emitted whenever a policy's oracle data feed key is updated to a new key.
+
+\`\`\`json
+{
+  "policyId": "d3b07384-d113-4a1e-84b2-04e9c7a264a0",
+  "oldOracleKey": "rainfall:-0.0917,34.7679:2026-06",
+  "newOracleKey": "rainfall:-0.0917,34.7679:2026-07",
+  "actor": "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ",
+  "timestamp": 1700000000000,
+  "correlationId": "req-9b8c7d6e"
+}
+\`\`\`
 
 #### Registration
 
@@ -109,7 +126,7 @@ Content-Type: application/json
 
 {
   "url": "https://your-server.example.com/hooks/parashield",
-  "events": ["policy.status.change", "claim.status.change"],
+  "events": ["policy.status.change", "claim.status.change", "policy.oracle_key.change"],
   "secret": "<your-signing-secret>"
 }
 \`\`\`

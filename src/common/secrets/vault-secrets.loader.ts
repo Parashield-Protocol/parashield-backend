@@ -49,9 +49,58 @@ export class VaultSecretsError extends Error {
 export async function loadVaultSecrets(): Promise<void> {
   const logger = new Logger('VaultSecrets');
 
+  const secrets = await fetchVaultSecrets();
+  if (!secrets) {
+    return;
+  }
+  const vaultPath = process.env['VAULT_KV_PATH']!;
+
+  const loaded: string[] = [];
+  for (const [key, value] of Object.entries(secrets)) {
+    process.env[key] = value;
+    loaded.push(key);
+  }
+
+  const missingRequired = parseCsv(process.env['VAULT_REQUIRED_KEYS'])
+    .filter((key) => !isNonEmptyString(process.env[key]));
+  if (missingRequired.length > 0) {
+    throw new VaultSecretsError(
+      `Required secret(s) missing after loading Vault path ${vaultPath}: ${missingRequired.join(', ')}. ` +
+      'Add them to the Vault secret or set them as environment variables.',
+    );
+  }
+
+  if (loaded.length === 0) {
+    logger.warn(`Vault path ${vaultPath} returned no secrets`);
+  } else {
+    // Log key names only — never values.
+    logger.log(`Loaded ${loaded.length} secret(s) from Vault path ${vaultPath}: ${loaded.join(', ')}`);
+  }
+}
+
+/**
+ * Whether Vault is configured at all (any of VAULT_ADDR / VAULT_TOKEN /
+ * VAULT_KV_PATH set). Partial configuration counts as configured so that
+ * fetchVaultSecrets() reports it.
+ */
+export function isVaultConfigured(): boolean {
+  return VAULT_CONFIG_VARS.some((name) => isNonEmptyString(process.env[name]));
+}
+
+/**
+ * Fetch the KV v2 secret from Vault without touching process.env. Returns
+ * null when Vault is not configured; otherwise the secret's key/value pairs
+ * (null/undefined values dropped, everything else stringified). Throws a
+ * VaultSecretsError describing why they could not be read.
+ *
+ * Used both at startup (via loadVaultSecrets) and at runtime by
+ * DatabaseCredentialRotationService to pick up rotated credentials without a
+ * restart.
+ */
+export async function fetchVaultSecrets(): Promise<Record<string, string> | null> {
   const configured = VAULT_CONFIG_VARS.filter((name) => isNonEmptyString(process.env[name]));
   if (configured.length === 0) {
-    return;
+    return null;
   }
   if (configured.length < VAULT_CONFIG_VARS.length) {
     const missing = VAULT_CONFIG_VARS.filter((name) => !configured.includes(name));
@@ -117,28 +166,12 @@ export async function loadVaultSecrets(): Promise<void> {
     );
   }
 
-  const loaded: string[] = [];
+  const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(secrets)) {
     if (value === undefined || value === null) {
       continue;
     }
-    process.env[key] = String(value);
-    loaded.push(key);
+    result[key] = String(value);
   }
-
-  const missingRequired = parseCsv(process.env['VAULT_REQUIRED_KEYS'])
-    .filter((key) => !isNonEmptyString(process.env[key]));
-  if (missingRequired.length > 0) {
-    throw new VaultSecretsError(
-      `Required secret(s) missing after loading Vault path ${vaultPath}: ${missingRequired.join(', ')}. ` +
-      'Add them to the Vault secret or set them as environment variables.',
-    );
-  }
-
-  if (loaded.length === 0) {
-    logger.warn(`Vault path ${vaultPath} returned no secrets`);
-  } else {
-    // Log key names only — never values.
-    logger.log(`Loaded ${loaded.length} secret(s) from Vault path ${vaultPath}: ${loaded.join(', ')}`);
-  }
+  return result;
 }

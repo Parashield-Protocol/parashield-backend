@@ -19,7 +19,26 @@ export interface PolicyStatusEvent {
   timestamp: number;
 }
 
+export interface PolicyOracleKeyChangeEvent {
+  policyId:      string;
+  oldOracleKey:  string;
+  newOracleKey:  string;
+  actor?:        string | null;
+  timestamp:     number;
+  correlationId?: string | null;
+}
+
+export interface ClaimStatusChangeEvent {
+  claimId:    string;
+  fromStatus: string;
+  toStatus:   string;
+  actorId:    string;
+  timestamp:  number;
+  reason?:    string | null;
+}
+
 const STATUS_EVENTS_CHANNEL = 'policy:status:events';
+const ORACLE_KEY_EVENTS_CHANNEL = 'policy:oracle_key:events';
 const DEFAULT_MAX_LISTENERS = 1000;
 
 /**
@@ -68,10 +87,12 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
         this.subscriber.on('message', (channel, message) => {
           if (channel === STATUS_EVENTS_CHANNEL) {
             this.handleRemoteEvent(message);
+          } else if (channel === ORACLE_KEY_EVENTS_CHANNEL) {
+            this.handleRemoteOracleKeyEvent(message);
           }
         });
-        await this.subscriber.subscribe(STATUS_EVENTS_CHANNEL);
-        this.logger.log(`Subscribed to Redis pub/sub channel: ${STATUS_EVENTS_CHANNEL}`);
+        await this.subscriber.subscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL);
+        this.logger.log(`Subscribed to Redis pub/sub channels: ${STATUS_EVENTS_CHANNEL}, ${ORACLE_KEY_EVENTS_CHANNEL}`);
       } catch (err) {
         this.logger.warn(
           `Failed to initialize Redis subscriber, falling back to local events: ${(err as Error).message}`,
@@ -84,7 +105,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     if (this.subscriber) {
       try {
         if (typeof this.subscriber.unsubscribe === 'function') {
-          await this.subscriber.unsubscribe(STATUS_EVENTS_CHANNEL);
+          await this.subscriber.unsubscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL);
         }
         if (typeof this.subscriber.disconnect === 'function') {
           this.subscriber.disconnect();
@@ -99,6 +120,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     const event: PolicyStatusEvent = { policyId, status, timestamp: Date.now() };
     this.logger.log(`Policy status event: ${policyId} → ${status}`);
     this.emitter.emit(`policy:${policyId}`, event);
+    this.emitter.emit('status', event);
 
     if (this.redis && typeof this.redis.publish === 'function') {
       const payload = JSON.stringify({
@@ -112,6 +134,52 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
         });
       }
     }
+  }
+
+  onStatusChange(listener: (event: PolicyStatusEvent) => void): () => void {
+    this.emitter.on('status', listener);
+    return () => this.emitter.off('status', listener);
+  }
+
+  onOracleKeyChange(listener: (event: PolicyOracleKeyChangeEvent) => void): () => void {
+    this.emitter.on('policy:oracleKey', listener);
+    return () => this.emitter.off('policy:oracleKey', listener);
+  }
+
+  onProductUpdate(listener: (productId?: string) => void): () => void {
+    this.emitter.on('product:updated', listener);
+    return () => this.emitter.off('product:updated', listener);
+  }
+
+  emitProductUpdate(productId?: string): void {
+    this.logger.log(`Product update event: ${productId ?? 'global'}`);
+    this.emitter.emit('product:updated', productId);
+  }
+
+  emitPolicyOracleKeyChange(event: PolicyOracleKeyChangeEvent): void {
+    this.logger.log(`Policy oracle key change event: ${event.policyId} (${event.oldOracleKey} → ${event.newOracleKey})`);
+    this.emitter.emit(`policy:${event.policyId}:oracleKey`, event);
+    this.emitter.emit(`policy:${event.policyId}`, event);
+    this.emitter.emit('policy:oracleKey', event);
+
+    if (this.redis && typeof this.redis.publish === 'function') {
+      const payload = JSON.stringify({
+        ...event,
+        origin: this.instanceId,
+      });
+      const publishResult = this.redis.publish(ORACLE_KEY_EVENTS_CHANNEL, payload);
+      if (publishResult && typeof publishResult.catch === 'function') {
+        publishResult.catch((err) => {
+          this.logger.error(`Failed to publish oracle key change event to Redis for policy ${event.policyId}: ${err.message}`);
+        });
+      }
+    }
+  }
+
+  emitClaimStatusChange(event: ClaimStatusChangeEvent): void {
+    this.logger.log(`Claim status event: ${event.claimId} (${event.fromStatus} → ${event.toStatus}) by ${event.actorId}`);
+    this.emitter.emit(`claim:${event.claimId}`, event);
+    this.emitter.emit('claim:status', event);
   }
 
   subscribeToPolicyStatus(
@@ -239,6 +307,39 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
       this.emitter.emit(`policy:${event.policyId}`, event);
     } catch (err) {
       this.logger.error(`Failed to parse remote status event: ${(err as Error).message}`);
+    }
+  }
+
+  private handleRemoteOracleKeyEvent(message: string): void {
+    try {
+      const data = JSON.parse(message) as {
+        origin?: string;
+        policyId: string;
+        oldOracleKey: string;
+        newOracleKey: string;
+        actor?: string | null;
+        timestamp: number;
+        correlationId?: string | null;
+      };
+
+      if (data.origin === this.instanceId) {
+        return;
+      }
+
+      const event: PolicyOracleKeyChangeEvent = {
+        policyId: data.policyId,
+        oldOracleKey: data.oldOracleKey,
+        newOracleKey: data.newOracleKey,
+        actor: data.actor,
+        timestamp: data.timestamp,
+        correlationId: data.correlationId,
+      };
+
+      this.emitter.emit(`policy:${event.policyId}:oracleKey`, event);
+      this.emitter.emit(`policy:${event.policyId}`, event);
+      this.emitter.emit('policy:oracleKey', event);
+    } catch (err) {
+      this.logger.error(`Failed to parse remote oracle key event: ${(err as Error).message}`);
     }
   }
 }

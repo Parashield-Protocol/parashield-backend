@@ -1,9 +1,10 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, OnApplicationShutdown } from '@nestjs/common';
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
+import { validateWebhookEndpoint } from '../webhooks/ssrf.validator';
 
-type WebhookEvent = 'policy.status.change' | 'claim.status.change';
+type WebhookEvent = 'policy.status.change' | 'claim.status.change' | 'policy.oracle_key.change';
 
 export interface WebhookRegistration {
   id: string;
@@ -40,10 +41,17 @@ const IV_BYTES = 12;
 // the sender and HTTP 413 / connection issues on the receiver.
 const MAX_WEBHOOK_PAYLOAD_BYTES = 1_048_576;
 
+// #777 — how long onApplicationShutdown waits for in-flight deliveries to
+// finish before giving up. Deliveries are fired without being awaited by
+// their callers (so webhook delivery never delays the request), so nothing
+// else would otherwise keep them alive past SIGTERM.
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
+
 @Injectable()
-export class WebhooksService {
+export class WebhooksService implements OnApplicationShutdown {
   private readonly logger = new Logger(WebhooksService.name);
   private readonly encryptionKey: Buffer | null;
+  private readonly inFlightDeliveries = new Set<Promise<unknown>>();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -105,9 +113,7 @@ export class WebhooksService {
   // #606 — signing secrets are encrypted at rest with AES-256-GCM when
   // WEBHOOK_SECRET_KEY is configured.
   async registerWebhook(dto: { url: string; events: WebhookEvent[]; secret?: string }) {
-    if (!dto.url || !dto.url.startsWith('https://')) {
-      throw new BadRequestException('Webhook URL must start with https://');
-    }
+    validateWebhookEndpoint(dto.url);
     const storedSecret = dto.secret ? this.encryptSecret(dto.secret) : dto.secret;
     const registration = await this.prisma.webhookRegistration.create({
       data: { url: dto.url, secret: storedSecret, events: dto.events },
@@ -199,7 +205,14 @@ export class WebhooksService {
     });
   }
 
-  async notifyClaimStatusChange(event: { claimId: string; fromStatus: string; toStatus: string; timestamp: number }): Promise<WebhookDeliveryResult[]> {
+  async notifyClaimStatusChange(event: {
+    claimId: string;
+    fromStatus: string;
+    toStatus: string;
+    timestamp: number;
+    actorId?: string;
+    reason?: string | null;
+  }): Promise<WebhookDeliveryResult[]> {
     const registrations = await this.getRegistrationsForEvent('claim.status.change');
 
     const payload = {
@@ -207,6 +220,8 @@ export class WebhooksService {
       fromStatus: event.fromStatus,
       toStatus: event.toStatus,
       timestamp: event.timestamp,
+      actorId: event.actorId ?? 'system',
+      reason: event.reason ?? null,
     };
 
     const results = await Promise.allSettled(
@@ -221,6 +236,56 @@ export class WebhooksService {
         } catch (err) {
           this.logger.error(
             `All delivery attempts failed for claim webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
+          );
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: false,
+            error: (err as Error).message,
+          } satisfies WebhookDeliveryResult;
+        }
+      }),
+    );
+
+    return results.map((r) => r.status === 'fulfilled' ? r.value : {
+      registrationId: 'unknown',
+      url: 'unknown',
+      success: false,
+      error: r.reason?.message ?? 'Unknown error',
+    });
+  }
+
+  async notifyPolicyOracleKeyChange(event: {
+    policyId: string;
+    oldOracleKey: string;
+    newOracleKey: string;
+    actor?: string | null;
+    timestamp: number;
+    correlationId?: string | null;
+  }): Promise<WebhookDeliveryResult[]> {
+    const registrations = await this.getRegistrationsForEvent('policy.oracle_key.change');
+
+    const payload = {
+      policyId: event.policyId,
+      oldOracleKey: event.oldOracleKey,
+      newOracleKey: event.newOracleKey,
+      actor: event.actor ?? null,
+      timestamp: event.timestamp,
+      correlationId: event.correlationId ?? null,
+    };
+
+    const results = await Promise.allSettled(
+      registrations.map(async (registration) => {
+        try {
+          await this.deliverWithRetry(registration, payload);
+          return {
+            registrationId: registration.id,
+            url: registration.url,
+            success: true,
+          } satisfies WebhookDeliveryResult;
+        } catch (err) {
+          this.logger.error(
+            `All delivery attempts failed for policy oracle key change webhook ${registration.id} → ${registration.url}: ${(err as Error).message}`,
           );
           return {
             registrationId: registration.id,
@@ -255,15 +320,37 @@ export class WebhooksService {
    *
    * Throws on the last attempt so callers can log the final failure.
    */
+  // #777 — tracks the actual attempt (below) in inFlightDeliveries so
+  // onApplicationShutdown can drain it instead of the process exiting with
+  // the retry loop's sleep/fetch cycle still running.
   private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
+    const attempt = this.deliverWithRetryAttempt(registration, payload);
+    this.inFlightDeliveries.add(attempt);
+    try {
+      await attempt;
+    } finally {
+      this.inFlightDeliveries.delete(attempt);
+    }
+  }
+
+  private async deliverWithRetryAttempt(registration: WebhookRegistration, payload: unknown): Promise<void> {
     let lastError: Error | undefined;
+
+    // #719 — Serialize and sign the payload once before the retry loop
+    // so each retry reuses the cached body and signature instead of
+    // re-computing JSON.stringify + HMAC per attempt.
+    const payloadStr = JSON.stringify(payload);
+    if (Buffer.byteLength(payloadStr, 'utf8') > MAX_WEBHOOK_PAYLOAD_BYTES) {
+      throw new Error(
+        `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
+      );
+    }
+    const signature = registration.secret
+      ? this.signPayloadString(payloadStr, registration.secret)
+      : undefined;
 
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       if (attempt > 0) {
-        // #625/#667 — exponential backoff with full jitter. The delay is
-        // randomized between 0 and the exponential ceiling to spread
-        // retries across time and prevent thundering-herd effects when
-        // many webhooks fail simultaneously.
         const exponentialDelay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
         const delayMs = Math.floor(Math.random() * exponentialDelay);
         this.logger.warn(
@@ -274,7 +361,7 @@ export class WebhooksService {
       }
 
       try {
-        await this.deliverWebhook(registration, payload);
+        await this.deliverWebhook(registration, payloadStr, signature);
         if (attempt > 0) {
           this.logger.log(
             `Webhook ${registration.id} → ${registration.url} succeeded on attempt ${attempt}`,
@@ -289,23 +376,17 @@ export class WebhooksService {
     throw lastError!;
   }
 
-  private async deliverWebhook(registration: WebhookRegistration, payload: unknown): Promise<void> {
-    // #624 — reject oversized payloads before attempting delivery to
-    // prevent memory exhaustion and receiver-side HTTP 413 errors.
-    const payloadStr = JSON.stringify(payload);
-    if (Buffer.byteLength(payloadStr, 'utf8') > MAX_WEBHOOK_PAYLOAD_BYTES) {
-      throw new Error(
-        `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
-      );
-    }
-
-    const secret = registration.secret;
+  private async deliverWebhook(
+    registration: WebhookRegistration,
+    payloadStr: string,
+    signature?: string,
+  ): Promise<void> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
-    if (secret) {
-      headers['X-Webhook-Signature'] = this.signPayload(payload, secret);
+    if (signature) {
+      headers['X-Webhook-Signature'] = signature;
     }
 
     const controller = new AbortController();
@@ -313,12 +394,58 @@ export class WebhooksService {
 
     let response: Response;
     try {
+      // #751 — Disable automatic redirect following to prevent leaking signed payloads
+      // to unintended or malicious hosts.
       response = await fetch(registration.url, {
         method: 'POST',
         headers,
         body: payloadStr,
         signal: controller.signal,
+        redirect: 'manual',
       });
+
+      // #751 — Handle redirect attempts explicitly and block redirect following.
+      const isRedirect =
+        (response.status >= 300 && response.status < 400) ||
+        response.type === 'opaqueredirect';
+
+      if (isRedirect) {
+        const location =
+          typeof response.headers?.get === 'function'
+            ? response.headers.get('location')
+            : (response.headers as unknown as Record<string, string>)?.[
+                'location'
+              ];
+
+        let targetHostname = 'unknown';
+        let isDifferentDomain = false;
+        if (location) {
+          try {
+            const targetUrl = new URL(location, registration.url);
+            const originalUrl = new URL(registration.url);
+            targetHostname = targetUrl.hostname;
+            isDifferentDomain = targetUrl.origin !== originalUrl.origin;
+          } catch {
+            isDifferentDomain = true;
+          }
+        }
+
+        if (isDifferentDomain) {
+          this.logger.warn(
+            `Blocked redirect to different domain for webhook ${registration.id}: ${registration.url} -> ${location ?? 'unknown'}`,
+          );
+          throw new Error(
+            `Webhook redirect to different domain blocked: ${targetHostname}`,
+          );
+        }
+
+        this.logger.warn(
+          `Webhook delivery to ${registration.url} attempted redirect (${response.status}) to ${location ?? 'unknown'}; redirects are disabled to prevent payload leakage`,
+        );
+        throw new Error(
+          `Webhook delivery failed: redirects are not followed (${response.status})`,
+        );
+      }
 
       if (!response.ok) {
         throw new Error(`Webhook responded with ${response.status}`);
@@ -328,33 +455,61 @@ export class WebhooksService {
     }
 
     // #613 — Verify response signature if the endpoint provides one.
-    // Some webhook consumers sign their responses with the shared secret
-    // so the caller can confirm the response wasn't tampered with by a
-    // MITM. When present, the X-Webhook-Signature-Response header must
-    // match the HMAC of the response body; a mismatch is treated as a
-    // delivery failure.
-    if (secret) {
+    if (registration.secret) {
       const responseSignature = response.headers.get('x-webhook-signature-response');
       if (responseSignature) {
         const responseBody = await response.text();
         const expectedSignature = crypto
-          .createHmac('sha256', secret)
+          .createHmac('sha256', registration.secret)
           .update(responseBody)
           .digest('base64');
 
-        if (!crypto.timingSafeEqual(Buffer.from(responseSignature), Buffer.from(expectedSignature))) {
+        const sigBuf = Buffer.from(responseSignature);
+        const expBuf = Buffer.from(expectedSignature);
+        if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
           throw new Error('Webhook response signature verification failed');
         }
       }
     }
   }
 
-  private signPayload(payload: unknown, secret: string): string {
-    const payloadStr = JSON.stringify(payload);
+  // #719 — Sign a pre-serialized payload string (avoids redundant JSON.stringify).
+  private signPayloadString(payloadStr: string, secret: string): string {
     return crypto.createHmac('sha256', secret).update(payloadStr).digest('base64');
   }
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * #777 — drain in-flight webhook deliveries before the app finishes
+   * shutting down, instead of letting SIGTERM abort them mid-request.
+   * Bounded by WEBHOOK_SHUTDOWN_DRAIN_TIMEOUT_MS so a stuck delivery can't
+   * hang shutdown forever; deliveries still pending at the timeout are
+   * logged (with enough detail to replay manually) rather than retried
+   * automatically — there's no persistent delivery queue to resume them from.
+   */
+  async onApplicationShutdown(signal?: string): Promise<void> {
+    const pending = this.inFlightDeliveries.size;
+    if (pending === 0) return;
+
+    const timeoutMs =
+      this.config.get<number>('WEBHOOK_SHUTDOWN_DRAIN_TIMEOUT_MS') ?? DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS;
+    this.logger.log(
+      `Draining ${pending} in-flight webhook deliveries (signal: ${signal || 'none'}, timeout: ${timeoutMs}ms)`,
+    );
+
+    const drained = await Promise.race([
+      Promise.allSettled([...this.inFlightDeliveries]).then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    ]);
+
+    if (!drained) {
+      this.logger.warn(
+        `Shutdown drain timed out with ${this.inFlightDeliveries.size} webhook deliveries still in flight; ` +
+        'not retried automatically — check logs above for registration id/url to replay manually.',
+      );
+    }
   }
 }

@@ -1,7 +1,21 @@
-import { Controller, Post, Body, UnauthorizedException, BadRequestException, Logger, HttpCode, HttpStatus, Get, Query } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  UnauthorizedException,
+  BadRequestException,
+  Logger,
+  HttpCode,
+  HttpStatus,
+  Get,
+  Query,
+  Inject,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../common/swagger/api-error-responses';
 import { Throttle } from '@nestjs/throttler';
+import { ConfigService } from '@nestjs/config';
+import type Redis from 'ioredis';
 import { Keypair } from '@stellar/stellar-sdk';
 import { JwtService } from './jwt.service';
 import { PrismaService } from '../prisma/prisma.service';
@@ -12,12 +26,14 @@ import { timingSafeEqual } from 'crypto';
 // Auth endpoints are brute-force/enumeration targets, so they get a tighter
 // limit than the app-wide default (60 req/60s) configured in app.module.ts.
 const AUTH_THROTTLE = { default: { limit: 10, ttl: 60000 } };
+const DEFAULT_NONCE_TTL_SECONDS = 300; // 5 minutes
 
 /**
  * AuthController — wallet-based authentication endpoint.
  *
- * The client signs a known message with their Stellar keypair.
- * The server verifies the signature and issues a JWT on success.
+ * The client requests a challenge nonce (stored in Redis with TTL), signs it
+ * with their Stellar keypair (Ed25519), and submits it to /login.
+ * Nonces are single-use and consumed atomically to prevent replay attacks.
  */
 @ApiTags('auth')
 @Controller('auth')
@@ -27,7 +43,41 @@ export class AuthController {
   constructor(
     private readonly jwtService: JwtService,
     private readonly prisma: PrismaService,
+    @Inject('REDIS_CLIENT') private readonly redis: Redis,
+    private readonly configService: ConfigService,
   ) {}
+
+  /**
+   * Helper to atomically consume the nonce from Redis for a wallet address.
+   * Uses Redis GETDEL (Redis >= 6.2) or an atomic Lua script fallback.
+   * Consuming the nonce atomically guarantees that concurrent login requests
+   * cannot both succeed using the same nonce.
+   */
+  private async consumeNonce(wallet: string): Promise<string | null> {
+    const key = `auth:nonce:${wallet}`;
+    try {
+      if (typeof this.redis.getdel === 'function') {
+        const val = await this.redis.getdel(key);
+        if (val !== undefined && val !== null) return val;
+      }
+    } catch {
+      // Fallback to Lua script if GETDEL is not supported on older Redis versions
+    }
+
+    const lua = `
+      local val = redis.call('GET', KEYS[1])
+      if val then
+        redis.call('DEL', KEYS[1])
+      end
+      return val
+    `;
+    try {
+      const res = await this.redis.eval(lua, 1, key);
+      return (res as string | null) ?? null;
+    } catch {
+      return null;
+    }
+  }
 
   /**
    * GET /api/v1/auth/challenge
@@ -50,19 +100,28 @@ export class AuthController {
       throw new BadRequestException('Invalid or missing Stellar wallet address');
     }
 
-    // Generate a secure, cryptographically random nonce
+    // Generate a secure, cryptographically random nonce (32 bytes = 64 hex characters)
     const nonce = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes TTL
+    const ttlSeconds = parseInt(
+      this.configService?.get<string>('AUTH_NONCE_TTL_SECONDS') ?? `${DEFAULT_NONCE_TTL_SECONDS}`,
+      10,
+    );
+    const key = `auth:nonce:${wallet}`;
 
-    // #489 — expired-challenge cleanup is a table-wide deleteMany, so it runs
-    // on a schedule in AuthCleanupWorker rather than on every request here.
+    // Store in Redis with TTL bound to the specific wallet address
+    await this.redis.set(key, nonce, 'EX', ttlSeconds);
 
-    // Store the nonce keyed by wallet address (upsert if they request again)
-    await this.prisma.authChallenge.upsert({
-      where: { walletAddress: wallet },
-      update: { nonce, expiresAt, createdAt: new Date() },
-      create: { walletAddress: wallet, nonce, expiresAt },
-    });
+    // Also mirror to DB for backward compatibility if prisma is configured
+    if (this.prisma?.authChallenge) {
+      const expiresAt = new Date(Date.now() + ttlSeconds * 1000);
+      await this.prisma.authChallenge.upsert({
+        where: { walletAddress: wallet },
+        update: { nonce, expiresAt, createdAt: new Date() },
+        create: { walletAddress: wallet, nonce, expiresAt },
+      }).catch((err) => {
+        this.logger.warn(`Failed to mirror challenge to DB: ${err.message}`);
+      });
+    }
 
     return {
       success: true,
@@ -87,62 +146,105 @@ export class AuthController {
   })
   @ApiBody({ type: WalletLoginDto })
   @ApiResponse({ status: 200, description: 'Returns a JWT token for the authenticated wallet' })
-  @ApiErrorResponse(401, 'Invalid, expired, or missing wallet signature / challenge.', undefined, 'No auth challenge found. Please request a challenge first.')
+  @ApiErrorResponse(401, 'Invalid, expired, or missing wallet signature / challenge.', undefined, 'Invalid or expired authentication challenge')
   @ApiErrorResponse(429, 'Rate limit exceeded — auth endpoints allow 10 req / 60 s.', undefined, 'Too many requests. Please try again later.')
   async login(@Body() dto: WalletLoginDto) {
     const { walletAddress, signature, message } = dto;
 
-    // Fetch the challenge from DB
-    const challenge = await this.prisma.authChallenge.findUnique({
-      where: { walletAddress },
-    });
-
-    if (!challenge) {
-      this.logger.warn(`Login rejected: no challenge found for ${walletAddress}`);
-      throw new UnauthorizedException('No auth challenge found. Please request a challenge first.');
+    if (!walletAddress || !/^G[A-Z2-7]{55}$/.test(walletAddress)) {
+      this.logger.warn(`Login rejected: invalid wallet address format for ${walletAddress}`);
+      throw new UnauthorizedException('Invalid or expired authentication challenge');
     }
 
-    // Verify it is not expired
-    if (challenge.expiresAt < new Date()) {
-      await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch(() => {});
-      this.logger.warn(`Login rejected: challenge expired for ${walletAddress}`);
-      throw new UnauthorizedException('Auth challenge expired. Please request a new one.');
+    // #723 — Check account lockout before processing login.
+    const lockoutKey = `auth:lockout:${walletAddress}`;
+    const lockoutCount = await this.redis.get(lockoutKey);
+    const maxFailedAttempts = parseInt(
+      this.configService?.get<string>('AUTH_MAX_FAILED_ATTEMPTS') ?? '5',
+      10,
+    );
+    const lockoutDurationSec = parseInt(
+      this.configService?.get<string>('AUTH_LOCKOUT_DURATION_SECONDS') ?? '900',
+      10,
+    );
+
+    if (lockoutCount && parseInt(lockoutCount, 10) >= maxFailedAttempts) {
+      this.logger.warn(`Login rejected: account locked for ${walletAddress} (${lockoutCount} failed attempts)`);
+      throw new UnauthorizedException('Account temporarily locked due to repeated failed login attempts');
     }
 
-    // #243 — Use constant-time comparison to prevent timing side-channel leaks.
-    // Even though this nonce is single-use and high-entropy, consistent
-    // defense-in-depth matches the pattern used for API key comparison elsewhere.
-    // timingSafeEqual requires equal-length buffers (throws otherwise), so the
-    // length mismatch is caught by the same early-return false path.
-    const msgBuf   = Buffer.from(message);
-    const nonceBuf = Buffer.from(challenge.nonce);
+    // Atomically consume the nonce from Redis keyed by wallet address.
+    // Decision: We deliberately consume the nonce BEFORE signature verification.
+    // This is safer because consuming the nonce on any verification attempt
+    // (success or failure) prevents replay attacks, prevents brute-forcing
+    // signatures against a valid nonce, and eliminates race conditions.
+    let storedNonce = await this.consumeNonce(walletAddress);
+
+    // Fallback to database challenge if Redis did not have the key (e.g. during migration)
+    if (!storedNonce && this.prisma?.authChallenge) {
+      try {
+        const challenge = await this.prisma.authChallenge.findUnique({
+          where: { walletAddress },
+        });
+        if (challenge) {
+          await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch(() => {});
+          if (challenge.expiresAt >= new Date()) {
+            storedNonce = challenge.nonce;
+          }
+        }
+      } catch {
+        // Ignore DB fallback lookup error
+      }
+    }
+
+    // Reject unknown, expired, reused, and wrong-address nonces with the same generic 401
+    if (!storedNonce) {
+      this.logger.warn(`Login rejected: no active challenge found (or expired/reused) for ${walletAddress}`);
+      throw new UnauthorizedException('Invalid or expired authentication challenge');
+    }
+
+    // Ensure the signed message actually matches the stored nonce.
+    // Constant-time comparison prevents timing side-channel leaks.
+    const msgBuf = Buffer.from(message, 'utf8');
+    const nonceBuf = Buffer.from(storedNonce, 'utf8');
     const nonceMatches =
       msgBuf.length === nonceBuf.length && timingSafeEqual(msgBuf, nonceBuf);
     if (!nonceMatches) {
       this.logger.warn(`Login rejected: message does not match stored nonce for ${walletAddress}`);
-      throw new UnauthorizedException('Invalid challenge message');
+      throw new UnauthorizedException('Invalid or expired authentication challenge');
     }
 
     try {
-      const keypair      = Keypair.fromPublicKey(walletAddress);
+      const keypair = Keypair.fromPublicKey(walletAddress);
       const messageBytes = Buffer.from(message, 'utf8');
-      const sigBytes     = Buffer.from(signature, 'base64');
-      const isValid      = keypair.verify(messageBytes, sigBytes);
+      const sigBytes = Buffer.from(signature, 'base64');
+      const isValid = keypair.verify(messageBytes, sigBytes);
 
       if (!isValid) {
         this.logger.warn(`Login rejected: invalid signature from ${walletAddress}`);
-        throw new UnauthorizedException('Invalid wallet signature');
+        // #723 — Record failed attempt and check for lockout.
+        const failures = await this.redis.incr(lockoutKey);
+        if (failures === 1) {
+          await this.redis.expire(lockoutKey, lockoutDurationSec);
+        }
+        if (failures >= maxFailedAttempts) {
+          this.logger.warn(`Account locked after ${failures} failed attempts: ${walletAddress}`);
+        }
+        throw new UnauthorizedException('Invalid or expired authentication challenge');
       }
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err;
       this.logger.warn(`Signature verification error: ${err}`);
-      throw new UnauthorizedException('Signature verification failed');
+      // #723 — Record failed attempt on verification error.
+      const failures = await this.redis.incr(lockoutKey);
+      if (failures === 1) {
+        await this.redis.expire(lockoutKey, lockoutDurationSec);
+      }
+      throw new UnauthorizedException('Invalid or expired authentication challenge');
     }
 
-    // Invalidate the nonce only after successful verification (one-time use).
-    await this.prisma.authChallenge.delete({ where: { walletAddress } }).catch((err) => {
-      this.logger.warn(`Failed to delete challenge for ${walletAddress}: ${err.message}`);
-    });
+    // #723 — Reset failed attempt counter on successful login.
+    await this.redis.del(lockoutKey);
 
     const token = this.jwtService.sign(walletAddress);
     this.logger.log(`Login successful: wallet=${walletAddress}`);
@@ -157,4 +259,5 @@ export class AuthController {
     };
   }
 }
+
 

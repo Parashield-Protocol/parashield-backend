@@ -1,6 +1,8 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { ConfigService } from "@nestjs/config";
 import { StellarService } from "./stellar.service";
+import { HorizonTimeoutError, HorizonUnavailableError } from "./horizon-resilience";
+import { ErrorCode } from "../common/errors/error-codes";
 
 jest.mock("@stellar/stellar-sdk", () => ({
   Networks: {
@@ -40,6 +42,11 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Horizon: {
     Server: jest.fn().mockImplementation(() => ({})),
   },
+  StrKey: {
+    isValidEd25519PublicKey: jest.fn((key: string) => typeof key === 'string' && /^G[A-Z2-7]{55}$/.test(key)),
+    isValidMed25519PublicKey: jest.fn((key: string) => typeof key === 'string' && /^M[A-Z2-7]{68}$/.test(key)),
+  },
+  FeeBumpTransaction: jest.fn(),
 }));
 
 describe("StellarService", () => {
@@ -748,6 +755,310 @@ describe("StellarService", () => {
       mockHorizon.loadAccount.mockRejectedValue(new Error("account not found"));
 
       await expect(service.getAccountBalance("GSOMEACCOUNT")).rejects.toThrow("account not found");
+      // Deterministic errors are not retried.
+      expect(mockHorizon.loadAccount).toHaveBeenCalledTimes(1);
+    });
+
+    describe("Horizon timeouts", () => {
+      let sleepSpy: jest.SpyInstance;
+      const hang = () => new Promise<never>(() => {});
+
+      beforeEach(() => {
+        sleepSpy = jest
+          .spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep")
+          .mockResolvedValue(undefined);
+        jest.spyOn((service as any).logger, "warn").mockImplementation();
+        jest.spyOn((service as any).logger, "error").mockImplementation();
+      });
+
+      it("retries a timed-out request with exponential backoff and returns on recovery", async () => {
+        mockHorizon.loadAccount
+          .mockImplementationOnce(hang)
+          .mockImplementationOnce(hang)
+          .mockResolvedValueOnce({ balances: [{ asset_type: "native", balance: "42.0000000" }] });
+
+        const balance = await service.getAccountBalance("GSOMEACCOUNT", 5);
+
+        expect(balance).toBe("42.0000000");
+        expect(mockHorizon.loadAccount).toHaveBeenCalledTimes(3);
+        expect(sleepSpy.mock.calls.map(([ms]) => ms)).toEqual([500, 1000]);
+      });
+
+      it("throws a typed HorizonTimeoutError (504) once every attempt times out", async () => {
+        mockHorizon.loadAccount.mockImplementation(hang);
+
+        const err = await service.getAccountBalance("GSOMEACCOUNT", 5).catch((e) => e);
+
+        expect(err).toBeInstanceOf(HorizonTimeoutError);
+        expect(err.getStatus()).toBe(504);
+        expect(err.getResponse()).toMatchObject({ errorCode: ErrorCode.HORIZON_TIMEOUT });
+        expect(err.attempts).toBe(3);
+        expect(mockHorizon.loadAccount).toHaveBeenCalledTimes(3);
+      });
+
+      it("retries transient 5xx responses but not 404s", async () => {
+        mockHorizon.loadAccount
+          .mockRejectedValueOnce({ response: { status: 503 } })
+          .mockRejectedValueOnce({ response: { status: 404 } });
+
+        await expect(service.getAccountBalance("GSOMEACCOUNT", 5)).resolves.toBe("0");
+        expect(mockHorizon.loadAccount).toHaveBeenCalledTimes(2);
+      });
+
+      it("honours maxAttempts (health checks make a single attempt)", async () => {
+        mockHorizon.loadAccount.mockImplementation(hang);
+
+        await expect(service.getAccountBalance("GSOMEACCOUNT", 5, 1)).rejects.toBeInstanceOf(HorizonTimeoutError);
+        expect(mockHorizon.loadAccount).toHaveBeenCalledTimes(1);
+        expect(sleepSpy).not.toHaveBeenCalled();
+      });
+
+      it("opens the circuit after repeated timeouts and fails fast with HorizonUnavailableError (503)", async () => {
+        mockHorizon.loadAccount.mockImplementation(hang);
+
+        for (let i = 0; i < 3; i++) {
+          await expect(service.getAccountBalance("GSOMEACCOUNT", 5, 1)).rejects.toBeInstanceOf(HorizonTimeoutError);
+        }
+        mockHorizon.loadAccount.mockClear();
+
+        const err = await service.getAccountBalance("GSOMEACCOUNT", 5).catch((e) => e);
+        expect(err).toBeInstanceOf(HorizonUnavailableError);
+        expect(err.getStatus()).toBe(503);
+        expect(err.getResponse()).toMatchObject({ errorCode: ErrorCode.HORIZON_UNAVAILABLE });
+        expect(mockHorizon.loadAccount).not.toHaveBeenCalled();
+      });
+
+      it("lets a probe through after the reset window and closes the circuit on success", async () => {
+        const nowSpy = jest.spyOn(Date, "now");
+        let now = 1_000_000;
+        nowSpy.mockImplementation(() => now);
+        try {
+          mockHorizon.loadAccount.mockImplementation(hang);
+          for (let i = 0; i < 3; i++) {
+            await service.getAccountBalance("GSOMEACCOUNT", 5, 1).catch(() => undefined);
+          }
+          await expect(service.getAccountBalance("GSOMEACCOUNT", 5)).rejects.toBeInstanceOf(HorizonUnavailableError);
+
+          now += 30_000;
+          mockHorizon.loadAccount.mockResolvedValue({ balances: [{ asset_type: "native", balance: "1.0000000" }] });
+
+          await expect(service.getAccountBalance("GSOMEACCOUNT", 5)).resolves.toBe("1.0000000");
+          await expect(service.getAccountBalance("GSOMEACCOUNT", 5)).resolves.toBe("1.0000000");
+        } finally {
+          nowSpy.mockRestore();
+        }
+      });
+    });
+  });
+
+  describe("Transaction source account validation (#687)", () => {
+    let service: StellarService;
+    let mockRpc: {
+      simulateTransaction: jest.Mock;
+      sendTransaction: jest.Mock;
+    };
+    let loggerWarnSpy: jest.SpyInstance;
+
+    const mockConfigService = {
+      get: jest.fn((key: string) => {
+        if (key === "STELLAR_RPC_URL") return "https://soroban-testnet.stellar.org";
+        if (key === "STELLAR_NETWORK") return "testnet";
+        if (key === "KEEPER_SECRET_KEY") return "STEST_FAKE_SECRET_KEY";
+        return undefined;
+      }),
+    };
+
+    const validUserWallet = "GBARCATW33U4Y5Q5JUGYZZS64G6XFL3E6LOHZ67X4I7Y6XQ2GUL6XLDL";
+    const otherUserWallet = "GCXN4Z4E5F6G7H8J9K0L1M2N3P4Q5R6S7T8U9V0W1X2Y3Z4A5B6C7D8E";
+    const malformedKey = "not-a-valid-stellar-key";
+    const muxedWallet = "MAAAAAAAAAAAAAB7BQ2L7E5NBWMXDUCMZS5AUKWXASODWXP4ODBDTXXeV63CQAZB62I";
+
+    beforeEach(async () => {
+      jest.clearAllMocks();
+
+      mockRpc = {
+        simulateTransaction: jest.fn().mockResolvedValue({ result: {} }),
+        sendTransaction: jest.fn().mockResolvedValue({ status: "PENDING", hash: "tx-hash-687" }),
+      };
+
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          StellarService,
+          { provide: ConfigService, useValue: mockConfigService },
+        ],
+      }).compile();
+
+      service = module.get<StellarService>(StellarService);
+      (service as unknown as { rpc: typeof mockRpc }).rpc = mockRpc;
+      loggerWarnSpy = jest.spyOn((service as any).logger, "warn").mockImplementation();
+    });
+
+    describe("validateAccountAddress", () => {
+      it("accepts a valid Ed25519 public key and normalizes whitespace and lowercase", () => {
+        const input = `  ${validUserWallet.toLowerCase()}  `;
+        const canonical = service.validateAccountAddress(input);
+        expect(canonical).toBe(validUserWallet);
+      });
+
+      it("rejects non-string or empty address with 400 BadRequestException", () => {
+        expect(() => service.validateAccountAddress("")).toThrow("Invalid Stellar account: address must be a non-empty string");
+        expect(() => service.validateAccountAddress(null)).toThrow("Invalid Stellar account: address must be a non-empty string");
+        expect(() => service.validateAccountAddress("   ")).toThrow("Invalid Stellar account: address must be a non-empty string");
+      });
+
+      it("rejects malformed public keys with 400 BadRequestException", () => {
+        expect(() => service.validateAccountAddress(malformedKey)).toThrow("Invalid Stellar account format: must be a valid 56-character Ed25519 public key (G...)");
+      });
+
+      it("deliberate decision: rejects muxed (M...) addresses with 400 BadRequestException", () => {
+        expect(() => service.validateAccountAddress(muxedWallet)).toThrow(/Muxed accounts \(M\.\.\.\) are not supported/);
+      });
+    });
+
+    describe("validateTransactionSource", () => {
+      it("passes when transaction source matches the authenticated wallet", () => {
+        const tx = {
+          source: validUserWallet,
+          operations: [],
+        };
+        expect(() => service.validateTransactionSource(tx, validUserWallet)).not.toThrow();
+      });
+
+      it("rejects with 403 ForbiddenException when transaction source does not match authenticated wallet", () => {
+        const tx = {
+          source: otherUserWallet,
+          operations: [],
+        };
+        expect(() => service.validateTransactionSource(tx, validUserWallet, { method: "testMethod", correlationId: "corr-1" })).toThrow(
+          "Forbidden: Transaction source account does not match authenticated user",
+        );
+
+        // Crucial: verify rejection was logged at warn level with user and attempted account
+        expect(loggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`Transaction source account mismatch in testMethod: user=${validUserWallet} attempted=${otherUserWallet} corr=corr-1`),
+        );
+      });
+
+      it("generic 403 error message does not leak the authenticated wallet address", () => {
+        const tx = {
+          source: otherUserWallet,
+          operations: [],
+        };
+        try {
+          service.validateTransactionSource(tx, validUserWallet);
+          fail("Expected exception");
+        } catch (err: any) {
+          expect(err.message).toBe("Forbidden: Transaction source account does not match authenticated user");
+          expect(err.message).not.toContain(validUserWallet);
+          expect(err.message).not.toContain(otherUserWallet);
+        }
+      });
+
+      it("rejects user with no linked wallet with 403 ForbiddenException", () => {
+        const tx = {
+          source: validUserWallet,
+          operations: [],
+        };
+        expect(() => service.validateTransactionSource(tx, undefined as any)).toThrow(
+          "Forbidden: No linked wallet found for authenticated user",
+        );
+        expect(() => service.validateTransactionSource(tx, "")).toThrow(
+          "Forbidden: No linked wallet found for authenticated user",
+        );
+        expect(loggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining("User without linked wallet attempted transaction"),
+        );
+      });
+
+      it("rejects operation-level source mismatch with 403 ForbiddenException", () => {
+        const tx = {
+          source: validUserWallet,
+          operations: [
+            { type: "payment" }, // no source specified, inherits tx.source
+            { type: "invokeHostFunction", source: otherUserWallet }, // spoofed operation source!
+          ],
+        };
+
+        expect(() => service.validateTransactionSource(tx, validUserWallet, { method: "testOp" })).toThrow(
+          "Forbidden: Operation source account does not match authenticated user",
+        );
+        expect(loggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(`Operation source account mismatch in testOp: user=${validUserWallet} attempted=${otherUserWallet}`),
+        );
+      });
+
+      it("passes when operation-level source matches authenticated wallet", () => {
+        const tx = {
+          source: validUserWallet,
+          operations: [
+            { type: "payment", source: validUserWallet },
+          ],
+        };
+        expect(() => service.validateTransactionSource(tx, validUserWallet)).not.toThrow();
+      });
+
+      it("validates fee-bump transaction source and inner transaction operations", () => {
+        const feeBumpMismatch = {
+          feeSource: otherUserWallet,
+          innerTransaction: {
+            source: validUserWallet,
+            operations: [],
+          },
+        };
+        expect(() => service.validateTransactionSource(feeBumpMismatch, validUserWallet)).toThrow(
+          "Forbidden: Transaction source account does not match authenticated user",
+        );
+
+        const feeBumpMatching = {
+          feeSource: validUserWallet,
+          innerTransaction: {
+            source: validUserWallet,
+            operations: [],
+          },
+        };
+        expect(() => service.validateTransactionSource(feeBumpMatching, validUserWallet)).not.toThrow();
+      });
+    });
+
+    describe("simulateAssembleAndSend with source verification", () => {
+      it("prevents any RPC call or signing when source validation fails", async () => {
+        const tx: any = {
+          source: otherUserWallet,
+          operations: [],
+        };
+
+        await expect(
+          service.simulateAssembleAndSend(tx, validUserWallet),
+        ).rejects.toThrow("Forbidden: Transaction source account does not match authenticated user");
+
+        // Verify NO network/RPC simulation or signing occurred
+        expect(mockRpc.simulateTransaction).not.toHaveBeenCalled();
+        expect(mockRpc.sendTransaction).not.toHaveBeenCalled();
+      });
+
+      it("proceeds with simulation and send when source matches authenticated wallet", async () => {
+        const tx: any = {
+          source: validUserWallet,
+          operations: [],
+        };
+
+        const result = await service.simulateAssembleAndSend(tx, validUserWallet);
+        expect(result.status).toBe("PENDING");
+        expect(mockRpc.simulateTransaction).toHaveBeenCalledWith(tx);
+        expect(mockRpc.sendTransaction).toHaveBeenCalled();
+      });
+
+      it("system-initiated flow without authenticatedWallet parameter continues to work", async () => {
+        const systemTx: any = {
+          source: "GSIGNER",
+          operations: [],
+        };
+
+        // System-initiated flow does not pass authenticatedWallet
+        const result = await service.simulateAssembleAndSend(systemTx);
+        expect(result.status).toBe("PENDING");
+        expect(mockRpc.simulateTransaction).toHaveBeenCalledWith(systemTx);
+      });
     });
   });
 });

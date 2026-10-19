@@ -13,7 +13,9 @@ describe('WebhooksService', () => {
       },
     };
     const config = { get: jest.fn((key: string) => key === 'WEBHOOK_SECRET_KEY' ? webhookSecretKey : undefined) };
-    return { service: new WebhooksService(prisma as any, config as any), prisma, config };
+    const service = new WebhooksService(prisma as any, config as any);
+    jest.spyOn(service as any, 'sleep').mockResolvedValue(undefined);
+    return { service, prisma, config };
   }
 
   afterEach(() => jest.restoreAllMocks());
@@ -55,7 +57,7 @@ describe('WebhooksService', () => {
     ]);
     const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
 
-    const event = { claimId: 'c1', fromStatus: 'PROCESSING', toStatus: 'PAID', timestamp: 1 };
+    const event = { claimId: 'c1', fromStatus: 'PROCESSING', toStatus: 'PAID', timestamp: 1, actorId: 'system', reason: null };
     await service.notifyClaimStatusChange(event);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -65,13 +67,41 @@ describe('WebhooksService', () => {
     expect((init.headers as Record<string, string>)['X-Webhook-Signature']).toBe(expected);
   });
 
+  it('#730 — includes actor identity and reason in claim status change payload', async () => {
+    const { service } = build([
+      { id: 'a', url: 'https://a.test', secret: null, events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+    ]);
+    const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
+
+    const event = {
+      claimId: 'c-123',
+      fromStatus: 'SUBMITTED',
+      toStatus: 'PROCESSING',
+      timestamp: 1234567890,
+      actorId: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+      reason: 'Automated claim triggered by oracle threshold',
+    };
+    await service.notifyClaimStatusChange(event);
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const sentBody = JSON.parse(init.body as string);
+    expect(sentBody).toMatchObject({
+      claimId: 'c-123',
+      fromStatus: 'SUBMITTED',
+      toStatus: 'PROCESSING',
+      actorId: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+      reason: 'Automated claim triggered by oracle threshold',
+    });
+  });
+
   it('does not reject when loading registrations fails (callers fire-and-forget)', async () => {
     const { service, prisma } = build();
     prisma.webhookRegistration.findMany.mockRejectedValue(new Error('db down'));
 
     await expect(
       service.notifyPolicyStatusChange({ policyId: 'p', fromStatus: 'ACTIVE', toStatus: 'CLAIMED', timestamp: 1 }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual([]);
   });
 
   describe('#606 — webhook secret encryption at rest', () => {
@@ -240,4 +270,82 @@ describe('WebhooksService', () => {
       expect(results[0].error).toContain('signature verification failed');
     });
   });
+
+  describe('#751 — webhook redirect handling and domain protection', () => {
+    it('sets redirect: manual when dispatching webhook request', async () => {
+      const { service } = build([
+        { id: 'a', url: 'https://webhook.test/callback', secret: 's', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Map(),
+      } as unknown as Response);
+
+      await service.notifyClaimStatusChange({
+        claimId: 'c1',
+        fromStatus: 'PENDING',
+        toStatus: 'PROCESSING',
+        timestamp: 12345,
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(init.redirect).toBe('manual');
+    });
+
+    it('rejects and logs redirect attempts to a different domain', async () => {
+      const { service } = build([
+        { id: 'target-1', url: 'https://trusted.example.com/webhook', secret: 's', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      const redirectHeaders = new Map([['location', 'https://malicious-attacker.com/steal-payload']]);
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 302,
+        headers: redirectHeaders,
+      } as unknown as Response);
+
+      const results = await service.notifyClaimStatusChange({
+        claimId: 'c1',
+        fromStatus: 'PENDING',
+        toStatus: 'PROCESSING',
+        timestamp: 12345,
+      });
+
+      expect(results[0].success).toBe(false);
+      expect(results[0].error).toMatch(/redirect to different domain blocked|redirects are not followed/);
+      // Ensure fetch was never called with the malicious redirect URL
+      expect(fetchMock).not.toHaveBeenCalledWith(
+        'https://malicious-attacker.com/steal-payload',
+        expect.anything(),
+      );
+    });
+
+    it('rejects redirect attempts on 301, 307, 308 without leaking payloads', async () => {
+      const { service } = build([
+        { id: 'target-2', url: 'https://trusted.example.com/webhook', secret: 's', events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      for (const statusCode of [301, 307, 308]) {
+        const redirectHeaders = new Map([['location', 'https://other-domain.org/hook']]);
+        jest.spyOn(global, 'fetch').mockResolvedValue({
+          ok: false,
+          status: statusCode,
+          headers: redirectHeaders,
+        } as unknown as Response);
+
+        const results = await service.notifyPolicyStatusChange({
+          policyId: 'p1',
+          fromStatus: 'PENDING',
+          toStatus: 'ACTIVE',
+          timestamp: 12345,
+        });
+
+        expect(results[0].success).toBe(false);
+        expect(results[0].error).toBeDefined();
+      }
+    });
+  });
 });
+

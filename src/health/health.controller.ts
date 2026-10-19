@@ -80,6 +80,11 @@ export class HealthController {
   } | null = null;
   private dbThroughputCache: { timestamp: number; value: { commits: number; rollbacks: number; conflicts: number } } | null = null;
 
+  // #744 — Cache the full health response briefly to prevent connection churn
+  // under health probe load. Load balancers poll every 5-10s; caching for 5s
+  // cuts DB connection creation by ~50% without meaningfully stale status.
+  private healthResponseCache: { timestamp: number; body: HealthResponseDto } | null = null;
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stellar: StellarService,
@@ -182,11 +187,18 @@ export class HealthController {
   @ApiOperation({ summary: 'Check service health and dependency connectivity' })
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
-  async check(@Req() req: Request): Promise<HealthResponseDto> {
+  async check(@Req() req?: Request): Promise<HealthResponseDto> {
+    // #744 — Serve from cache if still fresh (5s TTL). Bypass cache for admin
+    // requests since they need detailed pool/replication data that may have changed.
+    const isAdmin = this.isAdminRequest(req);
+    if (!isAdmin && this.healthResponseCache && Date.now() - this.healthResponseCache.timestamp < 5000) {
+      return this.healthResponseCache.body;
+    }
+
     const startTime = Date.now();
     let dbStatus: 'ok' | 'error' = 'ok';
     let dbError: string | undefined;
-    let dbPool: { active: number; idle: number; waiting: number; max: number; utilizationPercent: number; exhausted: boolean } | undefined;
+    let dbPool: { active: number; idle: number; waiting: number; max: number; poolTimeout?: number; connectTimeout?: number; utilizationPercent: number; exhausted: boolean; prismaMetrics?: unknown } | undefined;
     let stellarStatus: 'ok' | 'error' = 'ok';
     let stellarError: string | undefined;
     let keeperBalanceXlm: string | undefined;
@@ -244,16 +256,34 @@ export class HealthController {
           const idle    = Number(rows.find(r => r.state === 'idle')?.count    ?? 0);
           const waiting = Number(rows.find(r => r.state === 'idle in transaction (aborted)')?.count ?? 0);
 
-          const maxConnections = Number(
+          const effectiveLimit = this.prisma.poolConfig?.connectionLimit ?? Number(
             this.config.get<string>('DATABASE_CONNECTION_LIMIT') ?? DEFAULT_DB_POOL_MAX_CONNECTIONS,
           );
+          const poolTimeout = this.prisma.poolConfig?.poolTimeout ?? Number(
+            this.config.get<string>('DATABASE_POOL_TIMEOUT') ?? 10,
+          );
+          const connectTimeout = this.prisma.poolConfig?.connectTimeout ?? Number(
+            this.config.get<string>('DATABASE_CONNECT_TIMEOUT') ?? 5,
+          );
+          const maxConnections = effectiveLimit;
           const warnPercent = Number(
             this.config.get<string>('DB_POOL_EXHAUSTION_WARN_PERCENT') ?? DEFAULT_DB_POOL_EXHAUSTION_WARN_PERCENT,
           );
           const utilizationPercent = maxConnections > 0 ? Math.round((active / maxConnections) * 100) : 0;
           const exhausted = utilizationPercent >= warnPercent;
+          const prismaMetrics = await this.prisma.getMetrics();
 
-          dbPool = { active, idle, waiting, max: maxConnections, utilizationPercent, exhausted };
+          dbPool = {
+            active,
+            idle,
+            waiting,
+            max: maxConnections,
+            poolTimeout,
+            connectTimeout,
+            utilizationPercent,
+            exhausted,
+            prismaMetrics: prismaMetrics ?? undefined,
+          };
 
           if (exhausted) {
             dbStatus = 'error';
@@ -264,6 +294,7 @@ export class HealthController {
         } catch {
           // Non-fatal: pg_stat_activity may be restricted on managed databases.
         }
+
 
         // #463 — Database transaction throughput monitoring
         // Track database transaction rate to detect performance degradation.
@@ -450,6 +481,8 @@ export class HealthController {
           keeperBalanceXlm = await this.stellar.getAccountBalance(
             this.stellar.keeperPublicKey,
             HEALTH_CHECK_RPC_TIMEOUT_MS,
+            // One Horizon attempt: retries would multiply probe latency (#338).
+            1,
           );
 
           // #191 — RPC reachability alone isn't enough: a keeper account
@@ -488,6 +521,9 @@ export class HealthController {
           } else {
             // #421 — Report waiting job counts for known Bull queues so ops can
             // detect build-up before processing latency becomes user-visible.
+            // #695 — verify active Redis connectivity via PING before querying queue keys
+            await this.withTimeout(this.redis.ping(), 'Redis PING');
+
             const queueNames = (this.config.get<string>('HEALTH_QUEUE_NAMES') ?? 'claims,oracle')
               .split(',')
               .map(n => n.trim())
@@ -684,13 +720,14 @@ export class HealthController {
       openMeteoStatus === 'ok' &&
       aviationStackStatus === 'ok';
 
-    const detailed = this.isAdminRequest(req);
+    const detailed = isAdmin;
 
     const body: HealthResponseDto = {
       status:    healthy ? 'ok' : 'degraded',
       timestamp: new Date().toISOString(),
       service:   'parashield-api',
       version:   this.config.get<string>('npm_package_version') ?? process.env.npm_package_version ?? 'unknown',
+      commitSha: this.config.get<string>('GIT_COMMIT_SHA') ?? process.env.GIT_COMMIT_SHA ?? 'unknown',
       responseTimeMs: Date.now() - startTime,
       uptimeMs: Math.round(process.uptime() * 1000),
       ...(detailed
@@ -705,8 +742,13 @@ export class HealthController {
       checks: (detailed ? checks : this.toPublicChecks(checks)) as any,
     } as HealthResponseDto;
 
-    const statusFormat = this.getStatusFormat(req.headers['accept']);
+    const statusFormat = this.getStatusFormat(req?.headers?.['accept']);
     const responseBody = this.transformStatusFormat(body, statusFormat);
+
+    // #744 — Cache the response for subsequent probes (only non-admin, healthy).
+    if (!isAdmin && healthy) {
+      this.healthResponseCache = { timestamp: Date.now(), body: responseBody as HealthResponseDto };
+    }
 
     if (!healthy) {
       throw new HttpException(responseBody, HttpStatus.SERVICE_UNAVAILABLE);

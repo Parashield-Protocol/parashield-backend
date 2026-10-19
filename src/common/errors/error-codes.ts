@@ -30,12 +30,20 @@ export enum ErrorCode {
   CLAIM_POLICY_NOT_OWNED    = 'CLAIM_POLICY_NOT_OWNED',
   CLAIM_POLICY_NOT_ACTIVE   = 'CLAIM_POLICY_NOT_ACTIVE',
   CLAIM_POLICY_EXPIRED      = 'CLAIM_POLICY_EXPIRED',
+  // The policy or its claims changed concurrently; safe to retry.
+  CLAIM_CONCURRENT_MODIFICATION = 'CLAIM_CONCURRENT_MODIFICATION',
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   TOO_MANY_REQUESTS     = 'TOO_MANY_REQUESTS',
 
   // ── Service availability ──────────────────────────────────────────────────
   SERVICE_UNAVAILABLE   = 'SERVICE_UNAVAILABLE',
+
+  // ── Stellar Horizon ───────────────────────────────────────────────────────
+  // Horizon did not respond in time after retries; transient, safe to retry.
+  HORIZON_TIMEOUT       = 'HORIZON_TIMEOUT',
+  // Horizon circuit is open after repeated timeouts; retry after a short wait.
+  HORIZON_UNAVAILABLE   = 'HORIZON_UNAVAILABLE',
 }
 
 /**

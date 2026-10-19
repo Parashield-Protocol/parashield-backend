@@ -89,7 +89,7 @@ export function applyRateLimitHeaders(document: OpenAPIObject): void {
         response.headers = {
           ...RATE_LIMIT_HEADERS,
           ...(status === '429' ? RETRY_AFTER_HEADER : {}),
-          ...response.headers,
+          ...((response.headers as object) || {}),
         };
       }
 

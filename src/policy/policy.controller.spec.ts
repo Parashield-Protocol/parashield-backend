@@ -26,6 +26,7 @@ describe("PolicyController", () => {
     createProduct: jest.fn(),
     updateProduct: jest.fn(),
     deactivateProduct: jest.fn(),
+    searchPolicies: jest.fn(),
   };
 
   const mockStatusEventsService = {
@@ -716,4 +717,105 @@ describe("PolicyController", () => {
       expect(events).toHaveLength(countAfterClose);
     });
   });
+
+  describe("#729 — getPolicy ownership check and security logging", () => {
+    const ownerWallet = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+    const attackerWallet = "GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+    const mockPolicy = {
+      id: "policy-uuid-1234",
+      policyholder: ownerWallet,
+      premium: "100",
+      premiumRate: "0.05",
+      coverageAmount: "2000",
+      status: "ACTIVE",
+    };
+
+    it("returns policy details when requested by the policy owner", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(mockPolicy);
+      const req = {
+        user: { walletAddress: ownerWallet },
+        wallet: ownerWallet,
+      } as AuthenticatedRequest;
+
+      const result = await controller.getPolicy("policy-uuid-1234", req);
+
+      expect(mockPolicyService.getPolicy).toHaveBeenCalledWith("policy-uuid-1234");
+      expect(result).toEqual({ success: true, data: mockPolicy });
+    });
+
+    it("throws ForbiddenException and logs warning when requested by a different wallet", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(mockPolicy);
+      const req = {
+        user: { walletAddress: attackerWallet },
+        wallet: attackerWallet,
+      } as AuthenticatedRequest;
+
+      const loggerWarnSpy = jest.spyOn((controller as any).logger, "warn");
+
+      await expect(controller.getPolicy("policy-uuid-1234", req)).rejects.toThrow(
+        ForbiddenException,
+      );
+      expect(loggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("Unauthorized access attempt"),
+      );
+    });
+
+    it("throws NotFoundException when the policy does not exist", async () => {
+      mockPolicyService.getPolicy.mockResolvedValue(null);
+      const req = {
+        user: { walletAddress: ownerWallet },
+        wallet: ownerWallet,
+      } as AuthenticatedRequest;
+
+      await expect(controller.getPolicy("nonexistent-policy", req)).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+  });
+
+  describe("#731 — searchPolicies PostgreSQL full-text search", () => {
+    const wallet = "GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ";
+    const req = {
+      user: { walletAddress: wallet },
+      wallet,
+    } as AuthenticatedRequest;
+
+    const mockSearchResults = {
+      data: [
+        { id: "policy-1", policyholder: wallet, status: "ACTIVE" },
+      ],
+      total: 1,
+      page: 1,
+      limit: 20,
+    };
+
+    it("calls policyService.searchPolicies with parsed query parameters", async () => {
+      mockPolicyService.searchPolicies.mockResolvedValue(mockSearchResults);
+
+      const result = await controller.searchPolicies("drought insurance", "1", "20", req);
+
+      expect(mockPolicyService.searchPolicies).toHaveBeenCalledWith(
+        "drought insurance",
+        wallet,
+        1,
+        20,
+      );
+      expect(result).toEqual({ success: true, ...mockSearchResults });
+    });
+
+    it("getMyPolicies delegates to searchPolicies when q parameter is provided", async () => {
+      mockPolicyService.searchPolicies.mockResolvedValue(mockSearchResults);
+
+      const result = await controller.getMyPolicies("1", "20", req, "flood");
+
+      expect(mockPolicyService.searchPolicies).toHaveBeenCalledWith(
+        "flood",
+        wallet,
+        1,
+        20,
+      );
+      expect(result).toEqual({ success: true, ...mockSearchResults });
+    });
+  });
 });
+

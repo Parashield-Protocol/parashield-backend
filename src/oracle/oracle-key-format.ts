@@ -17,6 +17,9 @@ const RAINFALL_OR_TEMPERATURE_KEY_RE =
   /^(?:rainfall|temperature):(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?):20\d{2}-(?:0[1-9]|1[0-2])$/;
 const FLIGHT_KEY_RE = /^flight:[A-Z0-9]+:20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])$/;
 
+/** Maximum oracle key length to prevent DB bloat and oversized-key DoS (#726). */
+export const MAX_ORACLE_KEY_LENGTH = 128;
+
 /**
  * Range-checks the lat/lng embedded in a rainfall/temperature key in addition
  * to the format regex, which only checks that they're signed decimals — same
@@ -24,6 +27,10 @@ const FLIGHT_KEY_RE = /^flight:[A-Z0-9]+:20\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12
  * src/policy/dto/oracle-key-coordinates.validator.ts.
  */
 export function isValidOracleKeyFormat(key: string): boolean {
+  // Reject oversized keys before regex matching (#726).
+  if (typeof key !== 'string' || key.length > MAX_ORACLE_KEY_LENGTH) {
+    return false;
+  }
   const coordMatch = RAINFALL_OR_TEMPERATURE_KEY_RE.exec(key);
   if (coordMatch) {
     const lat = parseFloat(coordMatch[1]);

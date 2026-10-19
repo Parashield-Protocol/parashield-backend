@@ -1,17 +1,31 @@
-import { Injectable, Logger, HttpException, HttpStatus, BadRequestException } from "@nestjs/common";
+import { Injectable, Logger, HttpException, HttpStatus, BadRequestException, ForbiddenException } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import {
   Networks,
   Keypair,
   TransactionBuilder,
   Transaction,
+  FeeBumpTransaction,
   BASE_FEE,
   Operation,
   Contract,
+  StrKey,
   rpc as StellarRpc,
   Horizon,
   xdr,
 } from "@stellar/stellar-sdk";
+import {
+  HorizonCircuitBreaker,
+  HorizonTimeoutError,
+  isRetryableHorizonError,
+  isTimeoutError,
+} from "./horizon-resilience";
+
+/** Horizon retry tuning: attempts per call and the exponential backoff schedule. */
+const HORIZON_MAX_ATTEMPTS = 3;
+const HORIZON_BACKOFF_BASE_MS = 500; // 500ms, 1s, 2s...
+const HORIZON_BACKOFF_MAX_MS = 5000;
+const HORIZON_DEFAULT_TIMEOUT_MS = 10000;
 
 /**
  * #187 — a reverting contract call is a deterministic simulation failure:
@@ -44,6 +58,29 @@ function isRateLimitError(err: unknown): boolean {
 }
 
 /**
+ * #745 — Stellar transaction memo limit is 28 bytes.
+ * Memos exceeding this cause the transaction to be rejected by the network.
+ */
+const MAX_MEMO_BYTES = 28;
+
+/**
+ * #745 — Validate and normalize a transaction memo.
+ * Throws BadRequestException if the memo exceeds 28 bytes.
+ * Returns undefined for empty/undefined memos.
+ */
+function validateMemo(memo?: string): string | undefined {
+  if (!memo) return undefined;
+  const bytes = Buffer.byteLength(memo, "utf8");
+  if (bytes > MAX_MEMO_BYTES) {
+    throw new BadRequestException(
+      `Transaction memo exceeds ${MAX_MEMO_BYTES}-byte limit (got ${bytes} bytes). ` +
+        `Shorten the memo to at most ${MAX_MEMO_BYTES} bytes.`,
+    );
+  }
+  return memo;
+}
+
+/**
  * StellarService — thin wrapper over the Stellar SDK for Soroban contract calls.
  *
  * Responsibilities:
@@ -58,16 +95,44 @@ export class StellarService {
   private readonly horizon: Horizon.Server;
   private readonly network: string;
   private readonly keeperKeypair: Keypair;
+  // #704 — cache network config at startup to avoid repeated env lookups
+  private readonly _networkPassphrase: string;
+  private readonly _horizonUrl: string;
+  private readonly _rpcUrl: string;
+
+  // #728 — per-account transaction serialization. Concurrent invocations from
+  // the same account would race on sequence numbers and fail with
+  // TRANSACTION_BAD_SEQ. A simple promise-chain mutex serializes them.
+  private readonly accountLocks = new Map<string, Promise<void>>();
+
+  // Fails Horizon calls fast after repeated timeouts instead of letting every
+  // request wait out the full retry schedule against an unresponsive node.
+  private readonly horizonBreaker = new HorizonCircuitBreaker();
+
+  private async withAccountLock<T>(publicKey: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.accountLocks.get(publicKey) ?? Promise.resolve();
+    let release: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    this.accountLocks.set(publicKey, prev.then(() => gate));
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release!();
+    }
+  }
 
   constructor(private readonly config: ConfigService) {
     const rpcUrl =
       config.get<string>("STELLAR_RPC_URL") ??
       "https://soroban-testnet.stellar.org";
     this.rpc = new StellarRpc.Server(rpcUrl);
+    this._rpcUrl = rpcUrl;
     this.network =
       config.get<string>("STELLAR_NETWORK") === "mainnet"
         ? Networks.PUBLIC
         : Networks.TESTNET;
+    this._networkPassphrase = this.network;
     // #185 — balances only exist on a Horizon account response, not on the
     // lightweight object `rpc.Server.getAccount()` returns (that's meant for
     // building transactions: sequence number only, no `.balances`). A
@@ -78,6 +143,7 @@ export class StellarService {
         ? "https://horizon.stellar.org"
         : "https://horizon-testnet.stellar.org");
     this.horizon = new Horizon.Server(horizonUrl);
+    this._horizonUrl = horizonUrl;
     const secret = config.get<string>("KEEPER_SECRET_KEY");
     if (!secret) {
       throw new Error(
@@ -123,13 +189,29 @@ export class StellarService {
     method: string,
     args: xdr.ScVal[],
     signerKeypair?: Keypair,
+    memo?: string,
   ): Promise<string> {
+    // #745 — Validate memo length before building the transaction.
+    const validMemo = validateMemo(memo);
+
     if (!/^C[A-BA-HJ-NP-Z0-9]{55}$/.test(contractId)) {
       throw new BadRequestException(
         `Invalid Stellar contract address: ${contractId}`,
       );
     }
     const signer = signerKeypair ?? this.keeperKeypair;
+    // #728 — serialize per-account to prevent sequence number conflicts.
+    return this.withAccountLock(signer.publicKey(), () =>
+      this.doInvokeContract(contractId, method, args, signer),
+    );
+  }
+
+  private async doInvokeContract(
+    contractId: string,
+    method: string,
+    args: xdr.ScVal[],
+    signer: Keypair,
+  ): Promise<string> {
     const contract = new Contract(contractId);
     const MAX_ATTEMPTS = 3;
     let lastError: Error | null = null;
@@ -161,13 +243,16 @@ export class StellarService {
           this.rpc.getAccount(signer.publicKey()),
           "getAccount",
         );
-        const tx = new TransactionBuilder(account, {
+        let builder = new TransactionBuilder(account, {
           fee: BASE_FEE,
           networkPassphrase: this.network,
         })
           .addOperation(contract.call(method, ...args))
-          .setTimeout(30)
-          .build();
+          .setTimeout(30);
+        if (validMemo) {
+          builder = builder.addMemo(xdr.Memo.text(validMemo));
+        }
+        const tx = builder.build();
 
         const simResult = await this.withTimeout(
           this.rpc.simulateTransaction(tx),
@@ -246,6 +331,127 @@ export class StellarService {
   }
 
   /**
+   * Validate the format of a Stellar public key using the Stellar SDK.
+   * Compares canonical forms (trimmed, uppercase).
+   *
+   * Deliberate decision regarding muxed (M...) addresses:
+   * Muxed accounts are explicitly rejected with 400 Bad Request because
+   * ParaShield smart contracts on Soroban and JWT wallet authentication
+   * require standard Ed25519 public keys (G...).
+   *
+   * @param rawAddress The account public key to validate.
+   * @param contextLabel Optional field or role name for descriptive error messaging.
+   * @returns The canonical public key string.
+   */
+  validateAccountAddress(rawAddress: unknown, contextLabel = 'account'): string {
+    if (typeof rawAddress !== 'string' || !rawAddress.trim()) {
+      throw new BadRequestException(`Invalid Stellar ${contextLabel}: address must be a non-empty string`);
+    }
+
+    const trimmed = rawAddress.trim();
+
+    // Check if it's a muxed account (M...)
+    if (
+      trimmed.startsWith('M') ||
+      (typeof StrKey.isValidMed25519PublicKey === 'function' && StrKey.isValidMed25519PublicKey(trimmed))
+    ) {
+      throw new BadRequestException(
+        `Muxed accounts (M...) are not supported for ${contextLabel}; a standard Ed25519 public key (G...) is required`,
+      );
+    }
+
+    const canonical = trimmed.toUpperCase();
+
+    const isValid = typeof StrKey.isValidEd25519PublicKey === 'function'
+      ? StrKey.isValidEd25519PublicKey(canonical)
+      : /^G[A-Z2-7]{55}$/.test(canonical);
+
+    if (!isValid) {
+      throw new BadRequestException(
+        `Invalid Stellar ${contextLabel} format: must be a valid 56-character Ed25519 public key (G...)`,
+      );
+    }
+
+    return canonical;
+  }
+
+  /**
+   * Validate that a transaction's source account (and all operation-level source fields)
+   * match the authenticated user's linked wallet.
+   *
+   * Security constraints (#687):
+   * 1. Identity is taken from trusted authentication context (never unverified params).
+   * 2. Key format is validated with the Stellar SDK (malformed is 400).
+   * 3. Mismatches and users with no linked wallet return 403 without revealing the linked wallet address.
+   * 4. Validates transaction envelope source, fee source, and every operation-level source.
+   * 5. Runs before any Horizon/RPC calls, simulation, or signing.
+   * 6. Attempted mismatches are logged at warn level (never logging secret keys or signatures).
+   */
+  validateTransactionSource(
+    tx: Transaction | FeeBumpTransaction | any,
+    authenticatedWallet?: string,
+    options?: { correlationId?: string; method?: string; userId?: string },
+  ): void {
+    const method = options?.method || 'validateTransactionSource';
+    const correlationId = options?.correlationId;
+    const userId = options?.userId || authenticatedWallet || 'anonymous';
+
+    // 1. Verify user has a linked wallet in their auth context
+    if (!authenticatedWallet || typeof authenticatedWallet !== 'string' || !authenticatedWallet.trim()) {
+      this.logger.warn(
+        `User without linked wallet attempted transaction in ${method}: user=${userId}${correlationId ? ` corr=${correlationId}` : ''}`,
+      );
+      throw new ForbiddenException('Forbidden: No linked wallet found for authenticated user');
+    }
+
+    const canonicalExpected = this.validateAccountAddress(authenticatedWallet, 'authenticated wallet');
+
+    // 2. Check fee-bump transaction
+    if (tx && typeof tx === 'object' && ('feeSource' in tx || 'innerTransaction' in tx)) {
+      if (tx.feeSource) {
+        const canonicalFeeSource = this.validateAccountAddress(tx.feeSource, 'fee source');
+        if (canonicalFeeSource !== canonicalExpected) {
+          this.logger.warn(
+            `Fee source account mismatch in ${method}: user=${userId} attempted=${tx.feeSource}${correlationId ? ` corr=${correlationId}` : ''}`,
+          );
+          throw new ForbiddenException('Forbidden: Transaction source account does not match authenticated user');
+        }
+      }
+      if (tx.innerTransaction) {
+        this.validateTransactionSource(tx.innerTransaction, authenticatedWallet, options);
+        return;
+      }
+    }
+
+    // 3. Check transaction envelope source
+    if (!tx || typeof tx !== 'object' || !tx.source) {
+      throw new BadRequestException('Transaction must have a valid source account');
+    }
+
+    const canonicalTxSource = this.validateAccountAddress(tx.source, 'transaction source');
+    if (canonicalTxSource !== canonicalExpected) {
+      this.logger.warn(
+        `Transaction source account mismatch in ${method}: user=${userId} attempted=${tx.source}${correlationId ? ` corr=${correlationId}` : ''}`,
+      );
+      throw new ForbiddenException('Forbidden: Transaction source account does not match authenticated user');
+    }
+
+    // 4. Check all operation-level sources
+    const operations = Array.isArray(tx.operations) ? tx.operations : [];
+    for (const op of operations) {
+      if (op && op.source) {
+        const canonicalOpSource = this.validateAccountAddress(op.source, 'operation source');
+        if (canonicalOpSource !== canonicalExpected) {
+          this.logger.warn(
+            `Operation source account mismatch in ${method}: user=${userId} attempted=${op.source}${correlationId ? ` corr=${correlationId}` : ''}`,
+          );
+          throw new ForbiddenException('Forbidden: Operation source account does not match authenticated user');
+        }
+      }
+    }
+  }
+
+  /**
    * Simulate a raw transaction, assemble it with the simulation result,
    * sign it with the keeper key, and send it to the network.
    *
@@ -258,7 +464,17 @@ export class StellarService {
    */
   async simulateAssembleAndSend(
     tx: Transaction,
+    authenticatedWallet?: string,
+    correlationId?: string,
   ): Promise<StellarRpc.Api.SendTransactionResponse> {
+    // If authenticatedWallet is provided, validate source account BEFORE any RPC calls or signing
+    if (authenticatedWallet) {
+      this.validateTransactionSource(tx, authenticatedWallet, {
+        method: 'simulateAssembleAndSend',
+        correlationId,
+      });
+    }
+
     const simResult = await this.withTimeout(
       this.rpc.simulateTransaction(tx),
       "simulateTransaction",
@@ -467,6 +683,47 @@ export class StellarService {
   }
 
   /**
+   * Run a Horizon request with a per-attempt timeout, retrying timeouts and
+   * transient failures (network errors, 429, 5xx) with exponential backoff.
+   * Deterministic errors (e.g. 404) are rethrown immediately. If every attempt
+   * timed out, throws a typed HorizonTimeoutError and counts it toward the
+   * Horizon circuit breaker, which fails calls fast while open.
+   */
+  private async callHorizon<T>(
+    operation: string,
+    fn: () => Promise<T>,
+    timeoutMs: number = HORIZON_DEFAULT_TIMEOUT_MS,
+    maxAttempts: number = HORIZON_MAX_ATTEMPTS,
+  ): Promise<T> {
+    this.horizonBreaker.acquire(operation);
+    const attempts = Math.max(1, maxAttempts);
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const result = await this.withTimeout(fn(), `Horizon ${operation}`, timeoutMs);
+        this.horizonBreaker.recordResponse();
+        return result;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!isRetryableHorizonError(err) || attempt >= attempts) {
+          if (isTimeoutError(err)) {
+            this.horizonBreaker.recordTimeout();
+            throw new HorizonTimeoutError(operation, attempt, timeoutMs);
+          }
+          this.horizonBreaker.recordResponse();
+          throw err;
+        }
+        const backoffMs = isRateLimitError(err)
+          ? Math.min(5000 * Math.pow(2, attempt - 1), 30000)
+          : Math.min(HORIZON_BACKOFF_BASE_MS * Math.pow(2, attempt - 1), HORIZON_BACKOFF_MAX_MS);
+        this.logger.warn(
+          `Horizon ${operation} attempt ${attempt}/${attempts} failed: ${message} — retrying in ${backoffMs}ms`,
+        );
+        await this.sleep(backoffMs);
+      }
+    }
+  }
+
+  /**
    * Reads an account's native XLM balance from its ledger entry over the RPC.
    * Returns a 7-decimal string like Horizon does, or "0" when the account
    * does not exist.
@@ -503,8 +760,16 @@ export class StellarService {
    *                   Health checks (#338) pass a much shorter timeout so a
    *                   slow Horizon response doesn't block a load balancer's
    *                   health probe long enough to trigger a pod restart.
+   * @param maxAttempts  Horizon attempts before giving up (default 3). Health
+   *                   checks pass 1 so retries don't multiply probe latency.
+   * @throws HorizonTimeoutError when every Horizon attempt timed out.
+   * @throws HorizonUnavailableError when the Horizon circuit is open.
    */
-  async getAccountBalance(publicKey: string, timeoutMs?: number): Promise<string> {
+  async getAccountBalance(
+    publicKey: string,
+    timeoutMs?: number,
+    maxAttempts?: number,
+  ): Promise<string> {
     // #530 — the account's ledger entry carries its native balance, so ask the
     // RPC first and only fall back to Horizon if the RPC cannot answer.
     try {
@@ -518,10 +783,11 @@ export class StellarService {
     }
     let account: Awaited<ReturnType<typeof this.horizon.loadAccount>>;
     try {
-      account = await this.withTimeout(
-        this.horizon.loadAccount(publicKey),
+      account = await this.callHorizon(
         "loadAccount",
+        () => this.horizon.loadAccount(publicKey),
         timeoutMs,
+        maxAttempts,
       );
     } catch (err) {
       // #515 — horizon.loadAccount throws when the account does not exist on
@@ -611,9 +877,19 @@ export class StellarService {
     return this.keeperKeypair.publicKey();
   }
 
-  /** Return the current network passphrase. */
+  /** Return the cached network passphrase (#704). */
   get networkPassphrase(): string {
-    return this.network;
+    return this._networkPassphrase;
+  }
+
+  /** Return the cached Horizon URL (#704). */
+  get horizonUrl(): string {
+    return this._horizonUrl;
+  }
+
+  /** Return the cached RPC URL (#704). */
+  get rpcUrl(): string {
+    return this._rpcUrl;
   }
 
   get rpcServer(): StellarRpc.Server {

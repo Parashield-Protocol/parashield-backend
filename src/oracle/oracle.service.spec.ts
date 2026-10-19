@@ -13,11 +13,21 @@ describe("OracleService.fetchRainfall", () => {
   const mockConfigService = {
     get: jest.fn((key: string) => {
       if (key === "AVIATIONSTACK_API_KEY") return undefined;
+      if (key === "ORACLE_BATCH_SIZE") return "1";
       return undefined;
     }),
   };
 
   const mockPrismaService = {
+    $transaction: jest.fn(async (arg: any) => {
+      if (Array.isArray(arg)) {
+        return Promise.all(arg);
+      }
+      if (typeof arg === "function") {
+        return arg(mockPrismaService);
+      }
+      return arg;
+    }),
     oracleReading: {
       create: jest.fn().mockResolvedValue({ id: "mock-id" }),
       upsert: jest.fn().mockResolvedValue({ id: "mock-id" }),
@@ -557,6 +567,37 @@ describe("OracleService.fetchRainfall", () => {
       expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
     });
 
+    // #703 — reject future-dated readings
+    it("should reject readings with future timestamps (#703)", async () => {
+      const futureTimestamp = Math.floor(Date.now() / 1000) + 3600; // 1 hour in future
+      const mockReading = {
+        dataType: "weather",
+        key: "rainfall:0,0:2026-06",
+        value: "100000000",
+        confidence: 95,
+        timestamp: futureTimestamp,
+        source: "open-meteo",
+      };
+      await expect(service.persistReading(mockReading)).rejects.toThrow(
+        /future/i,
+      );
+      expect(mockPrismaService.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+
+    it("should accept readings within clock skew tolerance (#703)", async () => {
+      const nowSeconds = Math.floor(Date.now() / 1000);
+      const mockReading = {
+        dataType: "weather",
+        key: "rainfall:0,0:2026-06",
+        value: "100000000",
+        confidence: 95,
+        timestamp: nowSeconds + 30, // 30s ahead — within 60s tolerance
+        source: "open-meteo",
+      };
+      await service.persistReading(mockReading);
+      expect(mockPrismaService.oracleReading.upsert).toHaveBeenCalled();
+    });
+
     it("#171 — returns NO_DATA when data array element is null", async () => {
       mockConfigService.get.mockImplementation((key) =>
         key === "AVIATIONSTACK_API_KEY" ? "test-key" : undefined,
@@ -832,6 +873,250 @@ describe("OracleService.fetchRainfall", () => {
       const call = (mockPrismaService.oracleReading.updateMany as jest.Mock).mock
         .calls[0][0];
       expect(call.data).toEqual({ onChainTxHash: "tx-abc" });
+    });
+  });
+
+  describe("Batch persistence and buffering (#686)", () => {
+    let customPrisma: {
+      $transaction: jest.Mock;
+      oracleReading: { upsert: jest.Mock; updateMany: jest.Mock };
+    };
+
+    function createOracleReading(key: string, value = "10000000"): any {
+      return {
+        dataType: "weather",
+        key,
+        value,
+        confidence: 95,
+        timestamp: Math.floor(Date.now() / 1000) - 100,
+        source: "open-meteo",
+        status: "OK",
+      };
+    }
+
+    beforeEach(() => {
+      customPrisma = {
+        $transaction: jest.fn(async (ops: any[]) => Promise.all(ops)),
+        oracleReading: {
+          upsert: jest.fn().mockResolvedValue({ id: "mock-row" }),
+          updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+        },
+      };
+    });
+
+    it("honors default configuration when env vars are not set (batchSize=50, flushInterval=1000, maxBuffer=1000)", () => {
+      const config = { get: jest.fn().mockReturnValue(undefined) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+      expect(s.getBatchSize()).toBe(50);
+      expect(s.getFlushIntervalMs()).toBe(1000);
+      expect(s.getMaxBufferSize()).toBe(1000);
+    });
+
+    it("honors overridden configuration from environment variables", () => {
+      const config = {
+        get: jest.fn((key: string) => {
+          if (key === "ORACLE_BATCH_SIZE") return "25";
+          if (key === "ORACLE_FLUSH_INTERVAL_MS") return "500";
+          if (key === "ORACLE_BUFFER_MAX_SIZE") return "2000";
+          return undefined;
+        }),
+      };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+      expect(s.getBatchSize()).toBe(25);
+      expect(s.getFlushIntervalMs()).toBe(500);
+      expect(s.getMaxBufferSize()).toBe(2000);
+    });
+
+    it("rejects invalid configuration (out of bounds or non-integer)", () => {
+      const invalidBatch = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "0" : undefined)) };
+      expect(() => new OracleService(invalidBatch as any, customPrisma as any, {} as any, {} as any)).toThrow(
+        "ORACLE_BATCH_SIZE must be a positive integer between 1 and 1000",
+      );
+
+      const invalidInterval = { get: jest.fn((k: string) => (k === "ORACLE_FLUSH_INTERVAL_MS" ? "5" : undefined)) };
+      expect(() => new OracleService(invalidInterval as any, customPrisma as any, {} as any, {} as any)).toThrow(
+        "ORACLE_FLUSH_INTERVAL_MS must be an integer between 10 and 60000",
+      );
+
+      const invalidBuffer = { get: jest.fn((k: string) => (k === "ORACLE_BUFFER_MAX_SIZE" ? "5" : undefined)) };
+      expect(() => new OracleService(invalidBuffer as any, customPrisma as any, {} as any, {} as any)).toThrow(
+        "ORACLE_BUFFER_MAX_SIZE must be an integer between 10 and 10000",
+      );
+    });
+
+    it("persistReadings: N readings produce ceil(N / batchSize) database calls and respects batch size", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "10" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      // N = 25 with batchSize = 10 should produce ceil(25 / 10) = 3 $transaction calls
+      const readings = Array.from({ length: 25 }, (_, i) => createOracleReading(`reading-${i}`));
+      await s.persistReadings(readings);
+
+      expect(customPrisma.$transaction).toHaveBeenCalledTimes(3);
+      expect(customPrisma.$transaction.mock.calls[0][0]).toHaveLength(10);
+      expect(customPrisma.$transaction.mock.calls[1][0]).toHaveLength(10);
+      expect(customPrisma.$transaction.mock.calls[2][0]).toHaveLength(5);
+    });
+
+    it("persistReadings: empty batch makes no database calls", async () => {
+      const config = { get: jest.fn().mockReturnValue(undefined) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      await s.persistReadings([]);
+      expect(customPrisma.$transaction).not.toHaveBeenCalled();
+      expect(customPrisma.oracleReading.upsert).not.toHaveBeenCalled();
+    });
+
+    it("buffer flushes on reaching batchSize", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "3" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      const p1 = s.persistReading(createOracleReading("key-1"));
+      const p2 = s.persistReading(createOracleReading("key-2"));
+      expect(customPrisma.$transaction).not.toHaveBeenCalled();
+      expect(s.getBufferSize()).toBe(2);
+
+      // Adding 3rd reading hits batchSize = 3 and triggers flush
+      const p3 = s.persistReading(createOracleReading("key-3"));
+      await Promise.all([p1, p2, p3]);
+
+      expect(customPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(customPrisma.$transaction.mock.calls[0][0]).toHaveLength(3);
+      expect(s.getBufferSize()).toBe(0);
+    });
+
+    it("buffer flushes on interval with fake timers", async () => {
+      jest.useFakeTimers();
+      try {
+        const config = {
+          get: jest.fn((k: string) => {
+            if (k === "ORACLE_BATCH_SIZE") return "10";
+            if (k === "ORACLE_FLUSH_INTERVAL_MS") return "500";
+            return undefined;
+          }),
+        };
+        const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+        const p1 = s.persistReading(createOracleReading("key-timer-1"));
+        const p2 = s.persistReading(createOracleReading("key-timer-2"));
+        expect(customPrisma.$transaction).not.toHaveBeenCalled();
+        expect(s.getBufferSize()).toBe(2);
+
+        // Advance timers past flush interval
+        jest.advanceTimersByTime(500);
+        await Promise.all([p1, p2]);
+
+        expect(customPrisma.$transaction).toHaveBeenCalledTimes(1);
+        expect(customPrisma.$transaction.mock.calls[0][0]).toHaveLength(2);
+        expect(s.getBufferSize()).toBe(0);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    it("flushes remaining buffer on application shutdown", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "50" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      s.persistReading(createOracleReading("key-shutdown-1"));
+      s.persistReading(createOracleReading("key-shutdown-2"));
+      expect(s.getBufferSize()).toBe(2);
+      expect(customPrisma.$transaction).not.toHaveBeenCalled();
+
+      // Trigger shutdown hook
+      await s.onApplicationShutdown("SIGTERM");
+
+      expect(customPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(customPrisma.$transaction.mock.calls[0][0]).toHaveLength(2);
+      expect(s.getBufferSize()).toBe(0);
+    });
+
+    it("preserves upsert semantics on duplicates within same bucket", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "5" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      const fixedTimestamp = Math.floor(Date.now() / 1000) - 200;
+      const readingA = { ...createOracleReading("dup-key", "100"), timestamp: fixedTimestamp };
+      const readingB = { ...createOracleReading("dup-key", "200"), timestamp: fixedTimestamp };
+
+      await s.persistReadings([readingA, readingB]);
+
+      expect(customPrisma.$transaction).toHaveBeenCalledTimes(1);
+      const ops = customPrisma.$transaction.mock.calls[0][0];
+      expect(ops).toHaveLength(2);
+
+      expect(customPrisma.oracleReading.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            key_source_bucket: {
+              key: "dup-key",
+              source: "open-meteo",
+              bucketStart: s.bucketStartFor(fixedTimestamp),
+            },
+          },
+          update: expect.objectContaining({ value: 100n }),
+          create: expect.objectContaining({ value: 100n }),
+        }),
+      );
+    });
+
+    it("isolates failing row without losing remaining readings in batch", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "10" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      customPrisma.$transaction.mockRejectedValueOnce(new Error("Transaction collision"));
+
+      customPrisma.oracleReading.upsert.mockImplementation((args: any) => {
+        if (args.where.key_source_bucket.key === "key-bad") {
+          return Promise.reject(new Error("Constraint violation on key-bad"));
+        }
+        return Promise.resolve({ id: "row-ok" });
+      });
+
+      const pGood1 = s.persistReading(createOracleReading("key-good-1"));
+      const pBad = s.persistReading(createOracleReading("key-bad"));
+      const pGood2 = s.persistReading(createOracleReading("key-good-2"));
+
+      await s.flushBuffer();
+
+      await expect(pGood1).resolves.toBeUndefined();
+      await expect(pGood2).resolves.toBeUndefined();
+      await expect(pBad).rejects.toThrow("Constraint violation on key-bad");
+    });
+
+    it("preserves ordering of readings (FIFO)", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "3" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      const p1 = s.persistReading(createOracleReading("order-1"));
+      const p2 = s.persistReading(createOracleReading("order-2"));
+      const p3 = s.persistReading(createOracleReading("order-3"));
+
+      await Promise.all([p1, p2, p3]);
+
+      const ops = customPrisma.$transaction.mock.calls[0][0];
+      expect(ops).toHaveLength(3);
+      expect(customPrisma.oracleReading.upsert.mock.calls[0][0].where.key_source_bucket.key).toBe("order-1");
+      expect(customPrisma.oracleReading.upsert.mock.calls[1][0].where.key_source_bucket.key).toBe("order-2");
+      expect(customPrisma.oracleReading.upsert.mock.calls[2][0].where.key_source_bucket.key).toBe("order-3");
+    });
+
+    it("applies backpressure when buffer reaches maxBufferSize", async () => {
+      const config = {
+        get: jest.fn((k: string) => {
+          if (k === "ORACLE_BATCH_SIZE") return "100";
+          if (k === "ORACLE_BUFFER_MAX_SIZE") return "2";
+          return undefined;
+        }),
+      };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+
+      s.persistReading(createOracleReading("k1"));
+      s.persistReading(createOracleReading("k2"));
+
+      await expect(s.persistReading(createOracleReading("k3"))).rejects.toThrow(
+        "Oracle reading buffer full; backpressure applied",
+      );
     });
   });
 });

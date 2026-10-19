@@ -14,10 +14,17 @@ model Policy {
   policyholder  String
   coverageXlm   Decimal   @db.Decimal(20, 7)
   premiumPaid   Decimal   @db.Decimal(20, 7)
+  // Immutable snapshot of the product's premium template at purchase time.
+  premiumRate   Int       @default(0)
+  premiumRateVersion Int  @default(1)
   oracleKey     String
   startTime     DateTime
   endTime       DateTime
   status        PolicyStatus @default(ACTIVE)
+  // Optimistic-lock counter, bumped on every status write. Claim flows guard
+  // their writes on the version they read, so a policy that was reverted and
+  // re-gated in between (same status, different lifecycle) is detected.
+  version       Int       @default(0)
   txHash        String?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
@@ -27,6 +34,8 @@ model Policy {
   @@unique([txHash])
   @@index([policyholder])
   @@index([status])
+  // #731 — GIN index on to_tsvector for full-text search is managed via migration
+  // 20261018000001_add_policy_search_gin_index to leverage PostgreSQL full-text search.
 }
 
 model Product {
@@ -39,6 +48,7 @@ model Product {
   coverageMin  Decimal       @db.Decimal(20, 7)
   coverageMax  Decimal       @db.Decimal(20, 7)
   premiumRate  Int
+  premiumRateVersion Int       @default(1)
   maxDuration  Int
   status       ProductStatus @default(ACTIVE)
   policies     Policy[]

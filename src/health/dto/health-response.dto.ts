@@ -13,6 +13,12 @@ export class DatabasePoolDto {
   @ApiProperty({ description: 'Configured maximum pool size (DATABASE_CONNECTION_LIMIT, default 10)', example: 10 })
   max: number;
 
+  @ApiProperty({ description: 'Configured query wait timeout in seconds (DATABASE_POOL_TIMEOUT, default 10)', example: 10, required: false })
+  poolTimeout?: number;
+
+  @ApiProperty({ description: 'Configured connection acquisition timeout in seconds (DATABASE_CONNECT_TIMEOUT, default 5)', example: 5, required: false })
+  connectTimeout?: number;
+
   @ApiProperty({ description: 'Active connections as a percentage of the configured max pool size', example: 30 })
   utilizationPercent: number;
 
@@ -21,7 +27,15 @@ export class DatabasePoolDto {
     example: false,
   })
   exhausted: boolean;
+
+  @ApiProperty({
+    description: 'Prisma internal engine pool metrics if available in runtime (#676)',
+    required: false,
+    nullable: true,
+  })
+  prismaMetrics?: unknown | null;
 }
+
 
 export class DatabaseThroughputDto {
   @ApiProperty({ description: 'Total committed transactions' })
@@ -200,6 +214,9 @@ export class HealthResponseDto {
 
   @ApiProperty({ description: 'Application version from package.json', example: '0.1.0' })
   version: string;
+
+  @ApiProperty({ description: 'Git commit SHA of the deployed build', example: 'abc123def', required: false })
+  commitSha?: string;
 
   @ApiProperty({ description: 'Total health check duration in milliseconds', example: 125 })
   responseTimeMs: number;
