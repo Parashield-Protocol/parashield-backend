@@ -9,6 +9,7 @@ import { compareScaledToThreshold, parseDecimalScaled, parseFixedPointBigInt } f
 export const POLICY_DERIVED_STATE_TTL_SECONDS = 60;
 const IN_MEMORY_MAX_ENTRIES = 2000;
 const INVALIDATION_CHANNEL = 'cache:policy:invalidate';
+const REDIS_INVALIDATION_SCAN_COUNT = 100;
 
 /**
  * Time-independent state cached in Redis / memory (#714).
@@ -398,11 +399,23 @@ export class PolicyStateCacheService implements OnModuleInit, OnModuleDestroy {
     this.memoryCache.clear();
     this.inFlight.clear();
 
-    if (this.redis && typeof this.redis.keys === 'function') {
+    if (this.redis) {
       try {
-        const keys = await this.redis.keys('cache:policy:derived:*');
-        if (keys.length > 0 && typeof this.redis.del === 'function') {
-          await this.redis.del(...keys);
+        if (typeof this.redis.scan === 'function') {
+          let cursor = '0';
+          do {
+            const [nextCursor, keys] = await this.redis.scan(
+              cursor,
+              'MATCH',
+              'cache:policy:derived:*',
+              'COUNT',
+              REDIS_INVALIDATION_SCAN_COUNT,
+            );
+            cursor = nextCursor;
+            if (keys.length > 0 && typeof this.redis.del === 'function') {
+              await this.redis.del(...keys);
+            }
+          } while (cursor !== '0');
         }
         if (typeof this.redis.publish === 'function') {
           await this.redis.publish(INVALIDATION_CHANNEL, JSON.stringify({ all: true }));

@@ -14,6 +14,7 @@ import { compareScaledToThreshold, parseDecimalScaled, parseFixedPointBigInt } f
 import { financialBatch, financialTransaction, isSerializationFailure } from '../prisma/financial-transaction';
 import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cache.service';
 import { readClaimEvaluationSnapshot } from './claim-evaluation-snapshot';
+import { MAX_EVIDENCE_FILES, validateEvidenceFile } from './evidence-validation';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -94,6 +95,47 @@ export class ClaimsService {
     if (slot > now) {
       await new Promise<void>((resolve) => setTimeout(resolve, slot - now));
     }
+  }
+
+  async uploadEvidence(
+    claimId: string,
+    claimant: string,
+    files: Array<{ originalname: string; mimetype: string; buffer: Buffer }>,
+  ): Promise<Array<{ filename: string; mimeType: string; size: number }>> {
+    if (!files?.length) {
+      throw new BadRequestException('At least one evidence file is required');
+    }
+    if (files.length > MAX_EVIDENCE_FILES) {
+      throw new BadRequestException(`A maximum of ${MAX_EVIDENCE_FILES} evidence files may be uploaded`);
+    }
+
+    const claim = await this.prisma.claim.findUnique({
+      where: { id: claimId },
+      select: { id: true, claimant: true },
+    });
+    if (!claim) {
+      throw new NotFoundException('Claim not found');
+    }
+    if (claim.claimant !== claimant) {
+      throw new ForbiddenException('Claim belongs to a different wallet');
+    }
+
+    const evidence = files.map((file) => {
+      const validation = validateEvidenceFile(file.mimetype, file.buffer);
+      if (!validation.valid) {
+        throw new BadRequestException(validation.error);
+      }
+      return {
+        claimId,
+        filename: file.originalname,
+        mimeType: file.mimetype,
+        size: file.buffer.length,
+        content: Buffer.from(file.buffer) as Buffer<ArrayBuffer>,
+      };
+    });
+
+    await this.prisma.claimEvidence.createMany({ data: evidence });
+    return evidence.map(({ filename, mimeType, size }) => ({ filename, mimeType, size }));
   }
 
   // #350 — builds an auditLog.create() operation to append to a

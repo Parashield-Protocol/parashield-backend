@@ -1,4 +1,5 @@
-import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Req, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { Body, Controller, ForbiddenException, Get, Param, ParseUUIDPipe, Post, Query, Req, UploadedFiles, UseGuards, UseInterceptors, UnauthorizedException, NotFoundException } from '@nestjs/common';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import { CacheControlInterceptor } from '../common/interceptors/cache-control.interceptor';
 import { Throttle } from '@nestjs/throttler';
 import { StreamingInterceptor } from '../common/interceptors/streaming.interceptor';
@@ -10,7 +11,9 @@ import {
   ApiParam,
   ApiQuery,
   ApiExtraModels,
+  ApiBody,
   getSchemaPath,
+  ApiConsumes,
 } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../common/swagger/api-error-responses';
 import { ClaimsService } from './claims.service';
@@ -20,6 +23,7 @@ import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OperatorAuthGuard } from '../auth/operator-auth.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 import { ErrorCode } from '../common/errors/error-codes';
+import { MAX_EVIDENCE_FILE_SIZE, MAX_EVIDENCE_FILES } from './evidence-validation';
 
 @ApiTags('claims')
 @Controller('claims')
@@ -51,6 +55,40 @@ export class ClaimsController {
     const claimId = await this.claims.submitClaim(authedWallet, dto.policyId);
     const claim = await this.claims.getClaim(claimId);
     return { success: true, data: { claimId, claim } };
+  }
+
+  /** POST /api/v1/claims/:id/evidence — attach evidence files to a claim */
+  @Post(':id/evidence')
+  @UseGuards(JwtAuthGuard)
+  @UseInterceptors(FilesInterceptor('files', MAX_EVIDENCE_FILES, {
+    limits: { fileSize: MAX_EVIDENCE_FILE_SIZE },
+  }))
+  @ApiBearerAuth()
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({
+    schema: {
+      type: 'object',
+      required: ['files'],
+      properties: {
+        files: { type: 'array', items: { type: 'string', format: 'binary' } },
+      },
+    },
+  })
+  @ApiOperation({ summary: 'Upload evidence files for a claim' })
+  @ApiParam({ name: 'id', description: 'Claim UUID' })
+  @ApiResponse({ status: 201, description: 'Evidence files uploaded' })
+  @ApiErrorResponse(400, 'At least one valid evidence file is required. Accepted types: PNG, JPEG, WebP, PDF; maximum 10 files, 10 MB each.', undefined, 'At least one evidence file is required')
+  async uploadEvidence(
+    @Param('id', ParseUUIDPipe) id: string,
+    @UploadedFiles() files: Array<{ originalname: string; mimetype: string; buffer: Buffer }>,
+    @Req() req: AuthenticatedRequest,
+  ) {
+    const authedWallet = req.user?.walletAddress || req.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated');
+    }
+    const uploaded = await this.claims.uploadEvidence(id, authedWallet, files || []);
+    return { success: true, data: { files: uploaded } };
   }
 
   /** GET /api/v1/claims?wallet=... — get claim history for the authenticated wallet */

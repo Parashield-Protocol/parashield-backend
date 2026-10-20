@@ -19,3 +19,10 @@ COPY --from=builder /app/entrypoint.sh ./entrypoint.sh
 RUN chmod +x ./entrypoint.sh
 EXPOSE 3001
 CMD ["./entrypoint.sh"]
+
+FROM node:22-alpine AS migration
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY prisma ./prisma
+CMD ["npm", "run", "db:migrate:deploy"]

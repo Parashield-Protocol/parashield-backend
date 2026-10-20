@@ -1,4 +1,4 @@
-import { IsOptional, IsString } from 'class-validator';
+import { IsInt, IsOptional, IsString, Min } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
 
 /**
@@ -12,4 +12,16 @@ export class UpdatePolicyDto {
   @IsOptional()
   @IsString()
   oracleKey?: string;
+
+  @ApiPropertyOptional({ description: 'New policy start timestamp (Unix seconds)', example: 1780272000 })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  startTime?: number;
+
+  @ApiPropertyOptional({ description: 'New policy end timestamp (Unix seconds)', example: 1782864000 })
+  @IsOptional()
+  @IsInt()
+  @Min(0)
+  endTime?: number;
 }

@@ -1069,10 +1069,20 @@ export class PolicyService {
       throw new NotFoundException(`Policy ${id} not found`);
     }
 
-    const isOracleKeyProvided = dto.oracleKey !== undefined && dto.oracleKey !== null;
-    const isOracleKeyChanged = isOracleKeyProvided && dto.oracleKey !== existing.oracleKey;
+    const startTime = dto.startTime === undefined ? existing.startTime : new Date(dto.startTime * 1000);
+    const endTime = dto.endTime === undefined ? existing.endTime : new Date(dto.endTime * 1000);
+    if (!Number.isFinite(startTime.getTime()) || !Number.isFinite(endTime.getTime())) {
+      throw new BadRequestException('startTime and endTime must be valid Unix timestamps in seconds');
+    }
+    if (endTime <= startTime) {
+      throw new BadRequestException('endTime must be after startTime');
+    }
 
-    if (!isOracleKeyChanged) {
+    const isOracleKeyChanged = dto.oracleKey !== undefined && dto.oracleKey !== null && dto.oracleKey !== existing.oracleKey;
+    const isStartTimeChanged = startTime.getTime() !== existing.startTime.getTime();
+    const isEndTimeChanged = endTime.getTime() !== existing.endTime.getTime();
+
+    if (!isOracleKeyChanged && !isStartTimeChanged && !isEndTimeChanged) {
       return {
         id:           String(existing.id),
         productId:    existing.productId,
@@ -1087,14 +1097,12 @@ export class PolicyService {
       };
     }
 
-    const newOracleKey = dto.oracleKey!;
-
-    // Validate oracle key format and temporal coverage
+    const newOracleKey = dto.oracleKey ?? existing.oracleKey;
     const keyValidation = this.validateOracleKey(
       newOracleKey,
       this.mapProduct(existing.product),
-      existing.startTime,
-      existing.endTime,
+      startTime,
+      endTime,
     );
     if (!keyValidation.valid) {
       throw new BadRequestException(keyValidation.reason);
@@ -1104,7 +1112,9 @@ export class PolicyService {
     const updated = await this.prisma.policy.update({
       where: { id },
       data: {
-        oracleKey: newOracleKey,
+        ...(isOracleKeyChanged ? { oracleKey: newOracleKey } : {}),
+        ...(isStartTimeChanged ? { startTime } : {}),
+        ...(isEndTimeChanged ? { endTime } : {}),
       },
       include: {
         _count: {
@@ -1113,34 +1123,37 @@ export class PolicyService {
       },
     });
 
-    const oldOracleKey = existing.oracleKey;
-    const timestamp = Date.now();
+    if (isOracleKeyChanged) {
+      const oldOracleKey = existing.oracleKey;
+      const event: PolicyOracleKeyChangeEvent = {
+        policyId: String(updated.id),
+        oldOracleKey,
+        newOracleKey,
+        actor: actor ?? null,
+        timestamp: Date.now(),
+        correlationId: correlationId ?? null,
+      };
 
-    // Emit event ONLY AFTER database change is committed
-    const event: PolicyOracleKeyChangeEvent = {
-      policyId: String(updated.id),
-      oldOracleKey,
-      newOracleKey,
-      actor: actor ?? null,
-      timestamp,
-      correlationId: correlationId ?? null,
-    };
+      this.statusEvents.emitPolicyOracleKeyChange(event);
+      this.webhooks.notifyPolicyOracleKeyChange(event).catch((err) => {
+        this.logger.error(`Failed to dispatch oracle key change webhook for policy ${id}: ${err.message}`);
+      });
+    }
 
-    this.statusEvents.emitPolicyOracleKeyChange(event);
-    this.webhooks.notifyPolicyOracleKeyChange(event).catch((err) => {
-      this.logger.error(`Failed to dispatch oracle key change webhook for policy ${id}: ${err.message}`);
-    });
-
-    // Write audit log
+    const changes = [
+      ...(isOracleKeyChanged ? [`oracle key from "${existing.oracleKey}" to "${newOracleKey}"`] : []),
+      ...(isStartTimeChanged ? ['start time'] : []),
+      ...(isEndTimeChanged ? ['end time'] : []),
+    ];
     await this.prisma.auditLog.create({
       data: {
         entityType: 'Policy',
-        entityId:   id,
+        entityId: id,
         fromStatus: existing.status,
-        toStatus:   existing.status,
-        reason:     `Oracle key changed from "${oldOracleKey}" to "${newOracleKey}" by ${actor ?? 'system'}`,
+        toStatus: existing.status,
+        reason: `Updated ${changes.join(' and ')} by ${actor ?? 'system'}`,
       },
-    }).catch((err) => this.logger.error(`Failed to write audit log for policy ${id} oracle key update`, err));
+    }).catch((err) => this.logger.error(`Failed to write audit log for policy ${id} update`, err));
 
     return {
       id:           String(updated.id),

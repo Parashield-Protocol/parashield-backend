@@ -419,7 +419,7 @@ export class PolicyController {
       ],
     },
   })
-  @ApiErrorResponse(400, 'Invalid oracleKey format or period mismatch.', undefined, 'Invalid oracleKey format')
+  @ApiErrorResponse(400, 'Invalid oracleKey format or period, or endTime is not after startTime.', undefined, 'Invalid policy update')
   @ApiErrorResponse(401, 'Missing or invalid JWT.', undefined, 'Missing or invalid token')
   @ApiErrorResponse(403, 'Policy belongs to a different wallet.', undefined, 'Policy belongs to a different wallet')
   @ApiErrorResponse(404, 'No policy found for the given ID.', undefined, 'Policy not found')

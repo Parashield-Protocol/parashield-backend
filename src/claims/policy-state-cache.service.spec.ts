@@ -5,12 +5,15 @@ import { OracleService } from '../oracle/oracle.service';
 import { PolicyStatus, ClaimStatus } from '@prisma/client';
 import { StatusEventsService } from '../common/events/status-events.service';
 
+jest.mock('../oracle/oracle.service', () => ({ OracleService: class OracleService {} }));
+
 describe('PolicyStateCacheService (#714)', () => {
   let service: PolicyStateCacheService;
   let mockPrisma: any;
   let mockOracle: any;
   let mockRedis: any;
   let mockStatusEvents: any;
+  let redisStore: Map<string, string>;
 
   const mockPolicy = {
     id: 'policy-uuid-1',
@@ -54,7 +57,7 @@ describe('PolicyStateCacheService (#714)', () => {
       getLatestReading: jest.fn().mockResolvedValue({ ...mockReading }),
     };
 
-    const redisStore = new Map<string, string>();
+    redisStore = new Map<string, string>();
     mockRedis = {
       get: jest.fn().mockImplementation(async (key: string) => redisStore.get(key) ?? null),
       set: jest.fn().mockImplementation(async (key: string, val: string) => {
@@ -66,6 +69,7 @@ describe('PolicyStateCacheService (#714)', () => {
         return keys.length;
       }),
       keys: jest.fn().mockImplementation(async () => Array.from(redisStore.keys())),
+      scan: jest.fn(),
       publish: jest.fn().mockResolvedValue(1),
       duplicate: jest.fn().mockReturnValue({
         on: jest.fn(),
@@ -148,6 +152,29 @@ describe('PolicyStateCacheService (#714)', () => {
       expect(updated?.oracleKey).toBe('rainfall:station-999:monthly');
       expect(service.metrics.computations).toBe(2);
       expect(mockPrisma.policy.findUnique).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('Global cache invalidation', () => {
+    it('uses incremental SCAN batches for a large Redis keyspace', async () => {
+      for (let index = 0; index < 250; index++) {
+        redisStore.set(`cache:policy:derived:${index}`, '{}');
+      }
+      const keys = Array.from(redisStore.keys());
+      mockRedis.scan.mockImplementation(async (cursor: string) => {
+        const start = Number(cursor);
+        const batch = keys.slice(start, start + 100);
+        const nextCursor = start + 100 >= keys.length ? '0' : String(start + 100);
+        return [nextCursor, batch];
+      });
+
+      await service.invalidateAll();
+
+      expect(mockRedis.scan).toHaveBeenCalledTimes(3);
+      expect(mockRedis.scan).toHaveBeenNthCalledWith(1, '0', 'MATCH', 'cache:policy:derived:*', 'COUNT', 100);
+      expect(mockRedis.keys).not.toHaveBeenCalled();
+      expect(mockRedis.del).toHaveBeenCalledTimes(3);
+      expect(redisStore.size).toBe(0);
     });
   });
 

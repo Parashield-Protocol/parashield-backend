@@ -70,6 +70,7 @@ model Claim {
   submittedAt    DateTime   @default(now())
   processedAt    DateTime?
   createdAt      DateTime   @default(now())
+  evidence       ClaimEvidence[]
 
   @@unique([txHash])
   @@index([policyId])
@@ -78,6 +79,19 @@ model Claim {
   // #668 — Composite index for claims search queries that filter by claimant
   // and sort by submittedAt (the most common query pattern).
   @@index([claimant, submittedAt(sort: Desc)])
+}
+
+model ClaimEvidence {
+  id        String   @id @default(uuid())
+  claimId   String
+  claim     Claim    @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  filename  String
+  mimeType  String
+  size      Int
+  content   Bytes
+  createdAt DateTime @default(now())
+
+  @@index([claimId])
 }
 
 model OracleReading {

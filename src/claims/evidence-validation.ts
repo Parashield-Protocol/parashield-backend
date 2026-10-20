@@ -30,6 +30,7 @@ const ALLOWED_EVIDENCE_TYPES: Record<string, { mime: string; magicBytes: number[
 export const ALLOWED_EVIDENCE_MIME_TYPES = Object.keys(ALLOWED_EVIDENCE_TYPES);
 
 export const MAX_EVIDENCE_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+export const MAX_EVIDENCE_FILES = 10;
 
 export interface EvidenceValidationResult {
   valid: boolean;

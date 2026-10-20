@@ -67,7 +67,7 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | `GET` | `/api/v1/products` | List all active insurance products |
 | `GET` | `/api/v1/policies/me?wallet=<address>` | Get policies for a wallet address |
 | `GET` | `/api/v1/policies/:id` | Get a single policy by UUID |
-| `PATCH` | `/api/v1/policies/:id` | Update a policy (e.g. change oracleKey, emits status change event) |
+| `PATCH` | `/api/v1/policies/:id` | Update a policy's oracleKey or coverage period (timestamps in Unix seconds) |
 | `POST` | `/api/v1/policies/:id/cancel` | Cancel an active policy |
 | `POST` | `/api/v1/policies/buy` | Calculate premium and get a purchase quote |
 
@@ -76,9 +76,16 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 | Method | Route | Description |
 |--------|-------|-------------|
 | `POST` | `/api/v1/claims/submit` | Submit a manual claim |
+| `POST` | `/api/v1/claims/:id/evidence` | Upload 1–10 PNG, JPEG, WebP, or PDF evidence files (10 MB maximum per file) |
 | `POST` | `/api/v1/claims/:policyId/auto` | Trigger automatic claim evaluation (keeper only) |
 | `GET` | `/api/v1/claims/:id` | Get claim details by ID |
 | `GET` | `/api/v1/claims/history/:wallet` | Deprecated: use `GET /api/v1/claims?wallet=...` |
+
+The policy-state cache invalidates individual Redis entries with `DEL`. Global
+invalidation walks `cache:policy:derived:*` using cursor-based `SCAN` batches
+(`COUNT 100`) and deletes each batch as it is found, avoiding Redis's blocking
+`KEYS` command. Each process publishes one invalidation event after the scan so
+other instances clear their in-memory cache.
 
 ### Oracle
 
@@ -99,6 +106,12 @@ All endpoints are prefixed with `/api/v1`. Swagger docs available at `/docs`.
 
 All responses follow the shape: `{ success: boolean, data?: any, error?: string }`.
 Values are returned in 7-decimal fixed point as strings (matching Stellar asset precision).
+
+Claim evidence uploads use `multipart/form-data` with one or more `files` parts.
+Uploads are limited to 10 files of at most 10 MB each, and the claim owner must
+be authenticated. Evidence content and validated metadata are stored with the
+claim; empty submissions, unsupported types, and file signatures that do not
+match their declared types are rejected.
 
 ---
 
@@ -130,9 +143,17 @@ Swagger docs at `http://localhost:3001/docs`.
 ### Production build
 
 ```bash
+# Apply migrations as a separate deployment step before starting new app instances.
+npm run db:migrate:deploy
 npm run build
 npm run start:prod
 ```
+
+The application entrypoint never changes the database schema. Run migrations
+once per deployment before rolling out the application; Prisma's PostgreSQL
+advisory lock serializes concurrent migration runners. With Docker Compose,
+run `docker compose --profile migrations run --rm migrate` before
+`docker compose up -d api`.
 
 ---
 

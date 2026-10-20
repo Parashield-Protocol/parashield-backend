@@ -176,6 +176,35 @@ describe('Policy Oracle Key Change Event (#717)', () => {
     expect(mockStatusEventsService.emitPolicyOracleKeyChange).not.toHaveBeenCalled();
   });
 
+  it('rejects an endTime that is not after the effective startTime', async () => {
+    mockPrismaService.policy.findUnique.mockResolvedValue(initialPolicy);
+
+    await expect(
+      service.updatePolicy(initialPolicy.id, {
+        endTime: Math.floor(initialPolicy.startTime.getTime() / 1000),
+      }),
+    ).rejects.toThrow('endTime must be after startTime');
+
+    expect(mockPrismaService.policy.update).not.toHaveBeenCalled();
+  });
+
+  it('persists a valid partial date update and validates oracle period coverage', async () => {
+    mockPrismaService.policy.findUnique.mockResolvedValue(initialPolicy);
+    mockPrismaService.policy.update.mockResolvedValue({
+      ...initialPolicy,
+      startTime: new Date('2026-06-05T00:00:00Z'),
+    });
+
+    await service.updatePolicy(initialPolicy.id, {
+      startTime: Math.floor(new Date('2026-06-05T00:00:00Z').getTime() / 1000),
+    });
+
+    expect(mockPrismaService.policy.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: initialPolicy.id },
+      data: { startTime: new Date('2026-06-05T00:00:00Z') },
+    }));
+  });
+
   it('throws NotFoundException for non-existent policy', async () => {
     mockPrismaService.policy.findUnique.mockResolvedValue(null);
 
