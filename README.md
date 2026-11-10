@@ -472,6 +472,20 @@ The error names the offending field, for example:
 
 See also [Error handling](#error-handling-rfc-7807-problem-details).
 
+### Idempotency
+
+`IdempotencyMiddleware` lets a client safely retry a mutating request, for example after a network timeout. It is opt-in: requests without the header are untouched.
+
+- **Header:** send `Idempotency-Key: <unique value>` on `POST`, `PUT` or `PATCH`. Other methods ignore it. Use a fresh, unpredictable value (such as a UUID) per logical operation and reuse it only for retries of that operation.
+- **Validation:** keys longer than 255 characters or containing a line break get `400` (`BAD_REQUEST`, `Invalid Idempotency-Key header value`).
+- **First request:** processed normally. If the response is `2xx` JSON, its status and body are cached in Redis for **24 hours**. Error responses are not cached, so a failed request can be retried with the same key.
+- **Replay:** a repeat of the same key returns the cached status and body without running the handler again, with the header `X-Idempotent-Replayed: true`.
+- **Scope of a key:** the cache entry is identified by HTTP method, URL path (without the query string) and key. It is not tied to the caller or to the request body, so the same key with a different body on the same endpoint returns the first response.
+- **Concurrent requests:** while a request holds a key, a second request with that key waits, up to 25 seconds, and replays the result when it is ready. If the first request is still running after that, the second gets `409` (`IDEMPOTENCY_CONFLICT`); retry it later.
+- **Redis outage:** the check fails open. The request is processed normally, without idempotency protection, and a warning is logged.
+
+Idempotency runs after [amount precision](#amount-precision-usdc) validation, so a request rejected for precision is never cached.
+
 ### Premium-rate changes
 
 Each product premium-rate template has a monotonically increasing version.
