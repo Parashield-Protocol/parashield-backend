@@ -449,6 +449,43 @@ For reference, successful responses use the complementary envelope:
 
 Monetary values are returned as strings in 7-decimal fixed-point format matching Stellar asset precision (e.g. `"10.0000000"`).
 
+### Amount precision (USDC)
+
+Stellar USDC has 7 decimal places. `UsdcPrecisionValidationMiddleware` checks every JSON request body before it reaches validation or the contract, and rejects amounts that cannot be represented, so send at most 7 decimal places.
+
+- **Fields checked:** `amount`, `premium`, `coverageAmount`, `payoutAmount`, `minPayout` and `maxPayout`. Names are matched case-insensitively and nested objects and arrays are searched. Only the request body is checked, not query parameters.
+- **Accepted values:** a JSON number or a numeric string, such as `10`, `"10.5"` or `"0.0000001"`. `null` and empty strings are skipped.
+- **Rejected with `400`:**
+  - more than 7 decimal places, e.g. `"10.12345678"`;
+  - anything that is not a plain decimal, e.g. `"abc"` or scientific notation such as `1e-8`;
+  - negative zero (`-0`, `"-0.0"`).
+
+The error names the offending field, for example:
+
+```json
+{
+  "success": false,
+  "errorCode": "BAD_REQUEST",
+  "error": "Amount precision at amount exceeds Stellar USDC limit. Maximum 7 decimal places allowed, found 8. Value: \"10.12345678\""
+}
+```
+
+See also [Error handling](#error-handling-rfc-7807-problem-details).
+
+### Idempotency
+
+`IdempotencyMiddleware` lets a client safely retry a mutating request, for example after a network timeout. It is opt-in: requests without the header are untouched.
+
+- **Header:** send `Idempotency-Key: <unique value>` on `POST`, `PUT` or `PATCH`. Other methods ignore it. Use a fresh, unpredictable value (such as a UUID) per logical operation and reuse it only for retries of that operation.
+- **Validation:** keys longer than 255 characters or containing a line break get `400` (`BAD_REQUEST`, `Invalid Idempotency-Key header value`).
+- **First request:** processed normally. If the response is `2xx` JSON, its status and body are cached in Redis for **24 hours**. Error responses are not cached, so a failed request can be retried with the same key.
+- **Replay:** a repeat of the same key returns the cached status and body without running the handler again, with the header `X-Idempotent-Replayed: true`.
+- **Scope of a key:** the cache entry is identified by HTTP method, URL path (without the query string) and key. It is not tied to the caller or to the request body, so the same key with a different body on the same endpoint returns the first response.
+- **Concurrent requests:** while a request holds a key, a second request with that key waits, up to 25 seconds, and replays the result when it is ready. If the first request is still running after that, the second gets `409` (`IDEMPOTENCY_CONFLICT`); retry it later.
+- **Redis outage:** the check fails open. The request is processed normally, without idempotency protection, and a warning is logged.
+
+Idempotency runs after [amount precision](#amount-precision-usdc) validation, so a request rejected for precision is never cached.
+
 ### Premium-rate changes
 
 Each product premium-rate template has a monotonically increasing version.
