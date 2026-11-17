@@ -35,7 +35,7 @@
     "@opentelemetry/sdk-node": "^0.57.2",
     "@opentelemetry/semantic-conventions": "^1.43.0",
     "@prisma/client": "^6.19.3",
-    "@stellar/stellar-sdk": "^13.3.0",
+    "@stellar/stellar-sdk": "^17.4.0",
     "axios": "^1.20.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.4",
