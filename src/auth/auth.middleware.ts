@@ -88,15 +88,26 @@ export class AuthMiddleware implements NestMiddleware {
       return;
     }
 
+    // #818 — An S-prefixed value is a secret seed, not an address. Reject it
+    // before anything else touches it, and never log it, not even truncated.
+    if (/^S[A-Z2-7]{55}$/.test(address)) {
+      this.logger.warn('Header-auth rejected: a secret key was sent in x-wallet-address');
+      this.unauthorized(res, {
+        statusCode: 401,
+        message:    'Do not send secret keys in request headers. x-wallet-address must be your public key (starts with G).',
+      });
+      return;
+    }
+
     // #562 — Validate Stellar address format before hitting the database.
     // A malformed address will never match a challenge, so the DB lookup is
     // pure waste. Stellar public keys are base32-encoded 56-character strings
-    // starting with G (public) or S (seed).
-    if (!/^[GS][A-Z2-7]{55}$/.test(address)) {
+    // starting with G.
+    if (!/^G[A-Z2-7]{55}$/.test(address)) {
       this.logger.warn(`Header-auth rejected: invalid wallet address format "${this.truncateAddress(address)}"`);
       this.unauthorized(res, {
         statusCode: 401,
-        message:    'Invalid wallet address format. Must be a 56-character Stellar address starting with G or S.',
+        message:    'Invalid wallet address format. Must be a 56-character Stellar public key starting with G.',
       });
       return;
     }

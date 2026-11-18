@@ -1,4 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
+import { HEADERS_METADATA } from '@nestjs/common/constants';
 import { BadRequestException, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AuthController } from './auth.controller';
@@ -121,6 +122,13 @@ describe('AuthController', () => {
 
     it('should throw BadRequestException for invalid wallet address', async () => {
       await expect(controller.getChallenge('invalid-wallet')).rejects.toThrow(BadRequestException);
+    });
+
+    it('#819 — sends Cache-Control: no-store on the 200 challenge response', () => {
+      const headers = Reflect.getMetadata(HEADERS_METADATA, AuthController.prototype.getChallenge);
+      expect(headers).toEqual(
+        expect.arrayContaining([{ name: 'Cache-Control', value: 'no-store' }]),
+      );
     });
   });
 

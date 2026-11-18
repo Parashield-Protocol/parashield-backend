@@ -192,4 +192,48 @@ describe('AuthMiddleware', () => {
 
     timingSafeEqualSpy.mockRestore();
   });
+
+  it('#818 — rejects a secret key (S...) in x-wallet-address without logging or looking it up', async () => {
+    const secret = keypair.secret();
+    const warnSpy = jest.spyOn((middleware as any).logger, 'warn').mockImplementation(() => undefined);
+
+    const req = requestWith({
+      'x-wallet-address':   secret,
+      'x-wallet-message':   nonce,
+      'x-wallet-signature': sign(nonce),
+    });
+    const res = mockResponse();
+    const next = jest.fn();
+
+    await middleware.use(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining('Do not send secret keys') }),
+    );
+    expect(mockPrisma.authChallenge.findUnique).not.toHaveBeenCalled();
+    for (const call of warnSpy.mock.calls) {
+      expect(String(call[0])).not.toContain(secret.slice(0, 4));
+      expect(String(call[0])).not.toContain(secret.slice(-4));
+    }
+
+    warnSpy.mockRestore();
+  });
+
+  it('#818 — only accepts G-prefixed public keys', async () => {
+    const req = requestWith({
+      'x-wallet-address':   `X${address.slice(1)}`,
+      'x-wallet-message':   nonce,
+      'x-wallet-signature': sign(nonce),
+    });
+    const res = mockResponse();
+    const next = jest.fn();
+
+    await middleware.use(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(mockPrisma.authChallenge.findUnique).not.toHaveBeenCalled();
+  });
 });

@@ -172,6 +172,23 @@ interface BufferedReading {
   reject: (err: unknown) => void;
 }
 
+/**
+ * #820 — Delay before retrying a 429. `Retry-After` may be missing,
+ * non-numeric or an HTTP date; `parseInt` then yields NaN and
+ * `setTimeout(fn, NaN)` fires immediately, hammering the rate-limited
+ * endpoint. Use the header's seconds when it is a finite non-negative
+ * number, otherwise fall back to exponential backoff (2^attempt seconds).
+ */
+export function rateLimitRetryDelayMs(retryAfter: unknown, attempt: number): number {
+  const seconds =
+    typeof retryAfter === 'string' || typeof retryAfter === 'number'
+      ? parseInt(String(retryAfter), 10)
+      : NaN;
+  return Number.isFinite(seconds) && seconds >= 0
+    ? seconds * 1000
+    : Math.pow(2, attempt) * 1000;
+}
+
 @Injectable()
 export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
   private readonly logger = new Logger(OracleService.name);
@@ -682,8 +699,7 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
         lastError = error;
         const status = error.response?.status;
         if (status === 429) {
-          const retryAfter = error.response?.headers?.['retry-after'] ?? String(Math.pow(2, attempt));
-          const delayMs = parseInt(retryAfter) * 1000;
+          const delayMs = rateLimitRetryDelayMs(error.response?.headers?.['retry-after'], attempt);
           this.logger.warn(
             `Rate limited (429). Attempt ${attempt + 1}/${maxRetries}. Retrying in ${delayMs}ms`,
           );
