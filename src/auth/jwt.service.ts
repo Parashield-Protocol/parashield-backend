@@ -210,11 +210,14 @@ export class JwtService {
       throw new UnauthorizedException("Invalid refresh token");
     }
 
-    // Check if this token was already rotated (reuse detection)
+    // Consume this token atomically (#805). SET ... NX succeeds for exactly one
+    // caller, so two concurrent refreshes with the same token can no longer
+    // both pass a separate exists-then-set check and mint two token pairs.
     const rotationKey = `jwt:rotated:${jti}`;
-    const wasRotated = await this.redis.exists(rotationKey);
+    const ttl = Math.max(decoded.exp! - Math.floor(Date.now() / 1000), 1);
+    const claimed = await this.redis.set(rotationKey, '1', 'EX', ttl, 'NX');
 
-    if (wasRotated) {
+    if (claimed === null) {
       // #724 — Token reuse detected: invalidate the entire family.
       this.logger.warn(
         `Refresh token reuse detected for family ${family} — invalidating entire token family`,
@@ -222,10 +225,6 @@ export class JwtService {
       await this.invalidateFamily(family);
       throw new UnauthorizedException("Refresh token reuse detected — all tokens in this family have been invalidated");
     }
-
-    // Mark this token as rotated (consumed)
-    const ttl = Math.max(decoded.exp! - Math.floor(Date.now() / 1000), 1);
-    await this.redis.set(rotationKey, '1', 'EX', ttl);
 
     // Issue new tokens in the same family
     const accessToken = this.sign(decoded.walletAddress);

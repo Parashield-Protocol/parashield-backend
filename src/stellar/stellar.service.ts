@@ -26,6 +26,17 @@ const HORIZON_MAX_ATTEMPTS = 3;
 const HORIZON_BACKOFF_BASE_MS = 500; // 500ms, 1s, 2s...
 const HORIZON_BACKOFF_MAX_MS = 5000;
 const HORIZON_DEFAULT_TIMEOUT_MS = 10000;
+/**
+ * Transport-level timeout for the RPC client (#806). `withTimeout` only stops
+ * *waiting* — Promise.race cannot cancel the SDK call, and the SDK's RPC
+ * methods take no AbortSignal — so without this the underlying HTTP request
+ * kept its connection open until the server answered. Setting the SDK's own
+ * request timeout makes it abort the request itself. It equals withTimeout's
+ * default, so it never cuts a call short that withTimeout would still allow;
+ * calls given a shorter withTimeout budget now hold a connection for at most
+ * this long instead of indefinitely.
+ */
+export const RPC_REQUEST_TIMEOUT_MS = 10000;
 
 /**
  * #187 — a reverting contract call is a deterministic simulation failure:
@@ -126,7 +137,7 @@ export class StellarService {
     const rpcUrl =
       config.get<string>("STELLAR_RPC_URL") ??
       "https://soroban-testnet.stellar.org";
-    this.rpc = new StellarRpc.Server(rpcUrl);
+    this.rpc = new StellarRpc.Server(rpcUrl, { timeout: RPC_REQUEST_TIMEOUT_MS });
     this._rpcUrl = rpcUrl;
     this.network =
       config.get<string>("STELLAR_NETWORK") === "mainnet"
@@ -664,7 +675,7 @@ export class StellarService {
   private async withTimeout<T>(
     promise: Promise<T>,
     operation: string,
-    timeoutMs: number = 10000,
+    timeoutMs: number = RPC_REQUEST_TIMEOUT_MS,
   ): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {

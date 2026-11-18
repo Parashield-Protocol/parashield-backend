@@ -169,6 +169,17 @@ describe('ClaimsService', () => {
       );
     });
 
+    it('#808 — runs the duplicate guard once, inside the transaction', async () => {
+      mockPrismaService.claim.findFirst.mockResolvedValue(null);
+      mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
+      mockPrismaService.claim.create.mockResolvedValue({ id: 'new-id', policyId: POLICY_ID });
+
+      await service.submitClaim(CLAIMANT, POLICY_ID);
+
+      expect(mockPrismaService.claim.findFirst).toHaveBeenCalledTimes(1);
+      expect(mockPrismaService.$transaction).toHaveBeenCalled();
+    });
+
     it('should check for PAID and PROCESSING statuses in the guard query', async () => {
       mockPrismaService.claim.findFirst.mockResolvedValue(null);
       mockPrismaService.policy.findUnique.mockResolvedValue(ACTIVE_POLICY);
@@ -514,7 +525,7 @@ describe('ClaimsService', () => {
       mockStellarService.invokeContract.mockRejectedValue(new Error('Soroban RPC down'));
 
       const result = await service.autoProcess(POLICY_ID);
-      expect(result).toBe('Rejected');
+      expect(result).toBe('Failed');
       // Both the FAILED claim update and ACTIVE policy revert happen in one transaction
       expect(mockPrismaService.$transaction).toHaveBeenCalled();
 
@@ -607,7 +618,7 @@ describe('ClaimsService', () => {
       mockStellarService.invokeContract.mockResolvedValue('not-a-tx-hash');
 
       const result = await service.autoProcess(POLICY_ID);
-      expect(result).toBe('Rejected');
+      expect(result).toBe('Failed'); // #807
       expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
       );
@@ -738,7 +749,7 @@ describe('ClaimsService', () => {
 
       const result = await service.autoProcess(POLICY_ID);
 
-      expect(result).toBe('Rejected');
+      expect(result).toBe('Failed'); // #807
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
       expect(mockPrismaService.claim.update).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -774,7 +785,7 @@ describe('ClaimsService', () => {
 
       const result = await service.autoProcess(POLICY_ID);
 
-      expect(result).toBe('Rejected');
+      expect(result).toBe('Failed'); // #807
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
       // Claim must be marked FAILED (not left as PROCESSING)
       expect(mockPrismaService.$transaction).toHaveBeenCalled();
@@ -793,7 +804,7 @@ describe('ClaimsService', () => {
       mockPolicyService.getProductById.mockResolvedValue(EMPTY_THRESHOLD_PRODUCT);
 
       // Must not throw a RangeError from BigInt(NaN)
-      await expect(service.autoProcess(POLICY_ID)).resolves.toBe('Rejected');
+      await expect(service.autoProcess(POLICY_ID)).resolves.toBe('Failed'); // #807
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
     });
 
@@ -830,7 +841,7 @@ describe('ClaimsService', () => {
       // Product was deactivated, so it is absent from the active-products map.
       const result = await service.autoProcess(POLICY_ID, new Map());
 
-      expect(result).toBe('Rejected');
+      expect(result).toBe('Failed'); // #807
       expect(mockPolicyService.getProductById).not.toHaveBeenCalled();
       expect(mockStellarService.invokeContract).not.toHaveBeenCalled();
       expect(mockPrismaService.claim.update).toHaveBeenCalledWith(

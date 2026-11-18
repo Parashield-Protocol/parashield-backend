@@ -297,4 +297,50 @@ describe('JwtService', () => {
       });
     });
   });
+
+  // #805 — consuming a refresh token must be one atomic SET NX, so two
+  // concurrent refreshes with the same token cannot both succeed.
+  describe('rotateRefresh reuse detection (#805)', () => {
+    const wallet = 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ';
+
+    it('claims the rotation key with SET NX instead of exists-then-set', async () => {
+      const redis = redisStub();
+      const service = new JwtService(mockConfigService(VALID_SECRET) as any, redis as any);
+
+      await service.rotateRefresh(service.signRefresh(wallet, 'fam-1'));
+
+      expect(redis.exists).not.toHaveBeenCalled();
+      expect(redis.set).toHaveBeenCalledWith(
+        expect.stringMatching(/^jwt:rotated:/),
+        '1',
+        'EX',
+        expect.any(Number),
+        'NX',
+      );
+    });
+
+    it('lets only one of two concurrent refreshes succeed and revokes the family', async () => {
+      const redis = redisStub();
+      const claimed = new Set<string>();
+      redis.set.mockImplementation(async (key: string, _v: string, ...args: unknown[]) => {
+        if (!args.includes('NX')) return 'OK';
+        if (claimed.has(key)) return null;
+        claimed.add(key);
+        return 'OK';
+      });
+      const service = new JwtService(mockConfigService(VALID_SECRET) as any, redis as any);
+      const token = service.signRefresh(wallet, 'fam-2');
+
+      const results = await Promise.allSettled([
+        service.rotateRefresh(token),
+        service.rotateRefresh(token),
+      ]);
+
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const rejected = results.filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      expect(rejected).toHaveLength(1);
+      expect(rejected[0].reason).toBeInstanceOf(UnauthorizedException);
+      expect(redis.set).toHaveBeenCalledWith('jwt:family:revoked:fam-2', '1', 'EX', 7 * 24 * 3600);
+    });
+  });
 });
