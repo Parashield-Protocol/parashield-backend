@@ -31,6 +31,10 @@ export const ALLOWED_EVIDENCE_MIME_TYPES = Object.keys(ALLOWED_EVIDENCE_TYPES);
 
 export const MAX_EVIDENCE_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 export const MAX_EVIDENCE_FILES = 10;
+// #813 — evidence is stored in the database, so bound the total as well as
+// each file: per upload request, and across all uploads for one claim.
+export const MAX_EVIDENCE_UPLOAD_SIZE = 25 * 1024 * 1024; // 25 MB
+export const MAX_EVIDENCE_PER_CLAIM_SIZE = 50 * 1024 * 1024; // 50 MB
 
 export interface EvidenceValidationResult {
   valid: boolean;

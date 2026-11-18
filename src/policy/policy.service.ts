@@ -829,6 +829,7 @@ export class PolicyService {
 
       const rows = await this.prisma.$queryRaw<Array<any>>`
         SELECT p.*,
+          (SELECT count(*)::int FROM "Claim" c WHERE c."policyId" = p.id) AS "claimsCount",
           ts_rank(to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')), plainto_tsquery('english', ${sanitizedQuery})) AS relevance
         FROM "Policy" p
         WHERE to_tsvector('english', coalesce(p."oracleKey", '') || ' ' || coalesce(p."policyholder", '') || ' ' || coalesce(p."txHash", '')) @@ plainto_tsquery('english', ${sanitizedQuery})
@@ -858,7 +859,7 @@ export class PolicyService {
         startTime: Math.floor(new Date(p.startTime).getTime() / 1000),
         endTime: Math.floor(new Date(p.endTime).getTime() / 1000),
         status: p.status,
-        claimsCount: 0,
+        claimsCount: Number(p.claimsCount ?? 0),
       }));
 
       return { data, total, page, limit: clampedLimit };
@@ -878,6 +879,7 @@ export class PolicyService {
           take: clampedLimit,
           skip: offset,
           orderBy: { createdAt: 'desc' },
+          include: { _count: { select: { claims: true } } },
         }),
         this.prisma.policy.count({ where }),
       ]);
@@ -891,7 +893,7 @@ export class PolicyService {
         startTime: Math.floor(p.startTime.getTime() / 1000),
         endTime: Math.floor(p.endTime.getTime() / 1000),
         status: p.status,
-        claimsCount: 0,
+        claimsCount: p._count?.claims ?? 0,
       }));
       return { data, total, page, limit: clampedLimit };
     }
