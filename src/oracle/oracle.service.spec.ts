@@ -958,6 +958,23 @@ describe("OracleService.fetchRainfall", () => {
       expect(customPrisma.$transaction.mock.calls[2][0]).toHaveLength(5);
     });
 
+    // #804 — one future-dated reading must not discard the valid ones.
+    it("persistReadings: skips a future-dated reading and persists the valid ones", async () => {
+      const config = { get: jest.fn((k: string) => (k === "ORACLE_BATCH_SIZE" ? "10" : undefined)) };
+      const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);
+      const future = {
+        ...createOracleReading("future"),
+        timestamp: Math.floor(Date.now() / 1000) + 3600,
+      };
+
+      await expect(
+        s.persistReadings([createOracleReading("valid-1"), future, createOracleReading("valid-2")]),
+      ).resolves.toBeUndefined();
+
+      expect(customPrisma.$transaction).toHaveBeenCalledTimes(1);
+      expect(customPrisma.$transaction.mock.calls[0][0]).toHaveLength(2);
+    });
+
     it("persistReadings: empty batch makes no database calls", async () => {
       const config = { get: jest.fn().mockReturnValue(undefined) };
       const s = new OracleService(config as any, customPrisma as any, {} as any, {} as any);

@@ -4,7 +4,6 @@ import {
   Logger,
   BadRequestException,
   ServiceUnavailableException,
-  BadRequestException,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
@@ -315,9 +314,9 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
         this.logger.error(
           `Rejecting future-dated reading for key=${reading.key}: timestamp=${reading.timestamp} now=${nowSeconds}`,
         );
-        throw new BadRequestException(
-          `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,
-        );
+        // Skip it like the other rejected readings (#804): throwing here
+        // discarded every valid reading already collected in this batch.
+        continue;
       }
       validReadings.push(reading);
     }
@@ -723,8 +722,6 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=precipitation_sum&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
 
-    const key = `rainfall:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
-
     const res = await this.openMeteoBreaker.execute(() =>
       this.executeWithRateLimitBackoff(() =>
         axios.get<{
@@ -838,8 +835,6 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
     const url = isPastMonth
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
       : `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`;
-
-    const key = `temperature:${lat},${lng}:${year}-${String(month).padStart(2, "0")}`;
 
     const res = await this.openMeteoBreaker.execute(() =>
       this.executeWithRateLimitBackoff(() =>
