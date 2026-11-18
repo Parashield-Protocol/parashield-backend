@@ -203,16 +203,19 @@ export class PolicyService {
    * We query the USDC token contract's `balance` entry-point for the
    * POLICY_ENGINE_CONTRACT account, which holds the pooled collateral.
    * Returns the balance as a number (in XLM-equivalent units, 7-decimal fixed point).
-   * Returns Infinity when the contract is not configured so tests are unaffected.
+   * Returns null when the contracts are not configured, meaning "unknown —
+   * skip the pool check" (#812). It used to return Infinity, which serializes
+   * to `null` in JSON and so would surface as a non-number if it ever leaked
+   * into a response; callers now handle the unknown case explicitly.
    * Throws an error when RPC fails to prevent invalid liquidity validation.
    */
-  async getPoolAvailableBalance(): Promise<number> {
+  async getPoolAvailableBalance(): Promise<number | null> {
     const usdcContract = this.config.get<string>('USDC_CONTRACT');
     const policyEngineContract = this.config.get<string>('POLICY_ENGINE_CONTRACT');
 
     if (!usdcContract || !policyEngineContract) {
       this.logger.warn('USDC_CONTRACT or POLICY_ENGINE_CONTRACT not configured — skipping pool balance check');
-      return Infinity;
+      return null;
     }
 
     try {
@@ -273,7 +276,7 @@ export class PolicyService {
 
     // #131 — Reject if coverage exceeds available pool liquidity
     const poolBalance = await this.getPoolAvailableBalance();
-    if (coverageXlm > poolBalance) {
+    if (poolBalance !== null && coverageXlm > poolBalance) {
       return {
         valid: false,
         reason: `Coverage ${coverageXlm} XLM exceeds the pool's available liquidity (${poolBalance} XLM)`,
@@ -1108,20 +1111,34 @@ export class PolicyService {
       throw new BadRequestException(keyValidation.reason);
     }
 
-    // Commit change to DB
-    const updated = await this.prisma.policy.update({
-      where: { id },
-      data: {
-        ...(isOracleKeyChanged ? { oracleKey: newOracleKey } : {}),
-        ...(isStartTimeChanged ? { startTime } : {}),
-        ...(isEndTimeChanged ? { endTime } : {}),
-      },
-      include: {
-        _count: {
-          select: { claims: true },
+    // Commit change to DB. #810 — guarded on the version read above, like
+    // cancelPolicy/autoProcess: a concurrent status change (e.g. a claim
+    // moving the policy to PROCESSING) bumps the version, so this write fails
+    // with P2025 instead of silently overwriting the newer row.
+    let updated;
+    try {
+      updated = await this.prisma.policy.update({
+        where: { id, version: existing.version },
+        data: {
+          ...(isOracleKeyChanged ? { oracleKey: newOracleKey } : {}),
+          ...(isStartTimeChanged ? { startTime } : {}),
+          ...(isEndTimeChanged ? { endTime } : {}),
+          version: { increment: 1 },
         },
-      },
-    });
+        include: {
+          _count: {
+            select: { claims: true },
+          },
+        },
+      });
+    } catch (err) {
+      if ((err as { code?: string })?.code === 'P2025') {
+        throw new ConflictException(
+          `Policy ${id} was modified concurrently; reload it and retry the update`,
+        );
+      }
+      throw err;
+    }
 
     if (isOracleKeyChanged) {
       const oldOracleKey = existing.oracleKey;

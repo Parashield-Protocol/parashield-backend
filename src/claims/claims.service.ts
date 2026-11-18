@@ -909,8 +909,14 @@ export class ClaimsService {
         findClaims,
         this.prisma.claim.count({ where: { claimant: walletAddress } }),
       ]);
+      // #809 — evict only the oldest entry when full. Clearing the whole map
+      // sent every cached wallet back to COUNT(*) on its next request at once.
+      // Re-inserting moves this wallet to the end, so eviction follows the
+      // order entries were last refreshed.
+      this.claimCountCache.delete(walletAddress);
       if (this.claimCountCache.size >= CLAIM_COUNT_CACHE_MAX_ENTRIES) {
-        this.claimCountCache.clear();
+        const oldest = this.claimCountCache.keys().next().value;
+        if (oldest !== undefined) this.claimCountCache.delete(oldest);
       }
       this.claimCountCache.set(walletAddress, { total, expiresAt: Date.now() + CLAIM_COUNT_CACHE_TTL_MS });
     }

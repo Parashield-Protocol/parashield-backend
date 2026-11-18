@@ -200,10 +200,7 @@ export class StellarService {
       );
     }
     const signer = signerKeypair ?? this.keeperKeypair;
-    // #728 — serialize per-account to prevent sequence number conflicts.
-    return this.withAccountLock(signer.publicKey(), () =>
-      this.doInvokeContract(contractId, method, args, signer),
-    );
+    return this.doInvokeContract(contractId, method, args, signer, validMemo);
   }
 
   private async doInvokeContract(
@@ -211,6 +208,7 @@ export class StellarService {
     method: string,
     args: xdr.ScVal[],
     signer: Keypair,
+    validMemo?: string,
   ): Promise<string> {
     const contract = new Contract(contractId);
     const MAX_ATTEMPTS = 3;
@@ -219,87 +217,95 @@ export class StellarService {
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        // Before retrying, check if the previous send already landed to avoid double-payout.
-        if (attempt > 1 && lastSentHash) {
-          try {
-            const landedTx = await this.withTimeout(
-              this.rpc.getTransaction(lastSentHash),
-              "getTransaction (dedup check)",
-            );
-            if (landedTx.status === "SUCCESS") {
-              this.logger.log(
-                `invokeContract: previous send already landed — returning existing txHash=${lastSentHash} (attempt ${attempt})`,
+        // #728 — serialize per-account to prevent sequence number conflicts.
+        // #811 — the lock covers one attempt (fetch sequence → send → wait for
+        // the ledger), not the whole retry sequence: the backoff sleep below
+        // runs with the lock released, so other invocations from the same
+        // account are not blocked for up to ~30s while this one waits.
+        return await this.withAccountLock(signer.publicKey(), async () => {
+          // Before retrying, check if the previous send already landed to avoid double-payout.
+          const previousHash = lastSentHash;
+          if (attempt > 1 && previousHash) {
+            try {
+              const landedTx = await this.withTimeout(
+                this.rpc.getTransaction(previousHash),
+                "getTransaction (dedup check)",
               );
-              return lastSentHash;
+              if (landedTx.status === "SUCCESS") {
+                this.logger.log(
+                  `invokeContract: previous send already landed — returning existing txHash=${previousHash} (attempt ${attempt})`,
+                );
+                return previousHash;
+              }
+            } catch {
+              // getTransaction failed — proceed to retry the send
             }
-          } catch {
-            // getTransaction failed — proceed to retry the send
           }
-        }
 
-        // Re-fetch account on every attempt to get a fresh sequence number;
-        // reusing a stale assembled transaction causes TRANSACTION_BAD_SEQ on retry.
-        const account = await this.withTimeout(
-          this.rpc.getAccount(signer.publicKey()),
-          "getAccount",
-        );
-        let builder = new TransactionBuilder(account, {
-          fee: BASE_FEE,
-          networkPassphrase: this.network,
-        })
-          .addOperation(contract.call(method, ...args))
-          .setTimeout(30);
-        if (validMemo) {
-          builder = builder.addMemo(xdr.Memo.text(validMemo));
-        }
-        const tx = builder.build();
-
-        const simResult = await this.withTimeout(
-          this.rpc.simulateTransaction(tx),
-          "simulateTransaction",
-        );
-        if (StellarRpc.Api.isSimulationError(simResult)) {
-          throw new SimulationFailedError(`Simulation failed: ${simResult.error}`);
-        }
-
-        const assembledTx = StellarRpc.assembleTransaction(
-          tx,
-          simResult,
-        ).build();
-        assembledTx.sign(signer);
-
-        const sendResult = await this.withTimeout(
-          this.rpc.sendTransaction(assembledTx),
-          "sendTransaction",
-        );
-        // Capture hash before checking status so retry dedup can check if an ERROR-status
-        // tx actually landed (RPC sometimes reports ERROR on submit but the tx still goes through).
-        if (sendResult.hash) {
-          lastSentHash = sendResult.hash;
-        }
-        if (sendResult.status === "ERROR") {
-          throw new Error(
-            `Transaction submission failed: ${this.formatXdr(sendResult.errorResult)}`,
+          // Re-fetch account on every attempt to get a fresh sequence number;
+          // reusing a stale assembled transaction causes TRANSACTION_BAD_SEQ on retry.
+          const account = await this.withTimeout(
+            this.rpc.getAccount(signer.publicKey()),
+            "getAccount",
           );
-        }
-        // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
-        // submission outright: it was never broadcast, so waitForTransaction
-        // would just poll for a hash that will never land until its own
-        // timeout expires. Fail fast so the retry loop re-sends immediately
-        // instead of burning up to 60s per attempt.
-        if (sendResult.status === "TRY_AGAIN_LATER") {
-          throw new Error(
-            `Transaction submission was rejected by the RPC node (TRY_AGAIN_LATER) — not broadcast, retrying.`,
+          let builder = new TransactionBuilder(account, {
+            fee: BASE_FEE,
+            networkPassphrase: this.network,
+          })
+            .addOperation(contract.call(method, ...args))
+            .setTimeout(30);
+          if (validMemo) {
+            builder = builder.addMemo(xdr.Memo.text(validMemo));
+          }
+          const tx = builder.build();
+
+          const simResult = await this.withTimeout(
+            this.rpc.simulateTransaction(tx),
+            "simulateTransaction",
           );
-        }
-        // Wait for ledger close before returning so callers can trust the hash represents
-        // a finalized on-chain state (PENDING → SUCCESS). Throws on FAILED, propagating
-        // the failure correctly to callers instead of leaving the DB in a speculative PAID state.
-        await this.waitForTransaction(sendResult.hash, 60_000);
-        this.logger.log(
-          `Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash} (attempt ${attempt})`,
-        );
-        return sendResult.hash;
+          if (StellarRpc.Api.isSimulationError(simResult)) {
+            throw new SimulationFailedError(`Simulation failed: ${simResult.error}`);
+          }
+
+          const assembledTx = StellarRpc.assembleTransaction(
+            tx,
+            simResult,
+          ).build();
+          assembledTx.sign(signer);
+
+          const sendResult = await this.withTimeout(
+            this.rpc.sendTransaction(assembledTx),
+            "sendTransaction",
+          );
+          // Capture hash before checking status so retry dedup can check if an ERROR-status
+          // tx actually landed (RPC sometimes reports ERROR on submit but the tx still goes through).
+          if (sendResult.hash) {
+            lastSentHash = sendResult.hash;
+          }
+          if (sendResult.status === "ERROR") {
+            throw new Error(
+              `Transaction submission failed: ${this.formatXdr(sendResult.errorResult)}`,
+            );
+          }
+          // #183 — TRY_AGAIN_LATER means the RPC node's queue rejected the
+          // submission outright: it was never broadcast, so waitForTransaction
+          // would just poll for a hash that will never land until its own
+          // timeout expires. Fail fast so the retry loop re-sends immediately
+          // instead of burning up to 60s per attempt.
+          if (sendResult.status === "TRY_AGAIN_LATER") {
+            throw new Error(
+              `Transaction submission was rejected by the RPC node (TRY_AGAIN_LATER) — not broadcast, retrying.`,
+            );
+          }
+          // Wait for ledger close before returning so callers can trust the hash represents
+          // a finalized on-chain state (PENDING → SUCCESS). Throws on FAILED, propagating
+          // the failure correctly to callers instead of leaving the DB in a speculative PAID state.
+          await this.waitForTransaction(sendResult.hash, 60_000);
+          this.logger.log(
+            `Contract invoked: ${contractId}.${method} → txHash=${sendResult.hash} (attempt ${attempt})`,
+          );
+          return sendResult.hash;
+        });
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         this.logger.warn(
