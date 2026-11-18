@@ -10,6 +10,7 @@ import {
   Get,
   Query,
   Inject,
+  Header,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiBody } from '@nestjs/swagger';
 import { ApiErrorResponse } from '../common/swagger/api-error-responses';
@@ -85,6 +86,9 @@ export class AuthController {
    */
   @Get('challenge')
   @Throttle(AUTH_THROTTLE)
+  // #819 — the nonce is in the body, so the 200 must not be cached or stored
+  // by proxies/CDNs any more than the 401s are.
+  @Header('Cache-Control', 'no-store')
   @ApiOperation({
     summary: 'Obtain a server-issued nonce before login',
     description:
