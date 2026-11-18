@@ -951,21 +951,23 @@ export class ClaimsService {
     this.logger.log(`get_claim: ${claimId}`);
     const claim = await this.prisma.claim.findUnique({
       where: { id: claimId },
-      include: {
-        policy: {
-          include: {
-            _count: {
-              select: { claims: true },
-            },
-          },
-        },
-      },
+      include: { policy: true },
     });
     if (!claim) return null;
 
     let derivedPolicyState: DerivedPolicyState | null = null;
     if (this.policyStateCache) {
       derivedPolicyState = await this.policyStateCache.getDerivedPolicyState(claim.policyId);
+    }
+
+    // #791 — the policy's claim count comes from the cached derived state
+    // (invalidated on every claim write) instead of a COUNT aggregate on every
+    // status query. Only without the cache is it counted directly.
+    let claimsCount = 0;
+    if (claim.policy) {
+      claimsCount =
+        derivedPolicyState?.claimsCount ??
+        (await this.prisma.claim.count({ where: { policyId: claim.policyId } }));
     }
 
     const summary: ClaimSummary & { policy?: PolicySummary; derivedPolicyState?: DerivedPolicyState | null } = {
@@ -996,7 +998,7 @@ export class ClaimsService {
         startTime:      Math.floor(claim.policy.startTime.getTime() / 1000),
         endTime:        Math.floor(claim.policy.endTime.getTime() / 1000),
         status:         claim.policy.status,
-        claimsCount:    (claim.policy as any)._count?.claims ?? 0,
+        claimsCount,
       };
     }
 
