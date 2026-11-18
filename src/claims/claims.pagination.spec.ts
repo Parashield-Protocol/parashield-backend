@@ -18,6 +18,10 @@ describe('Claims Pagination (#749)', () => {
       $transaction: jest.fn(async (promises: any[]) => Promise.all(promises)),
       claim: {
         findMany: jest.fn(),
+        findFirst: jest.fn(async ({ where }: any) => ({
+          id: where.id,
+          submittedAt: new Date(1700000500000),
+        })),
         count: jest.fn(),
       },
     };
@@ -34,7 +38,7 @@ describe('Claims Pagination (#749)', () => {
   });
 
   describe('Cursor-based Pagination', () => {
-    it('uses cursor and skip: 1 when cursor is provided', async () => {
+    it('pages with a keyset on (submittedAt, id) after the cursor row (#815)', async () => {
       const mockItems = [
         {
           id: 'claim-101',
@@ -83,12 +87,23 @@ describe('Claims Pagination (#749)', () => {
 
       const result = await service.getClaimsByWallet(WALLET, 1, 2, 'claim-100');
 
-      // Verify Prisma call used cursor and take: safeLimit + 1
+      // The cursor row is resolved within the same wallet...
+      expect(mockPrisma.claim.findFirst).toHaveBeenCalledWith({
+        where: { id: 'claim-100', claimant: WALLET },
+        select: { id: true, submittedAt: true },
+      });
+      // ...and the page is everything strictly after its (submittedAt, id),
+      // with take: safeLimit + 1 and no offset.
+      const anchorTime = new Date(1700000500000);
       expect(mockPrisma.claim.findMany).toHaveBeenCalledWith({
-        where: { claimant: WALLET },
+        where: {
+          claimant: WALLET,
+          OR: [
+            { submittedAt: { lt: anchorTime } },
+            { submittedAt: anchorTime, id: { lt: 'claim-100' } },
+          ],
+        },
         orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-        cursor: { id: 'claim-100' },
-        skip: 1,
         take: 3,
       });
 
@@ -126,6 +141,17 @@ describe('Claims Pagination (#749)', () => {
       expect(result.data).toHaveLength(1);
       expect(result.hasMore).toBe(false);
       expect(result.nextCursor).toBeNull();
+    });
+  });
+
+  describe('Cursor validation (#815)', () => {
+    it('rejects a cursor that is unknown or belongs to another wallet', async () => {
+      mockPrisma.claim.findFirst.mockResolvedValueOnce(null);
+
+      await expect(service.getClaimsByWallet(WALLET, 1, 2, 'someone-elses-claim')).rejects.toThrow(
+        'Invalid pagination cursor',
+      );
+      expect(mockPrisma.claim.findMany).not.toHaveBeenCalled();
     });
   });
 

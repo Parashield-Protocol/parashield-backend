@@ -14,7 +14,13 @@ import { compareScaledToThreshold, parseDecimalScaled, parseFixedPointBigInt } f
 import { financialBatch, financialTransaction, isSerializationFailure } from '../prisma/financial-transaction';
 import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cache.service';
 import { readClaimEvaluationSnapshot } from './claim-evaluation-snapshot';
-import { MAX_EVIDENCE_FILES, validateEvidenceFile } from './evidence-validation';
+import {
+  MAX_EVIDENCE_FILE_SIZE,
+  MAX_EVIDENCE_FILES,
+  MAX_EVIDENCE_PER_CLAIM_SIZE,
+  MAX_EVIDENCE_UPLOAD_SIZE,
+  validateEvidenceFile,
+} from './evidence-validation';
 
 export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
@@ -108,6 +114,21 @@ export class ClaimsService {
     if (files.length > MAX_EVIDENCE_FILES) {
       throw new BadRequestException(`A maximum of ${MAX_EVIDENCE_FILES} evidence files may be uploaded`);
     }
+    // #813 — enforce size limits in the service as well as in the controller's
+    // multer config, so no other caller can write unbounded blobs to the DB.
+    for (const file of files) {
+      if (file.buffer.length > MAX_EVIDENCE_FILE_SIZE) {
+        throw new BadRequestException(
+          `Evidence file exceeds ${MAX_EVIDENCE_FILE_SIZE / (1024 * 1024)}MB limit.`,
+        );
+      }
+    }
+    const uploadBytes = files.reduce((sum, file) => sum + file.buffer.length, 0);
+    if (uploadBytes > MAX_EVIDENCE_UPLOAD_SIZE) {
+      throw new BadRequestException(
+        `Evidence upload exceeds ${MAX_EVIDENCE_UPLOAD_SIZE / (1024 * 1024)}MB in total.`,
+      );
+    }
 
     const claim = await this.prisma.claim.findUnique({
       where: { id: claimId },
@@ -118,6 +139,19 @@ export class ClaimsService {
     }
     if (claim.claimant !== claimant) {
       throw new ForbiddenException('Claim belongs to a different wallet');
+    }
+
+    // #813 — cap the evidence stored per claim, counting earlier uploads, so
+    // repeated uploads can't grow one claim's rows without bound.
+    const stored = await this.prisma.claimEvidence.aggregate({
+      where: { claimId },
+      _sum: { size: true },
+    });
+    const storedBytes = stored._sum.size ?? 0;
+    if (storedBytes + uploadBytes > MAX_EVIDENCE_PER_CLAIM_SIZE) {
+      throw new BadRequestException(
+        `Evidence for a claim may not exceed ${MAX_EVIDENCE_PER_CLAIM_SIZE / (1024 * 1024)}MB in total.`,
+      );
     }
 
     const evidence = files.map((file) => {
@@ -888,12 +922,34 @@ export class ClaimsService {
     // #749 — If a cursor is provided, use cursor-based pagination which avoids slow OFFSET scans
     // on large datasets. Otherwise, fall back to offset pagination for backward compatibility.
     // Fetch safeLimit + 1 items to determine if a next page exists without extra count query.
+    //
+    // #815 — the cursor is an explicit keyset on the full sort key
+    // (submittedAt DESC, id DESC): rows strictly after the cursor row's
+    // (submittedAt, id) pair. Prisma's `cursor: { id }` positions on id alone,
+    // which with a compound orderBy can skip or repeat rows across pages. The
+    // cursor row must belong to the same wallet, so one wallet's cursor can't
+    // be used to page through another's claims.
+    let keyset: Prisma.ClaimWhereInput = {};
+    if (cursor) {
+      const anchor = await this.prisma.claim.findFirst({
+        where: { id: cursor, claimant: walletAddress },
+        select: { id: true, submittedAt: true },
+      });
+      if (!anchor) {
+        throw new BadRequestException('Invalid pagination cursor');
+      }
+      keyset = {
+        OR: [
+          { submittedAt: { lt: anchor.submittedAt } },
+          { submittedAt: anchor.submittedAt, id: { lt: anchor.id } },
+        ],
+      };
+    }
+
     const findClaims = this.prisma.claim.findMany({
-      where: { claimant: walletAddress },
+      where: { claimant: walletAddress, ...keyset },
       orderBy: [{ submittedAt: 'desc' }, { id: 'desc' }],
-      ...(cursor
-        ? { cursor: { id: cursor }, skip: 1 }
-        : { skip: (safePage - 1) * safeLimit }),
+      ...(cursor ? {} : { skip: (safePage - 1) * safeLimit }),
       take: safeLimit + 1,
     });
 

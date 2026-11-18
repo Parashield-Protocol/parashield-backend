@@ -28,6 +28,24 @@ import { timingSafeEqual } from 'crypto';
 const AUTH_THROTTLE = { default: { limit: 10, ttl: 60000 } };
 const DEFAULT_NONCE_TTL_SECONDS = 300; // 5 minutes
 
+// #814 — progressive lockout. Each lockout a wallet triggers doubles the next
+// one (base * 2^(level - 1)), capped at a day, so waiting out the lockout
+// window no longer gives an attacker a fresh batch of attempts at the same
+// rate. The level decays after a week without a new lockout, and resets on a
+// successful login.
+export const MAX_LOCKOUT_DURATION_SECONDS = 24 * 60 * 60;
+export const LOCKOUT_LEVEL_DECAY_SECONDS = 7 * 24 * 60 * 60;
+
+export function computeLockoutDurationSeconds(
+  baseSeconds: number,
+  level: number,
+  capSeconds = MAX_LOCKOUT_DURATION_SECONDS,
+): number {
+  const safeBase = Number.isFinite(baseSeconds) && baseSeconds > 0 ? baseSeconds : 900;
+  const exponent = Math.min(Math.max(0, Math.floor(level) - 1), 30);
+  return Math.min(safeBase * 2 ** exponent, capSeconds);
+}
+
 /**
  * AuthController — wallet-based authentication endpoint.
  *
@@ -46,6 +64,37 @@ export class AuthController {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
     private readonly configService: ConfigService,
   ) {}
+
+  /**
+   * Record a failed login (#723) and, when it reaches the threshold, start a
+   * progressively longer lockout (#814). Redis errors are logged rather than
+   * thrown so a store hiccup can't turn a failed login into a 500.
+   */
+  private async recordFailedLogin(
+    walletAddress: string,
+    maxFailedAttempts: number,
+    baseLockoutSeconds: number,
+  ): Promise<void> {
+    const lockoutKey = `auth:lockout:${walletAddress}`;
+    const levelKey = `auth:lockout-level:${walletAddress}`;
+    try {
+      const failures = await this.redis.incr(lockoutKey);
+      if (failures === 1) {
+        await this.redis.expire(lockoutKey, baseLockoutSeconds);
+      }
+      if (failures === maxFailedAttempts) {
+        const level = await this.redis.incr(levelKey);
+        await this.redis.expire(levelKey, LOCKOUT_LEVEL_DECAY_SECONDS);
+        const duration = computeLockoutDurationSeconds(baseLockoutSeconds, level);
+        await this.redis.expire(lockoutKey, duration);
+        this.logger.warn(
+          `Account locked after ${failures} failed attempts: ${walletAddress} (level ${level}, ${duration}s)`,
+        );
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to record login failure for ${walletAddress}: ${err}`);
+    }
+  }
 
   /**
    * Helper to atomically consume the nonce from Redis for a wallet address.
@@ -222,29 +271,21 @@ export class AuthController {
 
       if (!isValid) {
         this.logger.warn(`Login rejected: invalid signature from ${walletAddress}`);
-        // #723 — Record failed attempt and check for lockout.
-        const failures = await this.redis.incr(lockoutKey);
-        if (failures === 1) {
-          await this.redis.expire(lockoutKey, lockoutDurationSec);
-        }
-        if (failures >= maxFailedAttempts) {
-          this.logger.warn(`Account locked after ${failures} failed attempts: ${walletAddress}`);
-        }
+        // #723 / #814 — Record failed attempt and check for lockout.
+        await this.recordFailedLogin(walletAddress, maxFailedAttempts, lockoutDurationSec);
         throw new UnauthorizedException('Invalid or expired authentication challenge');
       }
     } catch (err) {
       if (err instanceof UnauthorizedException) throw err;
       this.logger.warn(`Signature verification error: ${err}`);
-      // #723 — Record failed attempt on verification error.
-      const failures = await this.redis.incr(lockoutKey);
-      if (failures === 1) {
-        await this.redis.expire(lockoutKey, lockoutDurationSec);
-      }
+      // #723 / #814 — Record failed attempt on verification error.
+      await this.recordFailedLogin(walletAddress, maxFailedAttempts, lockoutDurationSec);
       throw new UnauthorizedException('Invalid or expired authentication challenge');
     }
 
-    // #723 — Reset failed attempt counter on successful login.
+    // #723 / #814 — Reset the failure counter and lockout level on success.
     await this.redis.del(lockoutKey);
+    await this.redis.del(`auth:lockout-level:${walletAddress}`);
 
     const token = this.jwtService.sign(walletAddress);
     this.logger.log(`Login successful: wallet=${walletAddress}`);
