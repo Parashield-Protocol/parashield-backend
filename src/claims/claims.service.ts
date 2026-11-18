@@ -16,7 +16,9 @@ import { PolicyStateCacheService, DerivedPolicyState } from './policy-state-cach
 import { readClaimEvaluationSnapshot } from './claim-evaluation-snapshot';
 import { MAX_EVIDENCE_FILES, validateEvidenceFile } from './evidence-validation';
 
-export type ClaimResult = 'Paid' | 'Rejected' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
+// 'Rejected' = trigger evaluated and not met (claim REJECTED). 'Failed' = an error
+// path that marked the claim FAILED for manual review (#807).
+export type ClaimResult = 'Paid' | 'Rejected' | 'Failed' | 'Expired' | 'AlreadyClaimed' | 'AlreadyProcessed' | 'PolicyNotActive' | 'PendingFinalPeriod';
 
 export interface ClaimSummary {
   id:             string;
@@ -328,7 +330,7 @@ export class ClaimsService {
         reason: 'Product not found',
       });
       await this.policyStateCache?.invalidate(policyId);
-      return 'Rejected';
+      return 'Failed';
     }
     // #245 — Guard against non-numeric threshold values. Product.threshold is a
     // free-text string at the service boundary (Decimal serialised via .toString()).
@@ -373,7 +375,7 @@ export class ClaimsService {
         reason: 'Non-numeric product threshold',
       });
       await this.policyStateCache?.invalidate(policyId);
-      return 'Rejected';
+      return 'Failed';
     }
     const comparison = product.comparison;
 
@@ -472,7 +474,7 @@ export class ClaimsService {
         reason: 'On-chain payout failed',
       });
       await this.policyStateCache?.invalidate(policyId);
-      return 'Rejected';
+      return 'Failed';
     }
 
     // #166 — Wrap both DB writes in a single transaction so a crash between them can't
@@ -721,21 +723,10 @@ export class ClaimsService {
       );
     }
 
-    // Duplicate claim guard: prevent double payouts or duplicate in-flight submissions
-    const existingClaim = await this.prisma.claim.findFirst({
-      where: {
-        policyId,
-        status: { in: [ClaimStatus.PAID, ClaimStatus.PROCESSING, ClaimStatus.PENDING] },
-      },
-    });
-
-    if (existingClaim) {
-      this.logger.warn(
-        `Duplicate claim attempt for policy ${policyId} — existing claim id=${existingClaim.id} status=${existingClaim.status}`,
-      );
-      throw new ConflictException({ message: 'Claim already exists for this policy', errorCode: ErrorCode.CLAIM_ALREADY_EXISTS });
-    }
-
+    // #808 — the duplicate-claim guard lives only inside the SERIALIZABLE
+    // transaction below. A second, non-transactional copy here was redundant
+    // (it could not prevent the race the transaction exists for) and cost an
+    // extra query on every submission.
     const contractId = this.config.get<string>('CLAIMS_PROCESSOR_CONTRACT') ?? '';
     if (!contractId || !/^C[A-Z2-7]{55}$/.test(contractId)) {
       throw new BadGatewayException(

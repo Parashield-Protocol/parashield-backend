@@ -97,6 +97,19 @@ describe("StellarService", () => {
       MockContract = StellarSDK.Contract;
     });
 
+    // #806 — the RPC client gets a transport timeout so a call that
+    // withTimeout gave up on is aborted, not left holding a connection.
+    it("constructs the RPC client with a request timeout (#806)", () => {
+      const StellarSDK = require("@stellar/stellar-sdk");
+      const { RPC_REQUEST_TIMEOUT_MS } = require("./stellar.service");
+
+      expect(StellarSDK.rpc.Server).toHaveBeenCalledWith(
+        "https://soroban-testnet.stellar.org",
+        { timeout: RPC_REQUEST_TIMEOUT_MS },
+      );
+      expect(RPC_REQUEST_TIMEOUT_MS).toBeGreaterThan(0);
+    });
+
     it("should accept a StrKey contract ID (e.g., CALFQS...)", async () => {
       const testnetContractId =
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
