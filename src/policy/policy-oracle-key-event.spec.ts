@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { PolicyService } from './policy.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { StellarService } from '../stellar/stellar.service';
@@ -58,6 +58,7 @@ describe('Policy Oracle Key Change Event (#717)', () => {
     startTime: new Date('2026-06-01T00:00:00Z'),
     endTime: new Date('2026-06-30T23:59:59Z'),
     status: PolicyStatus.ACTIVE,
+    version: 4,
     product: cropProduct,
     _count: { claims: 0 },
   };
@@ -103,8 +104,8 @@ describe('Policy Oracle Key Change Event (#717)', () => {
 
     expect(result.oracleKey).toBe(validNewKey);
     expect(mockPrismaService.policy.update).toHaveBeenCalledWith({
-      where: { id: initialPolicy.id },
-      data: { oracleKey: validNewKey },
+      where: { id: initialPolicy.id, version: 4 },
+      data: { oracleKey: validNewKey, version: { increment: 1 } },
       include: { _count: { select: { claims: true } } },
     });
 
@@ -200,9 +201,24 @@ describe('Policy Oracle Key Change Event (#717)', () => {
     });
 
     expect(mockPrismaService.policy.update).toHaveBeenCalledWith(expect.objectContaining({
-      where: { id: initialPolicy.id },
-      data: { startTime: new Date('2026-06-05T00:00:00Z') },
+      where: { id: initialPolicy.id, version: 4 },
+      data: { startTime: new Date('2026-06-05T00:00:00Z'), version: { increment: 1 } },
     }));
+  });
+
+  it('rejects a concurrent modification with ConflictException and emits nothing (#810)', async () => {
+    mockPrismaService.policy.findUnique.mockResolvedValue(initialPolicy);
+    // Prisma reports a version-guard miss as P2025 (no row matched the where).
+    mockPrismaService.policy.update.mockRejectedValue(
+      Object.assign(new Error('Record to update not found.'), { code: 'P2025' }),
+    );
+
+    await expect(
+      service.updatePolicy(initialPolicy.id, { oracleKey: 'rainfall:-0.0920,34.7680:2026-06' }),
+    ).rejects.toThrow(ConflictException);
+
+    expect(mockStatusEventsService.emitPolicyOracleKeyChange).not.toHaveBeenCalled();
+    expect(mockPrismaService.auditLog.create).not.toHaveBeenCalled();
   });
 
   it('throws NotFoundException for non-existent policy', async () => {

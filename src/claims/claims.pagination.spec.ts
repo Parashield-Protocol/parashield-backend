@@ -193,4 +193,30 @@ describe('Claims Pagination (#749)', () => {
       expect(deepOffset.rowsScanned / deepCursor.rowsScanned).toBeGreaterThan(4000);
     });
   });
+
+  describe('claim count cache eviction (#809)', () => {
+    it('evicts only the oldest entry when full instead of clearing every wallet', async () => {
+      const cache: Map<string, { total: number; expiresAt: number }> = (service as any).claimCountCache;
+      const later = Date.now() + 60_000;
+      for (let i = 0; i < 1000; i += 1) {
+        cache.set(`wallet-${i}`, { total: i, expiresAt: later });
+      }
+      mockPrisma.claim.findMany.mockResolvedValue([]);
+      mockPrisma.claim.count.mockResolvedValue(7);
+
+      await service.getClaimsByWallet('wallet-new', 1, 10);
+
+      expect(cache.size).toBe(1000);
+      expect(cache.has('wallet-0')).toBe(false);
+      expect(cache.has('wallet-1')).toBe(true);
+      expect(cache.has('wallet-999')).toBe(true);
+      expect(cache.get('wallet-new')?.total).toBe(7);
+
+      // A surviving wallet is still served from the cache: no new COUNT.
+      mockPrisma.claim.count.mockClear();
+      const result = await service.getClaimsByWallet('wallet-1', 1, 10);
+      expect(mockPrisma.claim.count).not.toHaveBeenCalled();
+      expect(result.total).toBe(1);
+    });
+  });
 });

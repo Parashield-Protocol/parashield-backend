@@ -316,6 +316,37 @@ describe("StellarService", () => {
       expect(mockRpc.getAccount).toHaveBeenCalledTimes(1);
     });
 
+    it("#811 — releases the per-account lock during retry backoff", async () => {
+      const CONTRACT = "C" + "A".repeat(55);
+      let releaseBackoff!: () => void;
+      const backoff = new Promise<void>((resolve) => { releaseBackoff = resolve; });
+      const sleepSpy = jest
+        .spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep")
+        .mockImplementationOnce(() => backoff);
+      mockRpc.sendTransaction
+        .mockRejectedValueOnce(new Error("ECONNRESET: connection reset by peer"))
+        .mockResolvedValueOnce({ status: "PENDING", hash: "tx-second" })
+        .mockResolvedValueOnce({ status: "PENDING", hash: "tx-first" });
+
+      const first = service.invokeContract(CONTRACT, "first", []);
+      // Let the first invocation fail its attempt and enter the backoff sleep.
+      for (let i = 0; i < 100 && sleepSpy.mock.calls.length === 0; i += 1) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      expect(sleepSpy).toHaveBeenCalledTimes(1);
+
+      // With the lock held across the backoff this would wait for it.
+      const second = service.invokeContract(CONTRACT, "second", []);
+      const winner = await Promise.race([
+        second,
+        new Promise((resolve) => setTimeout(() => resolve("blocked"), 500)),
+      ]);
+      expect(winner).toBe("tx-second");
+
+      releaseBackoff();
+      await expect(first).resolves.toBe("tx-first");
+    });
+
     it("throws after all 3 attempts are exhausted and calls getAccount 3 times", async () => {
       mockRpc.sendTransaction.mockRejectedValue(new Error("Network timeout"));
 
