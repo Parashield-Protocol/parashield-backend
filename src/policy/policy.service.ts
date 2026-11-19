@@ -67,7 +67,6 @@ interface ProductCacheEntry {
   total: number;
   expiresAt: number;
 }
-const productCache = new Map<string, ProductCacheEntry>();
 
 export interface PremiumValidationResult {
   valid: boolean;
@@ -95,6 +94,8 @@ const POOL_UNITS_PER_WHOLE = 10_000_000n;
 @Injectable()
 export class PolicyService {
   private readonly logger = new Logger(PolicyService.name);
+  // #834 — per-instance product cache (was module-level, shared across instances and tests).
+  private readonly productCache = new Map<string, ProductCacheEntry>();
 
   constructor(
     private readonly stellar: StellarService,
@@ -645,7 +646,7 @@ export class PolicyService {
     // caching every possible pagination combination is not worthwhile.
     const cacheKey = `${page}:${take}`;
     const now = Date.now();
-    const cached = productCache.get(cacheKey);
+    const cached = this.productCache.get(cacheKey);
     if (cached && cached.expiresAt > now) {
       this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
       return { data: cached.data, total: cached.total, page, limit: take };
@@ -687,7 +688,7 @@ export class PolicyService {
     }));
 
     // #622 — store in cache with TTL
-    productCache.set(cacheKey, { data, total, expiresAt: now + PRODUCT_CACHE_TTL_MS });
+    this.productCache.set(cacheKey, { data, total, expiresAt: now + PRODUCT_CACHE_TTL_MS });
 
     this.logger.log(`get_active_products: ${data.length}/${total} products (page ${page})`);
     return { data, total, page, limit: take };
@@ -1199,7 +1200,7 @@ export class PolicyService {
 
   async createProduct(dto: CreateProductDto): Promise<ProductSummary> {
     // #622 — invalidate product cache after admin mutation
-    productCache.clear();
+    this.productCache.clear();
     const product = await this.prisma.product.create({
       data: {
         name:         dto.name,
@@ -1221,7 +1222,7 @@ export class PolicyService {
 
   async updateProduct(id: string, dto: UpdateProductDto): Promise<ProductSummary> {
     // #622 — invalidate product cache after admin mutation
-    productCache.clear();
+    this.productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
@@ -1252,7 +1253,7 @@ export class PolicyService {
   /** Deactivate a product (soft delete — existing policies still reference it). */
   async deactivateProduct(id: string): Promise<ProductSummary> {
     // #622 — invalidate product cache after admin mutation
-    productCache.clear();
+    this.productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
