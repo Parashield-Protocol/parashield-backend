@@ -472,7 +472,7 @@ describe("OracleService.fetchRainfall", () => {
       });
       mockedAxios.get.mockResolvedValue({
         data: {
-          data: [{ departure: { delay: 15 } }],
+          data: [{ departure: { delay: 15, actual: "2026-06-27T10:15:00+00:00" } }],
         },
       });
       mockPrismaService.oracleReading.upsert.mockResolvedValue({ id: "f1" });
