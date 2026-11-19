@@ -29,7 +29,7 @@ export interface WebhookDeliveryResult {
 // each attempt (1 s → 2 s → 4 s by default).
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
-const WEBHOOK_TIMEOUT_MS = 10_000;
+const WEBHOOK_TIMEOUT_MS = 8_000;
 
 // #606 — AES-256-GCM parameters for encrypting webhook secrets at rest.
 // SHA-256 of WEBHOOK_SECRET_KEY always yields the 32-byte key AES-256 requires.

@@ -6,7 +6,7 @@ import { buildProblemDetails } from '../errors/problem-details';
 // worker threads; responding with 408 lets the client retry instead of
 // hanging until the TCP idle-timeout fires. The value is intentionally kept
 // in sync with SERVER_TIMEOUT_MS in main.ts (30 s) so both layers agree.
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
 
 /**
  * RequestTimeoutMiddleware (#409)
