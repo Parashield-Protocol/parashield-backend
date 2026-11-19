@@ -732,8 +732,8 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
     // Determine if the requested month is in the past relative to today.
     const today = new Date();
     const isPastMonth =
-      year < today.getFullYear() ||
-      (year === today.getFullYear() && month < today.getMonth() + 1);
+      year < today.getUTCFullYear() ||
+      (year === today.getUTCFullYear() && month < today.getUTCMonth() + 1);
 
     // Choose appropriate Open-Meteo endpoint.
     // - For past months, use /archive (historical observed data only)
@@ -849,8 +849,8 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
 
     const today = new Date();
     const isPastMonth =
-      year < today.getFullYear() ||
-      (year === today.getFullYear() && month < today.getMonth() + 1);
+      year < today.getUTCFullYear() ||
+      (year === today.getUTCFullYear() && month < today.getUTCMonth() + 1);
 
     const url = isPastMonth
       ? `https://archive-api.open-meteo.com/v1/archive?latitude=${lat}&longitude=${lng}&daily=temperature_2m_max&start_date=${startDate}&end_date=${endStr}&timezone=UTC`
