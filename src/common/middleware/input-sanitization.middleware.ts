@@ -1,10 +1,6 @@
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 
-// Guard against runaway recursion on deeply nested payloads; anything below
-// this depth is left untouched.
-const MAX_SANITIZATION_DEPTH = 10;
-
 // Keys that can be used for prototype pollution; dropped from request bodies.
 const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
@@ -50,14 +46,14 @@ export class InputSanitizationMiddleware implements NestMiddleware {
   }
 }
 
-function sanitize(value: unknown, depth = 0): unknown {
+function sanitize(value: unknown): unknown {
   if (typeof value === 'string') return sanitizeString(value);
 
-  if (value !== null && typeof value === 'object' && depth < MAX_SANITIZATION_DEPTH) {
+  if (value !== null && typeof value === 'object') {
     if (Buffer.isBuffer(value)) return value;
 
     if (Array.isArray(value)) {
-      return value.map((item) => sanitize(item, depth + 1));
+      return value.map((item) => sanitize(item));
     }
 
     const plain = Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null;
@@ -66,7 +62,7 @@ function sanitize(value: unknown, depth = 0): unknown {
     const result: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
       if (FORBIDDEN_KEYS.has(key)) continue;
-      result[key] = sanitize(item, depth + 1);
+      result[key] = sanitize(item);
     }
     return result;
   }

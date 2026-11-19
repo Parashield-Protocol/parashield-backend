@@ -408,7 +408,16 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     if (Array.isArray(obj['message'])) {
       return (obj['message'] as unknown[])
-        .map((m) => (typeof m === 'string' ? m : JSON.stringify(serializeBigInt(m))))
+        .map((m) => {
+          if (typeof m === 'string') return m;
+          if (m !== null && typeof m === 'object') {
+            const constraints = (m as { constraints?: Record<string, unknown> }).constraints;
+            if (constraints) return Object.values(constraints).join('; ');
+            const message = (m as { message?: unknown }).message;
+            if (typeof message === 'string') return message;
+          }
+          return JSON.stringify(serializeBigInt(m));
+        })
         .join('; ');
     }
 
