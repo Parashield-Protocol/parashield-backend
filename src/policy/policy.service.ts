@@ -84,6 +84,8 @@ const MAX_PREMIUM_COVERAGE_XLM  = 1_000_000_000;
 const MAX_PREMIUM_RATE_BPS      = 10_000;
 const MAX_PREMIUM_DURATION_DAYS = 365;
 const ORACLE_KEY_MIN_YEAR         = 2020;
+/** Stroops per whole unit: pool balances are 7-decimal fixed point (#851). */
+const POOL_UNITS_PER_WHOLE = 10_000_000n;
 
 /**
  * PolicyService — reads policy and product data from the Policy Engine contract.
@@ -281,11 +283,14 @@ export class PolicyService {
     }
 
     // #131 — Reject if coverage exceeds available pool liquidity
+    // getPoolAvailableBalance returns 7-decimal fixed point (stroops), while coverage is whole units. Compare in
+    // stroops, so a 1 XLM coverage is 10,000,000 stroops and is not treated as 1 stroop (#851).
     const poolBalance = await this.getPoolAvailableBalance();
-    if (poolBalance !== null && coverageXlm > poolBalance) {
+    if (poolBalance !== null && coverage * POOL_UNITS_PER_WHOLE > BigInt(Math.trunc(poolBalance))) {
+      const poolWhole = (poolBalance / Number(POOL_UNITS_PER_WHOLE)).toFixed(7);
       return {
         valid: false,
-        reason: `Coverage ${coverageXlm} XLM exceeds the pool's available liquidity (${poolBalance} XLM)`,
+        reason: `Coverage ${coverageXlm} XLM exceeds the pool's available liquidity (${poolWhole} XLM)`,
       };
     }
 
@@ -781,12 +786,14 @@ export class PolicyService {
    * #740 — Cursor-based query for streaming policies export without high memory usage.
    */
   async findAll(params: {
+    where?: { policyholder: string };
     take?: number;
     skip?: number;
     cursor?: { id: string };
     orderBy?: { id: 'asc' | 'desc' };
   }): Promise<Array<{ id: string; status: string; premium: string; coverage: string; createdAt: Date }>> {
     const policies = await this.prisma.policy.findMany({
+      where: params.where,
       take: params.take,
       skip: params.skip,
       cursor: params.cursor,

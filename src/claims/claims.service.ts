@@ -84,6 +84,11 @@ export class ClaimsService {
   private readonly claimCountCache = new Map<string, { total: number; expiresAt: number }>();
   private nextContractCallAt = 0;
 
+  /** Cache key for claim counts. Normalising means every caller hits the same entry for a wallet (#850). */
+  private claimCountKey(wallet: string): string {
+    return wallet.trim().toUpperCase();
+  }
+
   constructor(
     private readonly stellar: StellarService,
     private readonly oracleService: OracleService,
@@ -285,7 +290,7 @@ export class ClaimsService {
 
     this.logger.log(`Processing claim for policy: id=${policy.id} holder=${policy.policyholder} coverage=${policy.coverageXlm}`);
 
-    this.claimCountCache.delete(policy.policyholder);
+    this.claimCountCache.delete(this.claimCountKey(policy.policyholder));
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
     // Use the oracle row captured with the policy above; do not issue a second,
@@ -837,7 +842,7 @@ export class ClaimsService {
       throw error;
     }
 
-    this.claimCountCache.delete(claimant);
+    this.claimCountCache.delete(this.claimCountKey(claimant));
     await this.policyStateCache?.invalidate(policyId);
     this.logger.log(`Claim record created: id=${claim.id} policyId=${policyId}`);
 
@@ -962,7 +967,8 @@ export class ClaimsService {
     });
 
     // #589 — reuse a recent total instead of running COUNT on every request
-    const cached = this.claimCountCache.get(walletAddress);
+    const countKey = this.claimCountKey(walletAddress);
+    const cached = this.claimCountCache.get(countKey);
     let claims: Awaited<typeof findClaims>;
     let total: number;
     if (cached && cached.expiresAt > Date.now()) {
@@ -977,12 +983,12 @@ export class ClaimsService {
       // sent every cached wallet back to COUNT(*) on its next request at once.
       // Re-inserting moves this wallet to the end, so eviction follows the
       // order entries were last refreshed.
-      this.claimCountCache.delete(walletAddress);
+      this.claimCountCache.delete(countKey);
       if (this.claimCountCache.size >= CLAIM_COUNT_CACHE_MAX_ENTRIES) {
         const oldest = this.claimCountCache.keys().next().value;
         if (oldest !== undefined) this.claimCountCache.delete(oldest);
       }
-      this.claimCountCache.set(walletAddress, { total, expiresAt: Date.now() + CLAIM_COUNT_CACHE_TTL_MS });
+      this.claimCountCache.set(countKey, { total, expiresAt: Date.now() + CLAIM_COUNT_CACHE_TTL_MS });
     }
 
     const hasMore = claims.length > safeLimit;
