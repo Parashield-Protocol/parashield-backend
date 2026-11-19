@@ -129,4 +129,39 @@ describe('StatusEventsService cross-instance Redis pub/sub (#869)', () => {
     svcAsync.emitPolicyStatusChange('policy-2', 'CLAIMED');
     expect(received).toHaveLength(0);
   });
+
+  describe('#857 — policyOwners cache is bounded with LRU eviction', () => {
+    const owners = (svc: StatusEventsService) => (svc as any).policyOwners as Map<string, string>;
+    const withCacheSize = (size: number) =>
+      new StatusEventsService(undefined, undefined, { get: (k: string) => (k === 'STATUS_EVENTS_OWNER_CACHE_SIZE' ? String(size) : undefined) } as any);
+
+    it('evicts the least-recently-used owner once the cache exceeds its max size', () => {
+      const svc = withCacheSize(2);
+      svc.setPolicyOwner('p1', 'G1');
+      svc.setPolicyOwner('p2', 'G2');
+      svc.setPolicyOwner('p3', 'G3');
+
+      expect(owners(svc).size).toBe(2);
+      expect(owners(svc).has('p1')).toBe(false);
+      expect([...owners(svc).keys()]).toEqual(['p2', 'p3']);
+    });
+
+    it('refreshes recency on a subscription cache hit so hot policies survive eviction', () => {
+      const svc = withCacheSize(2);
+      svc.setPolicyOwner('p1', 'G1');
+      svc.setPolicyOwner('p2', 'G2');
+
+      const unsub = svc.subscribeToPolicyStatus('p1', 'G1', () => {});
+      svc.setPolicyOwner('p3', 'G3');
+
+      expect(owners(svc).has('p1')).toBe(true);
+      expect(owners(svc).has('p2')).toBe(false);
+      unsub();
+    });
+
+    it('falls back to the default size when the configured value is invalid', () => {
+      const svc = new StatusEventsService(undefined, undefined, { get: () => 'not-a-number' } as any);
+      expect((svc as any).policyOwnerCacheSize).toBe(10_000);
+    });
+  });
 });

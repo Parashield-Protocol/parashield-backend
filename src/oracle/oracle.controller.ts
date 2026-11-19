@@ -81,7 +81,14 @@ export class OracleController {
   @ApiErrorResponse(404, 'No oracle reading found for the requested key.', undefined, 'No reading found for the requested key.')
   @ApiErrorResponse(429, 'Rate limit exceeded (60 req / 60 s).', undefined, 'Too many requests. Please try again later.')
   async getReadingByKey(@Query("key") key: string) {
-    const decoded = decodeURIComponent(key ?? "");
+    // #859 — malformed percent-encoding (e.g. %ZZ) makes decodeURIComponent
+    // throw a URIError; surface it as a 400 rather than a 500.
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(key ?? "");
+    } catch {
+      throw new BadRequestException("Invalid oracle key: malformed percent-encoding.");
+    }
     if (!isValidOracleKeyFormat(decoded)) {
       throw new BadRequestException(
         `Invalid oracle key format. Expected ${ORACLE_KEY_FORMAT_DESCRIPTION}.`,

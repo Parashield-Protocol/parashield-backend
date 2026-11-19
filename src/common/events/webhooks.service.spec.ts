@@ -116,29 +116,60 @@ describe('WebhooksService', () => {
       expect(stored).toMatch(/^enc:/);
     });
 
-    it('round-trips: encrypted secret decrypts back to original value on read', async () => {
+    it('round-trips: encrypted secret is decrypted for signing deliveries', async () => {
       const { service, prisma } = build([], SECRET_KEY);
 
       // Register to get the encrypted value.
       await service.registerWebhook({ url: 'https://example.com/hook', events: ['policy.status.change'], secret: 'mysecret' });
       const encryptedSecret = prisma.webhookRegistration.create.mock.calls[0][0].data.secret as string;
 
-      // Simulate a DB row with the encrypted secret and read it back.
+      // Simulate a DB row with the encrypted secret and deliver to it.
       prisma.webhookRegistration.findMany.mockResolvedValue([
         { id: 'wh-1', url: 'https://example.com/hook', secret: encryptedSecret, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
       ]);
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true, status: 200, headers: new Map() } as unknown as Response);
+
+      const event = { policyId: 'p', fromStatus: 'ACTIVE', toStatus: 'CLAIMED', timestamp: 1 };
+      await service.notifyPolicyStatusChange(event);
+
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const expected = crypto.createHmac('sha256', 'mysecret').update(JSON.stringify(event)).digest('base64');
+      expect((init.headers as Record<string, string>)['X-Webhook-Signature']).toBe(expected);
 
       const registrations = await service.getRegistrations();
-      expect(registrations[0].secret).toBe('mysecret');
+      expect(registrations[0].secretMasked).toBe('****cret');
     });
 
     it('reads plain-text secrets without WEBHOOK_SECRET_KEY (backward compatibility)', async () => {
-      const { service, prisma } = build([
+      const { service } = build([
         { id: 'wh-1', url: 'https://example.com/hook', secret: 'plaintext', events: ['policy.status.change'], isActive: true, createdAt: new Date() },
       ]);
 
       const registrations = await service.getRegistrations();
-      expect(registrations[0].secret).toBe('plaintext');
+      expect(registrations[0].secretMasked).toBe('****text');
+    });
+
+    it('#860 — getRegistrations omits the plaintext and ciphertext secret from returned registrations', async () => {
+      const { service } = build([
+        { id: 'wh-1', url: 'https://example.com/hook', secret: 'topsecret', events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ], 'test-encryption-key-32-bytes-long!');
+
+      const [registration] = await service.getRegistrations();
+
+      expect(registration).not.toHaveProperty('secret');
+      expect(registration).not.toHaveProperty('storedSecret');
+      expect(JSON.stringify(registration)).not.toContain('topsecret');
+      expect(registration.secretMasked).toBe('****cret');
+    });
+
+    it('#860 — omits secretMasked when the registration has no secret', async () => {
+      const { service } = build([
+        { id: 'wh-1', url: 'https://example.com/hook', secret: null, events: ['policy.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+
+      const [registration] = await service.getRegistrations();
+
+      expect(registration).not.toHaveProperty('secretMasked');
     });
 
     it('#607 — signPayload uses the top-level crypto import (not require)', async () => {

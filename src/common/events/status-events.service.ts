@@ -40,6 +40,10 @@ export interface ClaimStatusChangeEvent {
 const STATUS_EVENTS_CHANNEL = 'policy:status:events';
 const ORACLE_KEY_EVENTS_CHANNEL = 'policy:oracle_key:events';
 const DEFAULT_MAX_LISTENERS = 1000;
+// #857 — upper bound on cached policyId → policyholder entries. Least-recently
+// used entries are evicted beyond this; an evicted owner is simply re-fetched
+// from the database on the next subscription.
+const DEFAULT_POLICY_OWNER_CACHE_SIZE = 10_000;
 
 /**
  * StatusEventsService — pub/sub for policy status changes (#349).
@@ -55,6 +59,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
   private readonly emitter = new EventEmitter();
   private readonly instanceId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
   private readonly policyOwners = new Map<string, string>();
+  private readonly policyOwnerCacheSize: number;
   private subscriber?: Redis;
 
   constructor(
@@ -71,10 +76,32 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
       ? configuredMaxListeners
       : DEFAULT_MAX_LISTENERS;
     this.emitter.setMaxListeners(maxListeners);
+
+    const configuredCacheSize = Number(this.config?.get<string>('STATUS_EVENTS_OWNER_CACHE_SIZE'));
+    this.policyOwnerCacheSize = Number.isSafeInteger(configuredCacheSize) && configuredCacheSize > 0
+      ? configuredCacheSize
+      : DEFAULT_POLICY_OWNER_CACHE_SIZE;
   }
 
   setPolicyOwner(policyId: string, owner: string): void {
+    // #857 — re-insert so the entry moves to the most-recently-used end,
+    // then evict from the least-recently-used end (Map keeps insertion order).
+    this.policyOwners.delete(policyId);
     this.policyOwners.set(policyId, owner);
+    while (this.policyOwners.size > this.policyOwnerCacheSize) {
+      const oldest = this.policyOwners.keys().next().value as string;
+      this.policyOwners.delete(oldest);
+    }
+  }
+
+  private getPolicyOwner(policyId: string): string | undefined {
+    const owner = this.policyOwners.get(policyId);
+    if (owner !== undefined) {
+      // #857 — refresh recency on a cache hit.
+      this.policyOwners.delete(policyId);
+      this.policyOwners.set(policyId, owner);
+    }
+    return owner;
   }
 
   async onModuleInit(): Promise<void> {
@@ -203,7 +230,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Check synchronous cache if available
-    const knownOwner = this.policyOwners.get(policyId);
+    const knownOwner = this.getPolicyOwner(policyId);
     if (knownOwner && subscriberWallet && knownOwner !== subscriberWallet) {
       this.logger.warn(
         `Subscriber ${subscriberWallet} does not own policy ${policyId} (owned by ${knownOwner})`,
@@ -239,7 +266,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
             if (unsubscribed) return;
             if (policy && policy.policyholder === subscriberWallet) {
               isAuthorized = true;
-              this.policyOwners.set(policyId, policy.policyholder);
+              this.setPolicyOwner(policyId, policy.policyholder);
               // Flush buffered events
               while (pendingEvents.length > 0) {
                 const ev = pendingEvents.shift()!;
