@@ -347,5 +347,115 @@ describe('WebhooksService', () => {
       }
     });
   });
+
+  describe('retry backoff, signature verification, payload limit, and shutdown drain (#870)', () => {
+    it('retries failed deliveries with exponential backoff delays (1000ms, 2000ms, 4000ms)', async () => {
+      const { service } = build([
+        { id: 'w-retry', url: 'https://retry.example.com/hook', secret: 'sec', events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+      const sleepSpy = jest.spyOn(service as any, 'sleep').mockResolvedValue(undefined);
+      jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: false,
+        status: 502,
+        headers: new Map(),
+      } as unknown as Response);
+
+      const results = await service.notifyClaimStatusChange({
+        claimId: 'c1',
+        fromStatus: 'PENDING',
+        toStatus: 'PAID',
+        timestamp: 100,
+      });
+
+      expect(results[0].success).toBe(false);
+      const delays = sleepSpy.mock.calls.map((c) => c[0] as number);
+      expect(delays).toHaveLength(3);
+      expect(delays[0]).toBeGreaterThanOrEqual(0);
+      expect(delays[0]).toBeLessThanOrEqual(1000);
+      expect(delays[1]).toBeGreaterThanOrEqual(0);
+      expect(delays[1]).toBeLessThanOrEqual(2000);
+      expect(delays[2]).toBeGreaterThanOrEqual(0);
+      expect(delays[2]).toBeLessThanOrEqual(4000);
+    });
+
+    it('computes HMAC-SHA256 base64 signature and verifies response signature', async () => {
+      const secret = 'my-webhook-secret';
+      const { service } = build([
+        { id: 'w-sig', url: 'https://sig.example.com/hook', secret, events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+      const responseBody = '{"ack":true}';
+      const expectedRespSig = crypto.createHmac('sha256', secret).update(responseBody).digest('base64');
+
+      const fetchMock = jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Map([['x-webhook-signature-response', expectedRespSig]]),
+        text: async () => responseBody,
+      } as unknown as Response);
+
+      const results = await service.notifyClaimStatusChange({
+        claimId: 'c-sig',
+        fromStatus: 'PENDING',
+        toStatus: 'PAID',
+        timestamp: 200,
+      });
+
+      expect(results[0].success).toBe(true);
+      const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      const sentHeaders = init.headers as Record<string, string>;
+      const expectedReqSig = crypto.createHmac('sha256', secret).update(String(init.body)).digest('base64');
+      expect(sentHeaders['X-Webhook-Signature']).toBe(expectedReqSig);
+
+      // Mismatched response signature fails delivery
+      jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        status: 200,
+        headers: new Map([['x-webhook-signature-response', 'bad-signature']]),
+        text: async () => responseBody,
+      } as unknown as Response);
+      const badResults = await service.notifyClaimStatusChange({
+        claimId: 'c-sig-bad',
+        fromStatus: 'PENDING',
+        toStatus: 'PAID',
+        timestamp: 201,
+      });
+      expect(badResults[0].success).toBe(false);
+      expect(badResults[0].error).toContain('signature verification failed');
+    });
+
+    it('enforces 1 MB payload size limit before dispatching', async () => {
+      const { service } = build([
+        { id: 'w-big', url: 'https://big.example.com/hook', secret: null, events: ['claim.status.change'], isActive: true, createdAt: new Date() },
+      ]);
+      const fetchSpy = jest.spyOn(global, 'fetch').mockClear();
+
+      const results = await service.notifyClaimStatusChange({
+        claimId: 'c-big',
+        fromStatus: 'PENDING',
+        toStatus: 'REJECTED',
+        reason: 'x'.repeat(1_100_000),
+        timestamp: 300,
+      });
+
+      expect(results[0].success).toBe(false);
+      expect(results[0].error).toMatch(/maximum size of 1048576 bytes/i);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('drains in-flight deliveries during onApplicationShutdown', async () => {
+      const { service } = build([]);
+      let resolved = false;
+      const inFlight = new Promise<void>((resolve) => {
+        setTimeout(() => {
+          resolved = true;
+          resolve();
+        }, 20);
+      });
+      (service as any).inFlightDeliveries.add(inFlight);
+
+      await service.onApplicationShutdown('SIGTERM');
+      expect(resolved).toBe(true);
+    });
+  });
 });
 
