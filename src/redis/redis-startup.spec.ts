@@ -197,7 +197,7 @@ describe('redis-startup helpers (#710)', () => {
         jest.advanceTimersByTime(60);
         await assertion;
 
-        expect(client.disconnect).toHaveBeenCalledWith(false);
+        expect(client.disconnect).toHaveBeenCalledWith(true);
       } finally {
         jest.useRealTimers();
       }

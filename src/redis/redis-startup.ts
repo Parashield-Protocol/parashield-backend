@@ -169,9 +169,9 @@ function describeError(error: unknown): string {
   return String(error);
 }
 
-function closeQuietly(client: RedisConnectable): void {
+function closeQuietly(client: RedisConnectable, reconnect = false): void {
   try {
-    client.disconnect?.(false);
+    client.disconnect?.(reconnect);
   } catch {
     // Best effort: the client may already be closed.
   }
@@ -187,7 +187,7 @@ function connectOnce(
       if (settled) return;
       settled = true;
       // A hung attempt must not hold the socket open across retries.
-      closeQuietly(client);
+      closeQuietly(client, true);
       reject(new RedisAttemptTimeoutError(timeoutMs));
     }, timeoutMs);
 
