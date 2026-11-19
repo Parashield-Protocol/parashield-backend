@@ -486,4 +486,7 @@ async function bootstrap() {
   logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
   logger.log(`Swagger docs available at http://localhost:${port}/docs`);
 }
-bootstrap();
+bootstrap().catch((err: unknown) => {
+  new Logger('Bootstrap').error(`Fatal Error: ${(err as Error).message}`);
+  process.exit(1);
+});

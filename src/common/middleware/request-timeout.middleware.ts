@@ -49,8 +49,7 @@ export class RequestTimeoutMiddleware implements NestMiddleware {
           correlationId: (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined,
         }),
       );
-      // Destroy the socket so the connection slot is released immediately.
-      req.socket?.destroy();
+      res.once('finish', () => req.socket?.destroy());
     }, this.timeoutMs);
 
 

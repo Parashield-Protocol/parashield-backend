@@ -122,10 +122,11 @@ export class HorizonCircuitBreaker {
   recordTimeout(): void {
     this.probeInFlight = false;
     this.consecutiveTimeouts++;
-    if (this.openedAt !== null || this.consecutiveTimeouts >= this.threshold) {
+    const wasOpen = this.openedAt !== null;
+    if (wasOpen || this.consecutiveTimeouts >= this.threshold) {
       this.openedAt = Date.now();
       this.logger.error(
-        `Circuit opened after ${this.consecutiveTimeouts} consecutive Horizon timeouts — failing fast for ${this.resetTimeoutMs}ms`,
+        `${wasOpen ? 'Circuit remains open' : 'Circuit opened'} after ${this.consecutiveTimeouts} consecutive Horizon timeouts — failing fast for ${this.resetTimeoutMs}ms`,
       );
     }
   }
