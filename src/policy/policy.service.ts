@@ -1173,8 +1173,9 @@ export class PolicyService {
       data: {
         entityType: 'Policy',
         entityId: id,
-        fromStatus: existing.status,
-        toStatus: existing.status,
+        // Field updates are not status transitions (#847): record null statuses.
+        fromStatus: null,
+        toStatus: null,
         reason: `Updated ${changes.join(' and ')} by ${actor ?? 'system'}`,
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${id} update`, err));

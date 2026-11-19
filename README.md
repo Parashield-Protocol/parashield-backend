@@ -250,6 +250,16 @@ To minimize database round-trips when storing high-frequency oracle readings, `O
 
 Setting `ORACLE_BATCH_SIZE=1` disables buffering and executes immediate 1:1 inserts matching legacy behavior. Graceful shutdown hooks flush any remaining buffered readings before process termination.
 
+#### Tuning guidance (#846)
+
+Out-of-range values are rejected at boot, so a bad setting fails fast rather than silently changing behavior.
+
+- **`ORACLE_BATCH_SIZE`** sets how many readings share one database transaction. Raise it when many readings arrive at once and per-transaction overhead dominates. Lower it if transactions run long enough to hold locks against other writers, or if database latency spikes.
+- **`ORACLE_FLUSH_INTERVAL_MS`** is the longest a buffered reading waits before it is written, so it bounds how stale stored data can be. Lower values give fresher data at the cost of more, smaller transactions when traffic is light. Higher values reduce write volume but widen the window where a crash could lose buffered readings.
+- **`ORACLE_BUFFER_MAX_SIZE`** is how many readings may wait in memory. Keep it comfortably larger than `ORACLE_BATCH_SIZE` so a flush never has to wait on a partial batch. When the buffer fills, backpressure applies, so a smaller value engages it sooner and a larger one costs more memory.
+
+The defaults (`50`, `1000` ms, `1000`) suit moderate ingestion. Change one value at a time and watch flush latency and database load before moving the next.
+
 ### Load Testing
 
 A k6 stress test script is provided in `loadtest/k6/pool-stress.js` to evaluate pool behavior and latency under concurrent load:

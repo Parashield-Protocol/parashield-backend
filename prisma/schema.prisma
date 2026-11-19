@@ -159,8 +159,8 @@ model AuditLog {
   id         String   @id @default(uuid())
   entityType String
   entityId   String
-  fromStatus String
-  toStatus   String
+  fromStatus String?
+  toStatus   String?
   reason     String?
   occurredAt DateTime @default(now())
 
