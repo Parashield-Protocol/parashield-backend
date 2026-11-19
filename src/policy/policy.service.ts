@@ -358,18 +358,10 @@ export class PolicyService {
       throw new BadRequestException(periodValidation.reason);
     }
 
-    // #665 — Validate the oracle key has at least one reading before
-    // persisting the policy. Without this, a policy could reference an
-    // oracle key that has no data source configured, making claim
-    // evaluation impossible.
-    const oracleReading = await this.prisma.oracleReading.findFirst({
-      where: { key: dto.oracleKey },
-    });
-    if (!oracleReading) {
-      throw new BadRequestException(
-        `Oracle key "${dto.oracleKey}" has no data source configured. Cannot create policy with an unknown oracle key.`,
-      );
-    }
+    // #824 — a brand-new oracle key has no reading until the worker fetches
+    // one, and the worker populates it before claim evaluation. The key's format
+    // and coverage period were already validated above, so a missing reading is
+    // not grounds to refuse the policy. This replaces the #665 existence check.
 
     const premiumPaid = this.calculatePremium(dto.coverageXlm, product.premiumRate, dto.duration);
     const rateSnapshot = snapshotPremiumRate({
