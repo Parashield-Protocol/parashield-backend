@@ -83,6 +83,7 @@ export interface OracleKeyValidationResult {
 const MAX_PREMIUM_COVERAGE_XLM  = 1_000_000_000;
 const MAX_PREMIUM_RATE_BPS      = 10_000;
 const MAX_PREMIUM_DURATION_DAYS = 365;
+const ORACLE_KEY_MIN_YEAR         = 2020;
 
 /**
  * PolicyService — reads policy and product data from the Policy Engine contract.
@@ -146,14 +147,19 @@ export class PolicyService {
     startTime?: Date,
     endTime?: Date,
   ): OracleKeyValidationResult {
-    if (
-      product.category === 'crop' &&
-      !/^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:20\d{2}-(0[1-9]|1[0-2])$/.test(oracleKey)
-    ) {
-      return {
-        valid: false,
-        reason: 'oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products',
-      };
+    if (product.category === 'crop') {
+      const cropMatch = oracleKey.match(
+        /^rainfall:-?\d+(\.\d+)?,-?\d+(\.\d+)?:(\d{4})-(0[1-9]|1[0-2])$/,
+      );
+      // Bound the year: an unbounded 20xx match accepts keys for years no
+      // policy can cover. Window is ORACLE_KEY_MIN_YEAR .. current year + 10.
+      const maxYear = new Date().getUTCFullYear() + 10;
+      if (!cropMatch || Number(cropMatch[3]) < ORACLE_KEY_MIN_YEAR || Number(cropMatch[3]) > maxYear) {
+        return {
+          valid: false,
+          reason: `oracleKey format must be rainfall:lat,lng:YYYY-MM for crop products with a year between ${ORACLE_KEY_MIN_YEAR} and ${maxYear}`,
+        };
+      }
     }
     if (
       product.category === 'flight' &&
