@@ -118,7 +118,7 @@ export class OracleWorker {
     let uniqueKeys = activePolicies.map((p) => p.oracleKey);
     if (uniqueKeys.length === 0) {
       this.logger.log('No active policies found. Using Kisumu rainfall coordinates as fallback.');
-      uniqueKeys = [`rainfall:-0.0917,34.7679:${year}-${formattedMonth}`];
+      uniqueKeys = [`rainfall:${process.env.ORACLE_FALLBACK_LAT ?? '-0.0917'},${process.env.ORACLE_FALLBACK_LNG ?? '34.7679'}:${year}-${formattedMonth}`];
     }
 
     await this.processKeysWithConcurrency(uniqueKeys, this.concurrency);
@@ -149,7 +149,6 @@ export class OracleWorker {
           // #739 — track individual key failures without aborting the batch.
           // Each key is independent; one failure must not prevent others from
           // being processed or cause the entire batch to be retried.
-          this.invalidCount += 1;
           this.logger.error(`Failed to process oracle key ${key} (batch continues)`, err);
         }
       }
