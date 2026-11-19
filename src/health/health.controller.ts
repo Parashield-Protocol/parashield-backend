@@ -80,10 +80,13 @@ export class HealthController {
   } | null = null;
   private dbThroughputCache: { timestamp: number; value: { commits: number; rollbacks: number; conflicts: number } } | null = null;
 
-  // #744 — Cache the full health response briefly to prevent connection churn
-  // under health probe load. Load balancers poll every 5-10s; caching for 5s
-  // cuts DB connection creation by ~50% without meaningfully stale status.
+  // #744 / #865 — Cache the full health response to prevent connection churn
+  // and slow cold-cache responses under load balancer probes (15s fresh TTL,
+  // 60s stale-while-revalidate window with single-flight background refresh).
+  private static readonly HEALTH_RESPONSE_CACHE_TTL_MS = 15_000;
+  private static readonly HEALTH_RESPONSE_STALE_TTL_MS = 60_000;
   private healthResponseCache: { timestamp: number; body: HealthResponseDto } | null = null;
+  private healthRefreshInFlight: Promise<HealthResponseDto> | null = null;
 
   constructor(
     private readonly prisma: PrismaService,
@@ -188,12 +191,46 @@ export class HealthController {
   @ApiResponse({ status: 200, description: 'All systems healthy', type: HealthResponseDto })
   @ApiResponse({ status: 503, description: 'Service degraded (one or more dependencies unavailable)', type: HealthResponseDto })
   async check(@Req() req?: Request): Promise<HealthResponseDto> {
-    // #744 — Serve from cache if still fresh (5s TTL). Bypass cache for admin
-    // requests since they need detailed pool/replication data that may have changed.
     const isAdmin = this.isAdminRequest(req);
-    if (!isAdmin && this.healthResponseCache && Date.now() - this.healthResponseCache.timestamp < 5000) {
-      return this.healthResponseCache.body;
+    const acceptHeader = Array.isArray(req?.headers?.['accept'])
+      ? req?.headers?.['accept'][0]
+      : req?.headers?.['accept'];
+    if (!isAdmin && this.healthResponseCache) {
+      const ageMs = Date.now() - this.healthResponseCache.timestamp;
+      if (ageMs < HealthController.HEALTH_RESPONSE_CACHE_TTL_MS) {
+        return this.healthResponseCache.body;
+      }
+      if (ageMs < HealthController.HEALTH_RESPONSE_STALE_TTL_MS) {
+        const staleBody = this.healthResponseCache.body;
+        if (!this.healthRefreshInFlight) {
+          this.healthRefreshInFlight = this.executeHealthCheck(false, acceptHeader)
+            .catch((err) => {
+              this.logger.warn(
+                `Background health refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return staleBody;
+            })
+            .finally(() => {
+              this.healthRefreshInFlight = null;
+            });
+        }
+        return staleBody;
+      }
     }
+
+    if (!isAdmin) {
+      if (!this.healthRefreshInFlight) {
+        this.healthRefreshInFlight = this.executeHealthCheck(false, acceptHeader).finally(() => {
+          this.healthRefreshInFlight = null;
+        });
+      }
+      return this.healthRefreshInFlight;
+    }
+
+    return this.executeHealthCheck(true, acceptHeader);
+  }
+
+  private async executeHealthCheck(isAdmin: boolean, acceptHeader?: string): Promise<HealthResponseDto> {
 
     const startTime = Date.now();
     let dbStatus: 'ok' | 'error' = 'ok';
@@ -742,7 +779,7 @@ export class HealthController {
       checks: (detailed ? checks : this.toPublicChecks(checks)) as any,
     } as HealthResponseDto;
 
-    const statusFormat = this.getStatusFormat(req?.headers?.['accept']);
+    const statusFormat = this.getStatusFormat(acceptHeader);
     const responseBody = this.transformStatusFormat(body, statusFormat);
 
     // #744 — Cache the response for subsequent probes (only non-admin, healthy).

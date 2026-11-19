@@ -3,6 +3,7 @@ import { ClaimsWorker } from './claims.worker';
 import { ClaimsService } from './claims.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { PolicyService } from '../policy/policy.service';
+import { StatusEventsService } from '../common/events/status-events.service';
 
 describe('ClaimsWorker', () => {
   let worker: ClaimsWorker;
@@ -42,6 +43,7 @@ describe('ClaimsWorker', () => {
       mockClaims as unknown as ClaimsService,
       mockPrisma as unknown as PrismaService,
       mockPolicyService as unknown as PolicyService,
+      { emitPolicyStatus: jest.fn() } as unknown as StatusEventsService,
       mockRedis as unknown as Redis,
     );
   });
@@ -191,5 +193,54 @@ describe('ClaimsWorker', () => {
     await expect(worker.processActivePolicies()).resolves.toBeUndefined();
 
     expect(mockClaims.autoProcess).toHaveBeenCalledWith('p1', expect.any(Map));
+  });
+
+  it('applies jitter delay between batches when processing more than BATCH_SIZE policies (#868)', async () => {
+    const delays: number[] = [];
+    const timeoutSpy = jest.spyOn(global, 'setTimeout').mockImplementation(((cb: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      cb();
+      return 0 as unknown as NodeJS.Timeout;
+    }) as typeof setTimeout);
+    const policies = Array.from({ length: 25 }, (_, i) => policy(`p${i}`));
+    mockPrisma.policy.findMany.mockResolvedValue(policies);
+    mockClaims.autoProcess.mockResolvedValue('Paid');
+
+    await worker.processActivePolicies();
+    timeoutSpy.mockRestore();
+
+    const jitterDelays = delays.filter((d) => d >= 1000 && d <= 5000);
+    expect(jitterDelays.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('skips tick when distributed lock is already held by another instance (#868)', async () => {
+    mockRedis.set.mockResolvedValue(null);
+
+    await worker.processActivePolicies();
+
+    expect(mockClaims.recoverStuckProcessingPolicies).not.toHaveBeenCalled();
+    expect(mockPrisma.policy.findMany).not.toHaveBeenCalled();
+    expect(mockClaims.autoProcess).not.toHaveBeenCalled();
+  });
+
+  it('records worker heartbeat on success and skips heartbeat when scan fails (#868)', async () => {
+    mockPrisma.policy.findMany.mockResolvedValue([]);
+    await worker.processActivePolicies();
+
+    const heartbeatCallsSuccess = mockRedis.set.mock.calls.filter(
+      (c) => c[0] === 'health:worker:claims',
+    );
+    expect(heartbeatCallsSuccess.length).toBe(1);
+    expect(typeof heartbeatCallsSuccess[0][1]).toBe('string');
+
+    mockRedis.set.mockClear();
+    mockRedis.set.mockResolvedValue('OK');
+    mockPrisma.policy.findMany.mockRejectedValueOnce(new Error('DB connection lost'));
+    await expect(worker.processActivePolicies()).rejects.toThrow('DB connection lost');
+
+    const heartbeatCallsFail = mockRedis.set.mock.calls.filter(
+      (c) => c[0] === 'health:worker:claims',
+    );
+    expect(heartbeatCallsFail).toHaveLength(0);
   });
 });

@@ -157,8 +157,12 @@ export class OracleWorker {
     await Promise.all(workers);
   }
 
+  private redactKeyCoordinates(key: string): string {
+    return key.replace(/^([a-z]+:)-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?(:|$)/i, '$1[redacted]$2');
+  }
+
   private async processKey(key: string): Promise<void> {
-    this.logger.log(`Processing oracle key: ${key}`);
+    this.logger.debug(`Processing oracle key: ${this.redactKeyCoordinates(key)}`);
     try {
       let reading: OracleReading | null = null;
 
