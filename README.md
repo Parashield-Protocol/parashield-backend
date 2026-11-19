@@ -623,3 +623,28 @@ validation error. Credentials embedded in `REDIS_URL` are never logged.
 
 - [parashield-contracts](https://github.com/Parashield-Protocol/parashield-contracts) — Soroban contracts
 - [parashield-frontend](https://github.com/Parashield-Protocol/parashield-frontend) — Next.js UI
+
+---
+
+## Real-time features
+
+### Server-Sent Events (SSE) for policy status changes
+- **Endpoint**: `GET /policies/:id/events`
+- Streams live policy status updates (`PolicyStatusEvent`) and oracle key changes (`PolicyOracleKeyChangeEvent`) to the policy owner.
+- Backed by `StatusEventsService` with Redis pub/sub (`policy:status:events`, `policy:oracle_key:events`) so events emitted on any API instance reach subscribers connected to any other instance.
+
+### Webhooks
+- **Registration**: Manage webhook subscriptions via the `/webhooks` endpoints (`POST /webhooks`, `GET /webhooks`, `DELETE /webhooks/:id`).
+- **Supported events**:
+  - `policy.status.change`
+  - `claim.status.change`
+  - `policy.oracle_key.change`
+- Deliveries include an `X-Webhook-Signature` HMAC-SHA256 (base64) header, exponential backoff retries (1s -> 2s -> 4s), redirect blocking (`redirect: 'manual'`), 1 MB payload cap, and graceful shutdown draining.
+
+### Derived policy state cache
+- **Endpoint**: `GET /claims/policy/:policyId/state`
+- Returns cached derived policy state (such as `claimsCount` and payout totals), invalidated automatically on claim writes to avoid repeated `COUNT(*)` queries.
+
+### NDJSON streaming for large result sets
+- List/export endpoints support newline-delimited JSON (`application/x-ndjson`) streaming for large policy and claim datasets, bounding memory usage while delivering records incrementally.
+
