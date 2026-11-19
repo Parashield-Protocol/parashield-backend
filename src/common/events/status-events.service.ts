@@ -116,10 +116,12 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
             this.handleRemoteEvent(message);
           } else if (channel === ORACLE_KEY_EVENTS_CHANNEL) {
             this.handleRemoteOracleKeyEvent(message);
+          } else if (channel === 'claim:status:events') {
+            this.handleRemoteClaimEvent(message);
           }
         });
-        await this.subscriber.subscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL);
-        this.logger.log(`Subscribed to Redis pub/sub channels: ${STATUS_EVENTS_CHANNEL}, ${ORACLE_KEY_EVENTS_CHANNEL}`);
+        await this.subscriber.subscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL, 'claim:status:events');
+        this.logger.log(`Subscribed to Redis pub/sub channels: ${STATUS_EVENTS_CHANNEL}, ${ORACLE_KEY_EVENTS_CHANNEL}, claim:status:events`);
       } catch (err) {
         this.logger.warn(
           `Failed to initialize Redis subscriber, falling back to local events: ${(err as Error).message}`,
@@ -132,7 +134,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     if (this.subscriber) {
       try {
         if (typeof this.subscriber.unsubscribe === 'function') {
-          await this.subscriber.unsubscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL);
+          await this.subscriber.unsubscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL, 'claim:status:events');
         }
         if (typeof this.subscriber.disconnect === 'function') {
           this.subscriber.disconnect();
@@ -207,6 +209,20 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Claim status event: ${event.claimId} (${event.fromStatus} → ${event.toStatus}) by ${event.actorId}`);
     this.emitter.emit(`claim:${event.claimId}`, event);
     this.emitter.emit('claim:status', event);
+
+    // #857 — Publish claim status changes to Redis for cross-instance delivery, matching emitPolicyStatusChange
+    if (this.redis && typeof this.redis.publish === 'function') {
+      const payload = JSON.stringify({
+        ...event,
+        origin: this.instanceId,
+      });
+      const publishResult = this.redis.publish('claim:status:events', payload);
+      if (publishResult && typeof publishResult.catch === 'function') {
+        publishResult.catch((err) => {
+          this.logger.error(`Failed to publish claim status event to Redis for claim ${event.claimId}: ${err.message}`);
+        });
+      }
+    }
   }
 
   subscribeToPolicyStatus(
@@ -367,6 +383,39 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
       this.emitter.emit('policy:oracleKey', event);
     } catch (err) {
       this.logger.error(`Failed to parse remote oracle key event: ${(err as Error).message}`);
+    }
+  }
+
+  private handleRemoteClaimEvent(message: string): void {
+    try {
+      const data = JSON.parse(message) as {
+        origin?: string;
+        claimId: string;
+        fromStatus: string;
+        toStatus: string;
+        actorId: string;
+        timestamp: number;
+        reason?: string | null;
+      };
+
+      // Ignore events published by this instance — they were already emitted locally
+      if (data.origin === this.instanceId) {
+        return;
+      }
+
+      const event: ClaimStatusChangeEvent = {
+        claimId: data.claimId,
+        fromStatus: data.fromStatus,
+        toStatus: data.toStatus,
+        actorId: data.actorId,
+        timestamp: data.timestamp,
+        reason: data.reason,
+      };
+
+      this.emitter.emit(`claim:${event.claimId}`, event);
+      this.emitter.emit('claim:status', event);
+    } catch (err) {
+      this.logger.error(`Failed to parse remote claim status event: ${(err as Error).message}`);
     }
   }
 }

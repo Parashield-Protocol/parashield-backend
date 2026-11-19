@@ -97,6 +97,15 @@ other instances clear their in-memory cache.
 | `GET` | `/api/v1/oracle/rainfall` | Legacy: fetch rainfall via query params |
 | `GET` | `/api/v1/oracle/flight` | Fetch flight delay from AviationStack |
 
+### Amount Precision
+
+#465 — Monetary amounts sent to the API must conform to Stellar asset precision constraints:
+
+- **USDC precision**: 7 decimal places maximum (e.g., `123.4567890` is invalid; `123.456789` is valid)
+- **XLM precision**: 7 decimal places maximum
+
+Fields checked include `amount`, `premium`, `coverageAmount`, `payoutAmount`, `minPayout`, and `maxPayout`. The middleware validates amounts recursively in nested objects and arrays. Requests exceeding the 7-decimal limit are rejected with a `400 Bad Request` error.
+
 ### Auth & Health
 
 | Method | Route | Description |
