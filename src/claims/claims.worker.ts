@@ -64,7 +64,9 @@ export class ClaimsWorker {
   private async loadActiveProductsMap(): Promise<Map<string, ProductSummary>> {
     const productsMap = new Map<string, ProductSummary>();
     for (let page = 1; ; page++) {
-      const { data, total } = await this.policyService.getActiveProducts(page, PRODUCTS_PAGE_SIZE);
+      const { data, total } = await this.policyService.getActiveProducts(page, PRODUCTS_PAGE_SIZE, {
+        skipCache: true,
+      });
       for (const product of data) productsMap.set(product.id, product);
       if (data.length < PRODUCTS_PAGE_SIZE || productsMap.size >= total) break;
     }

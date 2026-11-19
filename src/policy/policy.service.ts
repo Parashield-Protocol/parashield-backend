@@ -636,6 +636,7 @@ export class PolicyService {
   async getActiveProducts(
     page: number = 1,
     limit: number = 20,
+    options?: { skipCache?: boolean },
   ): Promise<{ data: ProductSummary[]; total: number; page: number; limit: number }> {
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;
@@ -644,11 +645,13 @@ export class PolicyService {
     // page, default limit). Non-default pages always hit the DB because
     // caching every possible pagination combination is not worthwhile.
     const cacheKey = `${page}:${take}`;
-    const now = Date.now();
-    const cached = productCache.get(cacheKey);
-    if (cached && cached.expiresAt > now) {
-      this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
-      return { data: cached.data, total: cached.total, page, limit: take };
+    if (!options?.skipCache) {
+      const now = Date.now();
+      const cached = productCache.get(cacheKey);
+      if (cached && cached.expiresAt > now) {
+        this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
+        return { data: cached.data, total: cached.total, page, limit: take };
+      }
     }
 
     this.logger.log(`get_active_products: page=${page} limit=${limit}`);

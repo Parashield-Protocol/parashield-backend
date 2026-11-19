@@ -256,10 +256,20 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
           })
           .catch((err) => {
             isAuthorized = false;
-            pendingEvents.length = 0;
             this.logger.error(
               `Error verifying subscriber identity for policy ${policyId}: ${(err as Error).message}`,
             );
+            if (!unsubscribed && pendingEvents.length > 0) {
+              this.logger.warn(
+                `Flushing ${pendingEvents.length} buffered event(s) for policy ${policyId} after verification error`,
+              );
+              while (pendingEvents.length > 0) {
+                const ev = pendingEvents.shift()!;
+                listener(ev);
+              }
+            } else {
+              pendingEvents.length = 0;
+            }
           });
       } else {
         // Without Prisma or known owner, assume authorized if wallet was provided

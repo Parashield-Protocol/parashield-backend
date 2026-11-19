@@ -296,6 +296,13 @@ export class OracleWorker {
       }
       return reading;
     } catch (err) {
+      if (err instanceof Error && /circuit (?:is )?open/i.test(err.message)) {
+        this.logger.warn(
+          `Primary fetch failed with circuit breaker open — skipping retry: ${err.message}`,
+        );
+        return null;
+      }
+
       this.logger.warn(`Primary fetch failed — retrying once in ${this.retryDelayMs / 1000}s`, err);
       await this.sleep(this.retryDelayMs);
 
