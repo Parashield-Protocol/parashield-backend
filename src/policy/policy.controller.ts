@@ -57,6 +57,16 @@ export const SSE_HEARTBEAT_INTERVAL_MS = 15_000;
 // OS-level TCP keepalive probes back up the heartbeat for idle sockets.
 const SSE_TCP_KEEPALIVE_MS = 30_000;
 
+/**
+ * Quote a CSV cell when needed (#853). Values containing a comma, double quote
+ * or line break are wrapped in double quotes, with internal quotes doubled.
+ */
+function csvCell(value: unknown): string {
+  if (value === null || value === undefined) return '';
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
 @ApiTags('policy')
 @Controller()
 @UseInterceptors(CacheControlInterceptor)
@@ -665,7 +675,9 @@ export class PolicyController {
 
       for (const policy of batch) {
         res.write(
-          `${policy.id},${policy.status},${policy.premium},${policy.coverage},${policy.createdAt}\n`,
+          [policy.id, policy.status, policy.premium, policy.coverage, policy.createdAt]
+            .map(csvCell)
+            .join(',') + '\n',
         );
       }
 

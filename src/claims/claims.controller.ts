@@ -118,19 +118,9 @@ export class ClaimsController {
     @Query('wallet') wallet: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
-    @Query('cursor') cursorOrReq?: string | AuthenticatedRequest,
-    @Req() maybeReq?: AuthenticatedRequest,
+    @Query('cursor') cursor: string | undefined,
+    @Req() req: AuthenticatedRequest,
   ) {
-    let cursor: string | undefined;
-    let req: AuthenticatedRequest;
-
-    if (cursorOrReq && typeof cursorOrReq === 'object') {
-      req = cursorOrReq as AuthenticatedRequest;
-      cursor = undefined;
-    } else {
-      cursor = typeof cursorOrReq === 'string' ? cursorOrReq : undefined;
-      req = maybeReq!;
-    }
 
     const authedWallet = req?.user?.walletAddress || req?.wallet;
     if (!authedWallet) {
@@ -231,19 +221,9 @@ export class ClaimsController {
     @Param('wallet') wallet: string,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
-    @Query('cursor') cursorOrReq?: string | AuthenticatedRequest,
-    @Req() maybeReq?: AuthenticatedRequest,
+    @Query('cursor') cursor: string | undefined,
+    @Req() req: AuthenticatedRequest,
   ) {
-    let cursor: string | undefined;
-    let req: AuthenticatedRequest;
-
-    if (cursorOrReq && typeof cursorOrReq === 'object') {
-      req = cursorOrReq as AuthenticatedRequest;
-      cursor = undefined;
-    } else {
-      cursor = typeof cursorOrReq === 'string' ? cursorOrReq : undefined;
-      req = maybeReq!;
-    }
 
     const authedWallet = req?.user?.walletAddress || req?.wallet;
     if (!authedWallet) {
