@@ -380,6 +380,62 @@ When class-validator rejects a request body the `error` field is an array of Nes
 
 Check each entry in `error.message` for the field name and violated constraint.
 
+### Idempotency
+
+The API supports idempotent request semantics via the `Idempotency-Key` header for safe replay during transient failures. This is especially useful for critical operations like policy purchases and claim submissions.
+
+**How it works:**
+
+- Send any `POST`, `PUT`, or `PATCH` request with a unique `Idempotency-Key` header value (e.g. a UUID).
+- If the same key is sent within 24 hours, the cached response from the first request is returned immediately (same status, body, and headers).
+- The `X-Idempotent-Replayed: true` header marks a replayed response so clients can log or audit the replay.
+
+**Example:**
+
+```bash
+# First request — executes normally
+curl -X POST https://api.example.com/api/v1/claims/submit \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "Content-Type: application/json" \
+  -d '{"policyId": "abc123", "reason": "..."}' \
+  -H "Authorization: Bearer <token>"
+
+# Response
+{
+  "success": true,
+  "data": { "claimId": "claim-123", "status": "PENDING" }
+}
+
+# Same request within 24h with the same key — returns cached response instantly
+curl -X POST https://api.example.com/api/v1/claims/submit \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "Content-Type: application/json" \
+  -d '{"policyId": "abc123", "reason": "..."}' \
+  -H "Authorization: Bearer <token>"
+
+# Response (identical to first, marked as replayed)
+# HTTP/1.1 200 OK
+# X-Idempotent-Replayed: true
+{
+  "success": true,
+  "data": { "claimId": "claim-123", "status": "PENDING" }
+}
+```
+
+**Cache duration & key format:**
+
+- Keys are cached for 24 hours and are namespace-isolated per user/wallet. The same key used by different wallets creates separate cache entries.
+- Key values must be ASCII strings (UUIDs recommended, but any string works).
+- Requests without an `Idempotency-Key` header execute normally each time and are not cached.
+
+**When to use:**
+
+- Wrapping critical writes (policy purchases, claim submissions) so transient network failures don't create duplicates.
+- Not needed for read operations or idempotent `GET` requests.
+- Retry the full request (including the same key) after network timeouts or 5xx errors.
+
+---
+
 ### Rate limiting (429)
 
 The global throttle allows **60 requests per minute per IP**. When exceeded the response includes a `Retry-After` header with the number of seconds until the window resets. Clients should respect this header rather than retrying immediately.
