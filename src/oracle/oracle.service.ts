@@ -188,6 +188,9 @@ export function rateLimitRetryDelayMs(retryAfter: unknown, attempt: number): num
     : Math.pow(2, attempt) * 1000;
 }
 
+/** Clock skew tolerated for reading timestamps before a reading counts as future-dated (#703). */
+const FUTURE_SKEW_TOLERANCE_SECONDS = 60;
+
 @Injectable()
 export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
   private readonly logger = new Logger(OracleService.name);
@@ -300,6 +303,34 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
   }
 
   /**
+   * Shared validation for persistReading and persistReadings (#821).
+   * Returns the first rule the reading breaks, with the log line to emit.
+   */
+  private validateReading(
+    reading: OracleReading,
+    nowSeconds: number,
+  ): { ok: true } | { ok: false; reason: "mock" | "invalid_confidence" | "future"; log: string } {
+    if (reading.confidence === 0 || reading.status === "NO_DATA" || reading.source === "mock") {
+      return { ok: false, reason: "mock", log: `Skipping persistence of mock/confidence-0 reading for key: ${reading.key}` };
+    }
+    if (!Number.isFinite(reading.confidence) || reading.confidence < 0 || reading.confidence > 100) {
+      return {
+        ok: false,
+        reason: "invalid_confidence",
+        log: `Rejecting reading with invalid confidence ${reading.confidence} for key: ${reading.key}`,
+      };
+    }
+    if (reading.timestamp > nowSeconds + FUTURE_SKEW_TOLERANCE_SECONDS) {
+      return {
+        ok: false,
+        reason: "future",
+        log: `Rejecting future-dated reading for key=${reading.key}: timestamp=${reading.timestamp} now=${nowSeconds}`,
+      };
+    }
+    return { ok: true };
+  }
+
+  /**
    * Persist multiple OracleReadings in batches (#686).
    * Groups rows into chunks of batchSize and persists them in multi-query transactions.
    */
@@ -308,31 +339,16 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
 
     const validReadings: OracleReading[] = [];
     const nowSeconds = Math.floor(Date.now() / 1000);
-    const FUTURE_SKEW_TOLERANCE_SECONDS = 60;
 
     for (const reading of readings) {
-      if (
-        reading.confidence === 0 ||
-        reading.status === "NO_DATA" ||
-        reading.source === "mock"
-      ) {
-        this.logger.warn(
-          `Skipping persistence of mock/confidence-0 reading for key: ${reading.key}`,
-        );
-        continue;
-      }
-      if (!Number.isFinite(reading.confidence) || reading.confidence < 0 || reading.confidence > 100) {
-        this.logger.error(
-          `Rejecting reading with invalid confidence ${reading.confidence} for key: ${reading.key}`,
-        );
-        continue;
-      }
-      if (reading.timestamp > nowSeconds + FUTURE_SKEW_TOLERANCE_SECONDS) {
-        this.logger.error(
-          `Rejecting future-dated reading for key=${reading.key}: timestamp=${reading.timestamp} now=${nowSeconds}`,
-        );
-        // Skip it like the other rejected readings (#804): throwing here
-        // discarded every valid reading already collected in this batch.
+      const check = this.validateReading(reading, nowSeconds);
+      if (!check.ok) {
+        // Batches skip rejected readings rather than failing the whole batch (#804).
+        if (check.reason === "mock") {
+          this.logger.warn(check.log);
+        } else {
+          this.logger.error(check.log);
+        }
         continue;
       }
       validReadings.push(reading);
@@ -378,33 +394,21 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
    * Persist an OracleReading to the database (buffered when batchSize > 1) (#686).
    */
   async persistReading(reading: OracleReading): Promise<void> {
-    if (
-      reading.confidence === 0 ||
-      reading.status === "NO_DATA" ||
-      reading.source === "mock"
-    ) {
-      this.logger.warn(
-        `Skipping persistence of mock/confidence-0 reading for key: ${reading.key}`,
-      );
-      return;
-    }
-    if (!Number.isFinite(reading.confidence) || reading.confidence < 0 || reading.confidence > 100) {
-      this.logger.error(
-        `Rejecting reading with invalid confidence ${reading.confidence} for key: ${reading.key}`,
-      );
-      return;
-    }
-    // #703 — reject future-dated readings to prevent corrupting claim triggers.
-    // Allow 60s of clock skew tolerance.
-    const FUTURE_SKEW_TOLERANCE_SECONDS = 60;
     const nowSeconds = Math.floor(Date.now() / 1000);
-    if (reading.timestamp > nowSeconds + FUTURE_SKEW_TOLERANCE_SECONDS) {
-      this.logger.error(
-        `Rejecting future-dated reading for key=${reading.key}: timestamp=${reading.timestamp} now=${nowSeconds}`,
-      );
-      throw new BadRequestException(
-        `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,
-      );
+    const check = this.validateReading(reading, nowSeconds);
+    if (!check.ok) {
+      if (check.reason === "mock") {
+        this.logger.warn(check.log);
+      } else {
+        this.logger.error(check.log);
+      }
+      if (check.reason === "future") {
+        // #703 — a future-dated reading would corrupt claim triggers, so the caller hears about it.
+        throw new BadRequestException(
+          `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,
+        );
+      }
+      return;
     }
 
     // Direct insert when batchSize is 1 (matches legacy 1:1 behavior)
