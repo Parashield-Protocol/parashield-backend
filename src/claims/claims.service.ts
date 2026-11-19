@@ -56,6 +56,8 @@ export interface StuckPolicyRecoverySummary {
 // the claim flow as dead. autoProcess holds the gate for seconds (oracle read
 // + one Soroban call), so this is far outside any legitimate in-flight window.
 const DEFAULT_STUCK_PROCESSING_MINUTES = 30;
+/** Stuck policies recovered concurrently per chunk (#822). */
+const STUCK_RECOVERY_CONCURRENCY = 5;
 
 // #589 — per-wallet claim totals are cached briefly so paginated history
 // requests don't run a COUNT on every page. Entries are dropped whenever a
@@ -609,98 +611,107 @@ export class ClaimsService {
 
     this.logger.warn(`Found ${stuck.length} policies stuck in PROCESSING for more than ${stuckMinutes} minutes — recovering`);
 
-    for (const policy of stuck) {
-      const guard = { id: policy.id, status: PolicyStatus.PROCESSING, updatedAt: { lt: cutoff } };
-      const paidClaim = policy.claims.find((c) => c.status === ClaimStatus.PAID);
-      const inFlightClaims = policy.claims.filter((c) => c.status === ClaimStatus.PROCESSING);
-      const unconfirmedOnChain = inFlightClaims.find((c) => c.txHash);
+    // Recover in parallel chunks rather than one policy at a time (#822). A
+    // sequential loop costs a round trip per policy, so a large backlog can
+    // take long enough for more policies to get stuck. Each policy has its own
+    // guarded update, so the policies in a chunk do not interfere.
+    const recoverOne = async (policy: (typeof stuck)[number]): Promise<void> => {
+        const guard = { id: policy.id, status: PolicyStatus.PROCESSING, updatedAt: { lt: cutoff } };
+        const paidClaim = policy.claims.find((c) => c.status === ClaimStatus.PAID);
+        const inFlightClaims = policy.claims.filter((c) => c.status === ClaimStatus.PROCESSING);
+        const unconfirmedOnChain = inFlightClaims.find((c) => c.txHash);
 
-      try {
-        if (paidClaim) {
-          const { count } = await this.prisma.policy.updateMany({
-            where: guard,
-            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.CLAIMED) as PolicyStatus, version: { increment: 1 } },
+        try {
+          if (paidClaim) {
+            const { count } = await this.prisma.policy.updateMany({
+              where: guard,
+              data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.CLAIMED) as PolicyStatus, version: { increment: 1 } },
+            });
+            if (count === 0) { summary.skipped++; return; }
+            await this.auditOp('Policy', policy.id, PolicyStatus.PROCESSING, PolicyStatus.CLAIMED, `Recovered stuck PROCESSING: claim ${paidClaim.id} already PAID`)
+              .catch((err) => this.logger.error(`Failed to write audit log for policy ${policy.id} recovery`, err));
+            this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.CLAIMED);
+            await this.policyStateCache?.invalidate(policy.id);
+            summary.markedClaimed++;
+            this.logger.warn(`Recovered stuck policy ${policy.id} → CLAIMED (claim ${paidClaim.id} already PAID)`);
+            return;
+          }
+
+          if (unconfirmedOnChain) {
+            // Left in PROCESSING on purpose (and re-reported every sweep): the
+            // PolicyStatus enum has no ERROR state to park it in, and reverting
+            // to ACTIVE would let the next scan re-invoke the contract.
+            summary.needsManualReview++;
+            this.logger.error(
+              `Stuck policy ${policy.id} has claim ${unconfirmedOnChain.id} with unconfirmed txHash=${unconfirmedOnChain.txHash} — not retrying, manual review required`,
+            );
+            return;
+          }
+
+          const reverted = await financialTransaction(this.prisma, `recoverStuckProcessing(${policy.id})`, async (tx) => {
+            const { count } = await tx.policy.updateMany({
+              where: guard,
+              data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.ACTIVE) as PolicyStatus, version: { increment: 1 } },
+            });
+            if (count === 0) return false;
+            if (inFlightClaims.length > 0) {
+              await tx.claim.updateMany({
+                where: { id: { in: inFlightClaims.map((c) => c.id) }, status: ClaimStatus.PROCESSING },
+                data:  { status: ClaimStatus.FAILED, processedAt: now },
+              });
+            }
+            await tx.auditLog.createMany({
+              data: [
+                ...inFlightClaims.map((c) => ({
+                  entityType: 'Claim', entityId: c.id,
+                  fromStatus: ClaimStatus.PROCESSING, toStatus: ClaimStatus.FAILED,
+                  reason: 'Recovered stuck PROCESSING: claim flow did not complete',
+                })),
+                {
+                  entityType: 'Policy', entityId: policy.id,
+                  fromStatus: PolicyStatus.PROCESSING, toStatus: PolicyStatus.ACTIVE,
+                  reason: `Recovered stuck PROCESSING after ${stuckMinutes} minutes`,
+                },
+              ],
+            });
+            return true;
           });
-          if (count === 0) { summary.skipped++; continue; }
-          await this.auditOp('Policy', policy.id, PolicyStatus.PROCESSING, PolicyStatus.CLAIMED, `Recovered stuck PROCESSING: claim ${paidClaim.id} already PAID`)
-            .catch((err) => this.logger.error(`Failed to write audit log for policy ${policy.id} recovery`, err));
-          this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.CLAIMED);
+          if (!reverted) { summary.skipped++; return; }
+
+          this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.ACTIVE);
           await this.policyStateCache?.invalidate(policy.id);
-          summary.markedClaimed++;
-          this.logger.warn(`Recovered stuck policy ${policy.id} → CLAIMED (claim ${paidClaim.id} already PAID)`);
-          continue;
-        }
-
-        if (unconfirmedOnChain) {
-          // Left in PROCESSING on purpose (and re-reported every sweep): the
-          // PolicyStatus enum has no ERROR state to park it in, and reverting
-          // to ACTIVE would let the next scan re-invoke the contract.
-          summary.needsManualReview++;
-          this.logger.error(
-            `Stuck policy ${policy.id} has claim ${unconfirmedOnChain.id} with unconfirmed txHash=${unconfirmedOnChain.txHash} — not retrying, manual review required`,
-          );
-          continue;
-        }
-
-        const reverted = await financialTransaction(this.prisma, `recoverStuckProcessing(${policy.id})`, async (tx) => {
-          const { count } = await tx.policy.updateMany({
-            where: guard,
-            data:  { status: transition(PolicyStatus.PROCESSING, PolicyStatus.ACTIVE) as PolicyStatus, version: { increment: 1 } },
-          });
-          if (count === 0) return false;
-          if (inFlightClaims.length > 0) {
-            await tx.claim.updateMany({
-              where: { id: { in: inFlightClaims.map((c) => c.id) }, status: ClaimStatus.PROCESSING },
-              data:  { status: ClaimStatus.FAILED, processedAt: now },
+          for (const c of inFlightClaims) {
+            const reason = `Recovered stuck PROCESSING after ${stuckMinutes} minutes`;
+            this.webhooks.notifyClaimStatusChange({
+              claimId: c.id,
+              fromStatus: ClaimStatus.PROCESSING,
+              toStatus: ClaimStatus.FAILED,
+              timestamp: Date.now(),
+              actorId: 'system',
+              reason,
+            });
+            this.statusEvents?.emitClaimStatusChange?.({
+              claimId: c.id,
+              fromStatus: ClaimStatus.PROCESSING,
+              toStatus: ClaimStatus.FAILED,
+              actorId: 'system',
+              timestamp: Date.now(),
+              reason,
             });
           }
-          await tx.auditLog.createMany({
-            data: [
-              ...inFlightClaims.map((c) => ({
-                entityType: 'Claim', entityId: c.id,
-                fromStatus: ClaimStatus.PROCESSING, toStatus: ClaimStatus.FAILED,
-                reason: 'Recovered stuck PROCESSING: claim flow did not complete',
-              })),
-              {
-                entityType: 'Policy', entityId: policy.id,
-                fromStatus: PolicyStatus.PROCESSING, toStatus: PolicyStatus.ACTIVE,
-                reason: `Recovered stuck PROCESSING after ${stuckMinutes} minutes`,
-              },
-            ],
-          });
-          return true;
-        });
-        if (!reverted) { summary.skipped++; continue; }
-
-        this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.ACTIVE);
-        await this.policyStateCache?.invalidate(policy.id);
-        for (const c of inFlightClaims) {
-          const reason = `Recovered stuck PROCESSING after ${stuckMinutes} minutes`;
-          this.webhooks.notifyClaimStatusChange({
-            claimId: c.id,
-            fromStatus: ClaimStatus.PROCESSING,
-            toStatus: ClaimStatus.FAILED,
-            timestamp: Date.now(),
-            actorId: 'system',
-            reason,
-          });
-          this.statusEvents?.emitClaimStatusChange?.({
-            claimId: c.id,
-            fromStatus: ClaimStatus.PROCESSING,
-            toStatus: ClaimStatus.FAILED,
-            actorId: 'system',
-            timestamp: Date.now(),
-            reason,
-          });
+          summary.revertedToActive++;
+          this.logger.warn(`Recovered stuck policy ${policy.id} → ACTIVE (${inFlightClaims.length} in-flight claims marked FAILED)`);
+        } catch (err) {
+          // One bad row must not block recovery of the rest; it stays
+          // PROCESSING and is retried on the next sweep.
+          summary.skipped++;
+          this.logger.error(`Failed to recover stuck policy ${policy.id}`, err);
         }
-        summary.revertedToActive++;
-        this.logger.warn(`Recovered stuck policy ${policy.id} → ACTIVE (${inFlightClaims.length} in-flight claims marked FAILED)`);
-      } catch (err) {
-        // One bad row must not block recovery of the rest; it stays
-        // PROCESSING and is retried on the next sweep.
-        summary.skipped++;
-        this.logger.error(`Failed to recover stuck policy ${policy.id}`, err);
-      }
+    };
+
+    for (let i = 0; i < stuck.length; i += STUCK_RECOVERY_CONCURRENCY) {
+      const chunk = stuck.slice(i, i + STUCK_RECOVERY_CONCURRENCY);
+      await Promise.allSettled(chunk.map((policy) => recoverOne(policy)));
     }
 
     return summary;
