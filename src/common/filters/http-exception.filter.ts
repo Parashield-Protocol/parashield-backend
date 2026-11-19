@@ -134,20 +134,6 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       if (fromCause) return fromCause;
     }
 
-    // Check if an HttpException message or response contains a leaked Prisma code or signature
-    if (exception instanceof HttpException) {
-      const raw = exception.getResponse();
-      const rawStr = typeof raw === 'string' ? raw : JSON.stringify(raw);
-      const match = rawStr.match(/\b(P2\d{3})\b/);
-      if (match) {
-        return {
-          className: 'PrismaClientKnownRequestError',
-          code: match[1],
-          stack: exception.stack,
-        };
-      }
-    }
-
     return null;
   }
 
