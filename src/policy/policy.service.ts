@@ -974,7 +974,10 @@ export class PolicyService {
    * ClaimsService.
    */
   async cancelPolicy(policyId: string): Promise<CancellationResult> {
-    const existing = await this.prisma.policy.findUnique({ where: { id: policyId } });
+    const existing = await this.prisma.policy.findUnique({
+      where: { id: policyId },
+      include: { _count: { select: { claims: true } } },
+    });
     if (!existing) {
       throw new NotFoundException(`Policy ${policyId} not found`);
     }
@@ -1020,25 +1023,21 @@ export class PolicyService {
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${policyId} cancellation`, err));
 
-    const updated = await this.prisma.policy.findUnique({
-      where: { id: policyId },
-      include: {
-        _count: {
-          select: { claims: true },
-        },
-      },
-    });
+    // #823 — build the response from the row we just cancelled, not a second
+    // read. A concurrent change between the update and a re-read would make the
+    // response show that change instead of this cancellation.
+    const updated = { ...existing, status: PolicyStatus.CANCELLED };
     return {
-      id:              updated!.id,
-      productId:       updated!.productId,
-      policyholder:    updated!.policyholder,
-      coverage:        updated!.coverageXlm.toString(),
-      premiumPaid:     updated!.premiumPaid.toString(),
-      oracleKey:       updated!.oracleKey,
-      startTime:       Math.floor(updated!.startTime.getTime() / 1000),
-      endTime:         Math.floor(updated!.endTime.getTime() / 1000),
-      status:          updated!.status,
-      claimsCount:     (updated as any)._count?.claims ?? 0,
+      id:              updated.id,
+      productId:       updated.productId,
+      policyholder:    updated.policyholder,
+      coverage:        updated.coverageXlm.toString(),
+      premiumPaid:     updated.premiumPaid.toString(),
+      oracleKey:       updated.oracleKey,
+      startTime:       Math.floor(updated.startTime.getTime() / 1000),
+      endTime:         Math.floor(updated.endTime.getTime() / 1000),
+      status:          updated.status,
+      claimsCount:     updated._count?.claims ?? 0,
       refundAmountXlm,
     };
   }
