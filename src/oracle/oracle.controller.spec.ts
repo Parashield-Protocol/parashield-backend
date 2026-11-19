@@ -61,6 +61,11 @@ describe("OracleController — Access Control & Rate Limiting", () => {
       );
     });
 
+    it("#859 — GET /oracle/readings/by-key returns 400 on malformed percent-encoding", async () => {
+      await expect(controller.getReadingByKey("rainfall%ZZ")).rejects.toThrow(BadRequestException);
+      expect(mockOracleService.getLatestReading).not.toHaveBeenCalled();
+    });
+
     it("GET /oracle/readings should default to 100 items", async () => {
       mockOracleService.getAllReadings.mockResolvedValue([mockReading]);
 
