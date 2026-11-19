@@ -952,7 +952,7 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
     const res = await this.aviationStackBreaker.execute(() =>
       this.executeWithRateLimitBackoff(() =>
         axios.get<{
-          data?: Array<{ departure?: { delay?: number | null } | null } | null>;
+          data?: Array<{ departure?: { delay?: number | null; actual?: string | null } | null } | null>;
         }>(url, {
           timeout: 10_000,
           headers: {
@@ -1013,7 +1013,9 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
       dataType: "flight",
       key,
       value: BigInt(Math.round(delay * 1e7)).toString(),
-      confidence: 95,
+      // A measured departure time (`actual`) is authoritative; a delay with
+      // no actual time is derived from schedule/estimate, so it is less certain.
+      confidence: flight?.departure?.actual ? 95 : 60,
       timestamp: Math.floor(Date.now() / 1000),
       source: "aviationstack",
       status: "OK",

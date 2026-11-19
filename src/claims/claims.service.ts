@@ -631,6 +631,12 @@ export class ClaimsService {
             await this.auditOp('Policy', policy.id, PolicyStatus.PROCESSING, PolicyStatus.CLAIMED, `Recovered stuck PROCESSING: claim ${paidClaim.id} already PAID`)
               .catch((err) => this.logger.error(`Failed to write audit log for policy ${policy.id} recovery`, err));
             this.statusEvents.emitPolicyStatusChange(policy.id, PolicyStatus.CLAIMED);
+            this.webhooks.notifyPolicyStatusChange({
+              policyId: policy.id,
+              fromStatus: PolicyStatus.PROCESSING,
+              toStatus: PolicyStatus.CLAIMED,
+              timestamp: Date.now(),
+            });
             await this.policyStateCache?.invalidate(policy.id);
             summary.markedClaimed++;
             this.logger.warn(`Recovered stuck policy ${policy.id} → CLAIMED (claim ${paidClaim.id} already PAID)`);
