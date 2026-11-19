@@ -13,6 +13,8 @@ import { DistributedLockService } from '../redis/distributed-lock.service';
 
 const BATCH_SIZE = 10;
 const PRODUCTS_PAGE_SIZE = 100;
+// #855 — expiring policies are read in pages of this size, not all at once.
+const EXPIRING_PAGE_SIZE = 500;
 
 // Returns a promise that resolves after `ms` milliseconds.
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -90,7 +92,6 @@ export class ClaimsWorker {
     const tickStart = Date.now();
     this.logger.log('Claims worker tick — scanning for expiring policies');
 
-
     // #486 — release policies stranded in PROCESSING before scanning, so any
     // reverted to ACTIVE are retried (or expired) by this same tick. Failure
     // here must not block the regular scan.
@@ -109,30 +110,78 @@ export class ClaimsWorker {
     const now        = new Date();
     const oneHourOut = new Date(now.getTime() + 60 * 60 * 1000);
 
-    const expiringPolicies = await this.prisma.policy.findMany({
-      where: {
-        status:  'ACTIVE',
-        endTime: { lte: oneHourOut },
-      },
-      select: { id: true, policyholder: true, endTime: true, status: true },
-    });
+    // #855 — read expiring policies in keyset pages ordered by id, instead of
+    // loading every expiring policy at once. Resuming after the last id means a
+    // policy that stays ACTIVE (see #854) is never read twice in one tick.
+    let productsMap: Map<string, ProductSummary> | null = null;
+    let lastId: string | undefined;
+    let totalPolicies  = 0;
+    let totalSucceeded = 0;
+    let totalFailed    = 0;
+    let totalRpcErrors = 0;
 
-    if (expiringPolicies.length === 0) {
+    for (;;) {
+      const expiringPage = await this.prisma.policy.findMany({
+        where: {
+          status:  'ACTIVE',
+          endTime: { lte: oneHourOut },
+          ...(lastId ? { id: { gt: lastId } } : {}),
+        },
+        select: { id: true, policyholder: true, endTime: true, status: true },
+        orderBy: { id: 'asc' },
+        take: EXPIRING_PAGE_SIZE,
+      });
+
+      if (expiringPage.length === 0) break;
+
+      totalPolicies += expiringPage.length;
+
+      // #266 — Fetch active products once per tick to avoid repeating N+1 Product queries inside batch loop
+      if (!productsMap) {
+        productsMap = await this.loadActiveProductsMap();
+      }
+
+      this.logger.log(
+        `Found ${expiringPage.length} expiring policies — processing in batches of ${BATCH_SIZE}`,
+      );
+
+      const pageTotals = await this.processExpiringPage(expiringPage, productsMap);
+      totalSucceeded += pageTotals.succeeded;
+      totalFailed    += pageTotals.failed;
+      totalRpcErrors += pageTotals.rpcErrors;
+
+      lastId = expiringPage[expiringPage.length - 1].id;
+      if (expiringPage.length < EXPIRING_PAGE_SIZE) break;
+
+      // Jitter before the next page, same as between batches.
+      await sleep(jitterMs(1_000, 5_000));
+    }
+
+    if (totalPolicies === 0) {
       this.logger.log('No expiring policies found');
       await this.recordHeartbeat();
       return;
     }
 
-    // #266 — Fetch active products once per tick to avoid repeating N+1 Product queries inside batch loop
-    const productsMap = await this.loadActiveProductsMap();
-
+    const elapsedMs = Date.now() - tickStart;
     this.logger.log(
-      `Found ${expiringPolicies.length} expiring policies — processing in batches of ${BATCH_SIZE}`,
+      `Claims worker tick complete — policies: ${totalPolicies}, ` +
+      `succeeded: ${totalSucceeded}, failed: ${totalFailed}, ` +
+      `rpcErrors: ${totalRpcErrors}, elapsedMs: ${elapsedMs}`,
     );
+    await this.recordHeartbeat();
+  }
 
-    let totalSucceeded = 0;
-    let totalFailed    = 0;
-    let totalRpcErrors = 0;
+  /**
+   * Auto-process one page of expiring policies in batches of BATCH_SIZE.
+   */
+  private async processExpiringPage(
+    expiringPolicies: Array<{ id: string; policyholder: string; endTime: Date; status: PolicyStatus }>,
+    productsMap: Map<string, ProductSummary>,
+  ): Promise<{ succeeded: number; failed: number; rpcErrors: number }> {
+    let succeeded = 0;
+    let failed    = 0;
+    let rpcErrors = 0;
 
     for (let i = 0; i < expiringPolicies.length; i += BATCH_SIZE) {
       const batch      = expiringPolicies.slice(i, i + BATCH_SIZE);
@@ -157,11 +206,16 @@ export class ClaimsWorker {
                 err.message.includes('soroban') ||
                 err.message.includes('network') ||
                 err.message.includes('timeout'));
-            if (isRpcError) totalRpcErrors++;
+            if (isRpcError) rpcErrors++;
             throw err;
           }
 
-          if (result !== 'Paid' && result !== 'PendingFinalPeriod') {
+          // #854 — AlreadyProcessed and PolicyNotActive mean a claim already exists or the
+          // policy is not in a state to be auto-processed. An ACTIVE policy in that state
+          // may have an in-flight claim, so it must not be expired here.
+          const keepStatus = result === 'AlreadyProcessed' || result === 'PolicyNotActive';
+
+          if (result !== 'Paid' && result !== 'PendingFinalPeriod' && !keepStatus) {
             // #260/#367 — guard on the expected status (captured at query time,
             // above) so a concurrent status-writing path (a cancel endpoint,
             // admin override, overlapping cron ticks, or ClaimsService's own
@@ -187,8 +241,8 @@ export class ClaimsWorker {
 
       const batchSucceeded = batchResults.filter((r) => r.status === 'fulfilled').length;
       const batchFailed    = batchResults.filter((r) => r.status === 'rejected').length;
-      totalSucceeded += batchSucceeded;
-      totalFailed    += batchFailed;
+      succeeded += batchSucceeded;
+      failed    += batchFailed;
 
       this.logger.log(
         `Batch ${batchIndex}/${totalBatches} complete — succeeded: ${batchSucceeded}, failed: ${batchFailed}`,
@@ -202,12 +256,6 @@ export class ClaimsWorker {
       }
     }
 
-    const elapsedMs = Date.now() - tickStart;
-    this.logger.log(
-      `Claims worker tick complete — policies: ${expiringPolicies.length}, ` +
-      `succeeded: ${totalSucceeded}, failed: ${totalFailed}, ` +
-      `rpcErrors: ${totalRpcErrors}, elapsedMs: ${elapsedMs}`,
-    );
-    await this.recordHeartbeat();
+    return { succeeded, failed, rpcErrors };
   }
 }
