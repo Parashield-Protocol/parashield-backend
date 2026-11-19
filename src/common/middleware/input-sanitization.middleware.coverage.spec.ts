@@ -37,8 +37,7 @@ describe('InputSanitizationMiddleware coverage (#907)', () => {
     expect(req.body).toBe(buf);
   });
 
-  it('stops sanitizing objects nested beyond MAX_SANITIZATION_DEPTH (10)', () => {
-    // 12 wrapper levels push the leaf well past the depth limit.
+  it('sanitizes objects nested deeper than 10 levels', () => {
     const nested = '{"child":'.repeat(12) + '{"s":"  <b>  ","constructor":{"x":1}}' + '}'.repeat(12);
     const body = JSON.parse(`{"shallow":{"s":"  <b>  "},"deep":${nested}}`);
 
@@ -49,9 +48,7 @@ describe('InputSanitizationMiddleware coverage (#907)', () => {
     for (let i = 0; i < 12; i++) {
       node = node.child;
     }
-    // Current behaviour: the deep leaf is returned as-is, so its string is
-    // not trimmed or escaped and its forbidden key is not dropped.
-    expect(node).toEqual({ s: '  <b>  ', constructor: { x: 1 } });
+    expect(node).toEqual({ s: '&lt;b&gt;' });
   });
 });
 

@@ -6,6 +6,8 @@ import { PrismaService } from '../prisma/prisma.service';
 import { recordWorkerHeartbeat } from '../common/worker-heartbeat';
 import { DistributedLockService } from '../redis/distributed-lock.service';
 
+const CLEANUP_BATCH_SIZE = 1000;
+
 /**
  * AuthCleanupWorker — periodically prunes expired AuthChallenge rows.
  *
@@ -37,12 +39,24 @@ export class AuthCleanupWorker {
       'lock:job:auth-cleanup',
       ttlMs,
       async () => {
-        const { count } = await this.prisma.authChallenge.deleteMany({
-          where: { expiresAt: { lt: new Date() } },
-        });
+        let total = 0;
+        for (;;) {
+          const expired = await this.prisma.authChallenge.findMany({
+            where: { expiresAt: { lt: new Date() } },
+            select: { walletAddress: true },
+            take: CLEANUP_BATCH_SIZE,
+          });
+          if (expired.length === 0) break;
 
-        if (count > 0) {
-          this.logger.log(`Cleaned up ${count} expired auth challenge(s)`);
+          const { count } = await this.prisma.authChallenge.deleteMany({
+            where: { walletAddress: { in: expired.map((challenge) => challenge.walletAddress) } },
+          });
+          total += count;
+          if (count === 0) break;
+        }
+
+        if (total > 0) {
+          this.logger.log(`Cleaned up ${total} expired auth challenge(s)`);
         }
 
         await recordWorkerHeartbeat(this.redis, 'auth-cleanup').catch((err) =>

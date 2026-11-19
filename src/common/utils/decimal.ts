@@ -98,8 +98,9 @@ function toPlainDecimalString(value: unknown): string {
  *
  * Accepts a string, finite number or bigint. Sign is preserved; scientific
  * notation (including the `1e-7` form that `String(number)` produces for small
- * floats) is expanded exactly. Digits beyond `scale` are rounded half-away-from
- * -zero, matching how the value would be stored in a 7-dp column.
+ * floats) is expanded exactly. Digits beyond `scale` are rounded
+ * half-away-from-zero by default, matching how the value would be stored in a
+ * 7-dp column; pass `truncate` to never overstate a reading.
  *
  * Throws {@link InvalidDecimalError} for empty strings, `NaN`, `Infinity` and
  * anything that is not a number at all.
@@ -109,9 +110,12 @@ function toPlainDecimalString(value: unknown): string {
  * parseDecimalScaled('0.0000001')  // 1n
  * parseDecimalScaled(50)           // 500000000n
  */
+export type DecimalRounding = 'half-away-from-zero' | 'truncate';
+
 export function parseDecimalScaled(
   value: unknown,
   scale: number = DEFAULT_DECIMAL_SCALE,
+  rounding: DecimalRounding = 'half-away-from-zero',
 ): bigint {
   if (!Number.isInteger(scale) || scale < 0) {
     throw new InvalidDecimalError(`Invalid decimal scale: ${scale}`);
@@ -139,8 +143,11 @@ export function parseDecimalScaled(
     const divisor = 10n ** BigInt(excessDigits);
     const quotient = mantissa / divisor;
     const remainder = mantissa % divisor;
-    // Round half away from zero.
-    mantissa = remainder * 2n >= divisor ? quotient + 1n : quotient;
+    if (rounding === 'truncate') {
+      mantissa = quotient;
+    } else {
+      mantissa = remainder * 2n >= divisor ? quotient + 1n : quotient;
+    }
   } else if (excessDigits < 0) {
     mantissa = mantissa * 10n ** BigInt(-excessDigits);
   }
@@ -154,7 +161,8 @@ export function parseDecimalScaled(
  *
  * Accepts the exact integer string form produced by `BigInt#toString`, a bigint
  * or an integer number. A value carrying a decimal point is parsed as a decimal
- * (so a caller passing `200.0000000` still works) rather than silently truncated.
+ * (so a caller passing `200.0000000` still works), truncating digits beyond
+ * `scale` so an oracle reading is never overstated.
  */
 export function parseFixedPointBigInt(
   value: unknown,
@@ -164,7 +172,7 @@ export function parseFixedPointBigInt(
 
   if (typeof value === 'number') {
     if (!Number.isInteger(value)) {
-      return parseDecimalScaled(value, scale);
+      return parseDecimalScaled(value, scale, 'truncate');
     }
     return BigInt(value);
   }
@@ -174,7 +182,7 @@ export function parseFixedPointBigInt(
     if (/^[+-]?\d+$/.test(trimmed)) {
       return BigInt(trimmed);
     }
-    return parseDecimalScaled(trimmed, scale);
+    return parseDecimalScaled(trimmed, scale, 'truncate');
   }
 
   throw new InvalidDecimalError(
