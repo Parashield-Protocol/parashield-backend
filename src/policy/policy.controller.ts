@@ -638,7 +638,13 @@ export class PolicyController {
       'Streams all policies as CSV rows using a database cursor, writing each row ' +
       'incrementally to avoid memory spikes on large exports.',
   })
-  async exportCsv(@Res() res: Response): Promise<void> {
+  async exportCsv(@Req() req: AuthenticatedRequest, @Res() res: Response): Promise<void> {
+    // #852 — export only the authenticated wallet's policies, never every policy in the system.
+    const authedWallet = req?.user?.walletAddress || req?.wallet;
+    if (!authedWallet) {
+      throw new UnauthorizedException('Not authenticated. Please log in with a valid JWT token.');
+    }
+
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="policies-export.csv"');
 
@@ -651,6 +657,7 @@ export class PolicyController {
 
     do {
       const batch = await this.policy.findAll({
+        where: { policyholder: authedWallet },
         take: batchSize,
         ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
         orderBy: { id: 'asc' },
