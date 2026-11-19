@@ -67,13 +67,17 @@ export function isTimeoutError(err: unknown): boolean {
 
 /**
  * Timeouts, network failures, 429s and 5xx responses are worth retrying.
- * Other 4xx responses (e.g. 404 account not found) are deterministic and are
- * rethrown immediately so callers can handle them.
+ * Other 4xx responses (e.g. 404 account not found) and deterministic 5xx
+ * errors (501 Not Implemented, 505 HTTP Version Not Supported) are not retried.
  */
 export function isRetryableHorizonError(err: unknown): boolean {
   if (isTimeoutError(err)) return true;
   const status = statusOf(err);
-  if (typeof status === "number") return status === 429 || status >= 500;
+  if (typeof status === "number") {
+    if (status === 429) return true;
+    if (status >= 500 && status !== 501 && status !== 505) return true;
+    return false;
+  }
   const code = (err as { code?: string })?.code;
   return typeof code === "string" && NETWORK_ERROR_CODES.has(code);
 }
