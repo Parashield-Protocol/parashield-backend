@@ -16,7 +16,7 @@ interface RequestWindow {
 @Injectable()
 export class ThrottleGuard implements CanActivate, OnModuleDestroy {
   private readonly requests = new Map<string, RequestWindow>();
-  private readonly MAX_REQUESTS = 60;
+  private readonly MAX_REQUESTS = 55;
   private readonly TIME_WINDOW_MS = 60_000;
   private cleanupInterval: NodeJS.Timeout;
 
