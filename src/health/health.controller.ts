@@ -143,9 +143,20 @@ export class HealthController {
 
   private sanitizeErrorMessage(error: unknown): string {
     const message = error instanceof Error ? error.message : String(error);
-    if (message.includes('password') || message.includes('connection') || message.includes('credentials')) {
+    
+    // Only redact messages that actually contain credential patterns like 
+    // "://user:pass@" rather than just the word "connection" or "credentials"
+    // which are useful for debugging.
+    const credentialPattern = /:[^:]*@/; // Matches patterns like :password@host
+    if (credentialPattern.test(message)) {
       return 'Service dependency unavailable';
     }
+    
+    // Redact messages containing explicit credential keywords in suspicious contexts
+    if (/password\s*[:=]/i.test(message) || /credentials\s*[:=]/i.test(message)) {
+      return 'Service dependency unavailable';
+    }
+    
     if (message.includes('timeout') || message.includes('ECONNREFUSED')) {
       return 'Connection timeout or refused';
     }

@@ -113,14 +113,19 @@ export function applySecurityHeaders(
   }
 
   // 2. Standard security headers.
+  // #705 — Only enable HSTS in production. HSTS in development with 
+  // self-signed certificates causes browsers to refuse HTTP connections 
+  // after the first HTTPS visit, breaking local testing workflows.
+  const isProduction = process.env.NODE_ENV === 'production';
+  
   app.use(
     helmet({
       referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-      hsts: {
+      hsts: isProduction ? {
         maxAge: 31536000,
         includeSubDomains: true,
         preload: true,
-      },
+      } : false,
       ...options.helmetOptions,
       // Hard-code this on regardless of caller options: leaking the stack is
       // the thing this module exists to prevent.

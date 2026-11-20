@@ -152,18 +152,27 @@ export class OperatorAuthGuard implements CanActivate {
 
   /**
    * #379 — API key rotation with grace period, zero downtime:
-   *   1. Move the old key into ADMIN_API_KEY_PREVIOUS (and/or
-   *      ORACLE_OPERATOR_API_KEY_PREVIOUS) and set the new value on the current
-   *      variable, then restart. Both keys authenticate during the grace window.
+   *   1. Move the old key(s) into ADMIN_API_KEY_PREVIOUS (and/or
+   *      ORACLE_OPERATOR_API_KEY_PREVIOUS) as a comma-separated list and set 
+   *      the new value on the current variable, then restart. Both keys 
+   *      authenticate during the grace window.
    *   2. Clients migrate to the new key.
    *   3. Remove the *_PREVIOUS variables (API_KEY_ROTATION_GRACE_MINUTES
    *      bounds how long step 1's overlap lasts; default 24h).
+   *   
+   * Supports multiple previous keys (e.g., key1,key2) for handling rapid 
+   * rotations during incidents.
    */
   private acceptsRotatedOutKey(providedKey: string, source: ApiKeySource): boolean {
-    const previousKeys = (source === 'admin'
-      ? [this.config.get<string>('ADMIN_API_KEY_PREVIOUS')]
-      : [this.config.get<string>('ORACLE_OPERATOR_API_KEY_PREVIOUS')]
-    ).filter((key): key is string => typeof key === 'string' && key.length > 0);
+    const previousKeysRaw = source === 'admin'
+      ? this.config.get<string>('ADMIN_API_KEY_PREVIOUS')
+      : this.config.get<string>('ORACLE_OPERATOR_API_KEY_PREVIOUS');
+
+    // Parse comma-separated keys
+    const previousKeys = (previousKeysRaw ?? '')
+      .split(',')
+      .map((key) => key.trim())
+      .filter((key): key is string => typeof key === 'string' && key.length > 0);
 
     if (previousKeys.length === 0 || !this.isWithinGracePeriod()) return false;
 
