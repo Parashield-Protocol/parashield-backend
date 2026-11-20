@@ -118,7 +118,7 @@ export class OracleWorker {
     let uniqueKeys = activePolicies.map((p) => p.oracleKey);
     if (uniqueKeys.length === 0) {
       this.logger.log('No active policies found. Using Kisumu rainfall coordinates as fallback.');
-      uniqueKeys = [`rainfall:-0.0917,34.7679:${year}-${formattedMonth}`];
+      uniqueKeys = [`rainfall:${process.env.ORACLE_FALLBACK_LAT ?? '-0.0917'},${process.env.ORACLE_FALLBACK_LNG ?? '34.7679'}:${year}-${formattedMonth}`];
     }
 
     await this.processKeysWithConcurrency(uniqueKeys, this.concurrency);
@@ -149,7 +149,6 @@ export class OracleWorker {
           // #739 — track individual key failures without aborting the batch.
           // Each key is independent; one failure must not prevent others from
           // being processed or cause the entire batch to be retried.
-          this.invalidCount += 1;
           this.logger.error(`Failed to process oracle key ${key} (batch continues)`, err);
         }
       }
@@ -287,36 +286,41 @@ export class OracleWorker {
   }
 
   private async fetchWithRetry<T>(fetchFn: () => Promise<T>): Promise<T | null> {
-    try {
-      const reading = await fetchFn();
-      if (isLoggableReading(reading)) {
-        this.logger.log(
-          `Primary fetch succeeded: key=${reading.key} value=${reading.value} confidence=${reading.confidence}`,
-        );
-      }
-      return reading;
-    } catch (err) {
-      if (err instanceof Error && /circuit (?:is )?open/i.test(err.message)) {
-        this.logger.warn(
-          `Primary fetch failed with circuit breaker open — skipping retry: ${err.message}`,
-        );
-        return null;
-      }
+    const MAX_RETRIES = 3;
+    const INITIAL_DELAY_MS = 5_000;
+    let lastError: Error | unknown;
 
-      this.logger.warn(`Primary fetch failed — retrying once in ${this.retryDelayMs / 1000}s`, err);
-      await this.sleep(this.retryDelayMs);
-
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         const reading = await fetchFn();
         if (isLoggableReading(reading)) {
-          this.logger.log(`Retry succeeded: key=${reading.key} value=${reading.value}`);
+          if (attempt === 0) {
+            this.logger.log(
+              `Primary fetch succeeded: key=${reading.key} value=${reading.value} confidence=${reading.confidence}`,
+            );
+          } else {
+            this.logger.log(
+              `Fetch succeeded on attempt ${attempt + 1}: key=${reading.key} value=${reading.value} confidence=${reading.confidence}`,
+            );
+          }
         }
         return reading;
-      } catch (retryErr) {
-        this.logger.error('Both fetch attempts failed', retryErr);
-        return null;
+      } catch (err) {
+        lastError = err;
+        if (attempt < MAX_RETRIES) {
+          // Exponential backoff: 5s, 10s, 20s
+          const delayMs = INITIAL_DELAY_MS * Math.pow(2, attempt);
+          this.logger.warn(
+            `Fetch attempt ${attempt + 1} failed — retrying in ${delayMs / 1000}s (attempt ${attempt + 2}/${MAX_RETRIES + 1})`,
+            err,
+          );
+          await this.sleep(delayMs);
+        }
       }
     }
+
+    this.logger.error(`All ${MAX_RETRIES + 1} fetch attempts failed`, lastError);
+    return null;
   }
 
   private sleep(ms: number): Promise<void> {

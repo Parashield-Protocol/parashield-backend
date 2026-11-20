@@ -236,10 +236,6 @@ export class ClaimsController {
     const parsedPage = page ? parseInt(page, 10) || 1 : 1;
     const parsedLimit = limit ? parseInt(limit, 10) || 20 : 20;
 
-    const result = cursor !== undefined
-      ? await this.claims.getClaimsByWallet(targetWallet, parsedPage, parsedLimit, cursor)
-      : await this.claims.getClaimsByWallet(targetWallet, parsedPage, parsedLimit);
-
-    return { success: true, ...result };
+    return this.getClaimsByWalletQuery(targetWallet, String(parsedPage), String(parsedLimit), cursor, req);
   }
 }

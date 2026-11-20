@@ -97,6 +97,15 @@ other instances clear their in-memory cache.
 | `GET` | `/api/v1/oracle/rainfall` | Legacy: fetch rainfall via query params |
 | `GET` | `/api/v1/oracle/flight` | Fetch flight delay from AviationStack |
 
+### Amount Precision
+
+#465 — Monetary amounts sent to the API must conform to Stellar asset precision constraints:
+
+- **USDC precision**: 7 decimal places maximum (e.g., `123.4567890` is invalid; `123.456789` is valid)
+- **XLM precision**: 7 decimal places maximum
+
+Fields checked include `amount`, `premium`, `coverageAmount`, `payoutAmount`, `minPayout`, and `maxPayout`. The middleware validates amounts recursively in nested objects and arrays. Requests exceeding the 7-decimal limit are rejected with a `400 Bad Request` error.
+
 ### Auth & Health
 
 | Method | Route | Description |
@@ -250,6 +259,16 @@ To minimize database round-trips when storing high-frequency oracle readings, `O
 
 Setting `ORACLE_BATCH_SIZE=1` disables buffering and executes immediate 1:1 inserts matching legacy behavior. Graceful shutdown hooks flush any remaining buffered readings before process termination.
 
+#### Tuning guidance (#846)
+
+Out-of-range values are rejected at boot, so a bad setting fails fast rather than silently changing behavior.
+
+- **`ORACLE_BATCH_SIZE`** sets how many readings share one database transaction. Raise it when many readings arrive at once and per-transaction overhead dominates. Lower it if transactions run long enough to hold locks against other writers, or if database latency spikes.
+- **`ORACLE_FLUSH_INTERVAL_MS`** is the longest a buffered reading waits before it is written, so it bounds how stale stored data can be. Lower values give fresher data at the cost of more, smaller transactions when traffic is light. Higher values reduce write volume but widen the window where a crash could lose buffered readings.
+- **`ORACLE_BUFFER_MAX_SIZE`** is how many readings may wait in memory. Keep it comfortably larger than `ORACLE_BATCH_SIZE` so a flush never has to wait on a partial batch. When the buffer fills, backpressure applies, so a smaller value engages it sooner and a larger one costs more memory.
+
+The defaults (`50`, `1000` ms, `1000`) suit moderate ingestion. Change one value at a time and watch flush latency and database load before moving the next.
+
 ### Load Testing
 
 A k6 stress test script is provided in `loadtest/k6/pool-stress.js` to evaluate pool behavior and latency under concurrent load:
@@ -369,6 +388,62 @@ When class-validator rejects a request body the `error` field is an array of Nes
 ```
 
 Check each entry in `error.message` for the field name and violated constraint.
+
+### Idempotency
+
+The API supports idempotent request semantics via the `Idempotency-Key` header for safe replay during transient failures. This is especially useful for critical operations like policy purchases and claim submissions.
+
+**How it works:**
+
+- Send any `POST`, `PUT`, or `PATCH` request with a unique `Idempotency-Key` header value (e.g. a UUID).
+- If the same key is sent within 24 hours, the cached response from the first request is returned immediately (same status, body, and headers).
+- The `X-Idempotent-Replayed: true` header marks a replayed response so clients can log or audit the replay.
+
+**Example:**
+
+```bash
+# First request — executes normally
+curl -X POST https://api.example.com/api/v1/claims/submit \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "Content-Type: application/json" \
+  -d '{"policyId": "abc123", "reason": "..."}' \
+  -H "Authorization: Bearer <token>"
+
+# Response
+{
+  "success": true,
+  "data": { "claimId": "claim-123", "status": "PENDING" }
+}
+
+# Same request within 24h with the same key — returns cached response instantly
+curl -X POST https://api.example.com/api/v1/claims/submit \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -H "Content-Type: application/json" \
+  -d '{"policyId": "abc123", "reason": "..."}' \
+  -H "Authorization: Bearer <token>"
+
+# Response (identical to first, marked as replayed)
+# HTTP/1.1 200 OK
+# X-Idempotent-Replayed: true
+{
+  "success": true,
+  "data": { "claimId": "claim-123", "status": "PENDING" }
+}
+```
+
+**Cache duration & key format:**
+
+- Keys are cached for 24 hours and are namespace-isolated per user/wallet. The same key used by different wallets creates separate cache entries.
+- Key values must be ASCII strings (UUIDs recommended, but any string works).
+- Requests without an `Idempotency-Key` header execute normally each time and are not cached.
+
+**When to use:**
+
+- Wrapping critical writes (policy purchases, claim submissions) so transient network failures don't create duplicates.
+- Not needed for read operations or idempotent `GET` requests.
+- Retry the full request (including the same key) after network timeouts or 5xx errors.
+
+---
 
 ### Rate limiting (429)
 

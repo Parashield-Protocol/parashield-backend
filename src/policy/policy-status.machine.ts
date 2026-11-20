@@ -14,17 +14,17 @@ import { BadRequestException } from '@nestjs/common';
  *   ACTIVE → PROCESSING     (#164 — atomic claims-processing gate acquired)
  *   PROCESSING → CLAIMED    (#166 — payout completed)
  *   PROCESSING → ACTIVE     (#165 — payout failed, gate released for retry)
- *   ACTIVE → ERROR          (#369 — unrecoverable failure while ACTIVE)
- *   PROCESSING → ERROR      (#369 — unrecoverable failure mid-processing)
  *   All terminal states → (no transitions allowed)
+ *
+ * Keys mirror the Prisma PolicyStatus enum exactly (#858 — the never-used
+ * ERROR state was removed; no code path could ever set it).
  */
 export const VALID_TRANSITIONS: Record<string, string[]> = {
-  ACTIVE:     ['EXPIRED', 'CANCELLED', 'CLAIMED', 'PROCESSING', 'ERROR'],
-  PROCESSING: ['CLAIMED', 'ACTIVE', 'ERROR'],
+  ACTIVE:     ['EXPIRED', 'CANCELLED', 'CLAIMED', 'PROCESSING'],
+  PROCESSING: ['CLAIMED', 'ACTIVE'],
   EXPIRED:    [],
   CANCELLED:  [],
   CLAIMED:    [],
-  ERROR:      [],
 };
 
 /**

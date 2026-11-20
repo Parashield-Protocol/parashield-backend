@@ -67,7 +67,6 @@ interface ProductCacheEntry {
   total: number;
   expiresAt: number;
 }
-const productCache = new Map<string, ProductCacheEntry>();
 
 export interface PremiumValidationResult {
   valid: boolean;
@@ -95,6 +94,8 @@ const POOL_UNITS_PER_WHOLE = 10_000_000n;
 @Injectable()
 export class PolicyService {
   private readonly logger = new Logger(PolicyService.name);
+  // #834 — per-instance product cache (was module-level, shared across instances and tests).
+  private readonly productCache = new Map<string, ProductCacheEntry>();
 
   constructor(
     private readonly stellar: StellarService,
@@ -645,13 +646,11 @@ export class PolicyService {
     // page, default limit). Non-default pages always hit the DB because
     // caching every possible pagination combination is not worthwhile.
     const cacheKey = `${page}:${take}`;
-    if (!options?.skipCache) {
-      const now = Date.now();
-      const cached = productCache.get(cacheKey);
-      if (cached && cached.expiresAt > now) {
-        this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
-        return { data: cached.data, total: cached.total, page, limit: take };
-      }
+    const now = Date.now();
+    const cached = this.productCache.get(cacheKey);
+    if (cached && cached.expiresAt > now) {
+      this.logger.debug(`get_active_products: cache hit (page=${page} limit=${take})`);
+      return { data: cached.data, total: cached.total, page, limit: take };
     }
 
     this.logger.log(`get_active_products: page=${page} limit=${limit}`);
@@ -690,7 +689,7 @@ export class PolicyService {
     }));
 
     // #622 — store in cache with TTL
-    productCache.set(cacheKey, { data, total, expiresAt: now + PRODUCT_CACHE_TTL_MS });
+    this.productCache.set(cacheKey, { data, total, expiresAt: now + PRODUCT_CACHE_TTL_MS });
 
     this.logger.log(`get_active_products: ${data.length}/${total} products (page ${page})`);
     return { data, total, page, limit: take };
@@ -1175,8 +1174,9 @@ export class PolicyService {
       data: {
         entityType: 'Policy',
         entityId: id,
-        fromStatus: existing.status,
-        toStatus: existing.status,
+        // Field updates are not status transitions (#847): record null statuses.
+        fromStatus: null,
+        toStatus: null,
         reason: `Updated ${changes.join(' and ')} by ${actor ?? 'system'}`,
       },
     }).catch((err) => this.logger.error(`Failed to write audit log for policy ${id} update`, err));
@@ -1202,7 +1202,7 @@ export class PolicyService {
 
   async createProduct(dto: CreateProductDto): Promise<ProductSummary> {
     // #622 — invalidate product cache after admin mutation
-    productCache.clear();
+    this.productCache.clear();
     const product = await this.prisma.product.create({
       data: {
         name:         dto.name,
@@ -1224,7 +1224,7 @@ export class PolicyService {
 
   async updateProduct(id: string, dto: UpdateProductDto): Promise<ProductSummary> {
     // #622 — invalidate product cache after admin mutation
-    productCache.clear();
+    this.productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);
@@ -1255,7 +1255,7 @@ export class PolicyService {
   /** Deactivate a product (soft delete — existing policies still reference it). */
   async deactivateProduct(id: string): Promise<ProductSummary> {
     // #622 — invalidate product cache after admin mutation
-    productCache.clear();
+    this.productCache.clear();
     const existing = await this.prisma.product.findUnique({ where: { id } });
     if (!existing) {
       throw new NotFoundException(`Product ${id} not found`);

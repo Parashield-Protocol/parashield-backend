@@ -6,13 +6,22 @@ import { validateWebhookEndpoint } from '../webhooks/ssrf.validator';
 
 type WebhookEvent = 'policy.status.change' | 'claim.status.change' | 'policy.oracle_key.change';
 
+// #860 — the public registration shape never carries the signing secret,
+// only a masked hint, so it is safe to log, serialize or return to callers.
 export interface WebhookRegistration {
   id: string;
   url: string;
-  secret?: string;
+  secretMasked?: string;
   events: WebhookEvent[];
   createdAt: Date;
   isActive: boolean;
+}
+
+// #860 — internal delivery shape: holds the secret exactly as stored
+// (ciphertext when WEBHOOK_SECRET_KEY is set); it is only decrypted at the
+// point of signing in deliverWithRetryAttempt.
+interface StoredWebhookRegistration extends Omit<WebhookRegistration, 'secretMasked'> {
+  storedSecret?: string;
 }
 
 export interface WebhookDeliveryResult {
@@ -29,7 +38,7 @@ export interface WebhookDeliveryResult {
 // each attempt (1 s → 2 s → 4 s by default).
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1_000;
-const WEBHOOK_TIMEOUT_MS = 10_000;
+const WEBHOOK_TIMEOUT_MS = 8_000;
 
 // #606 — AES-256-GCM parameters for encrypting webhook secrets at rest.
 // SHA-256 of WEBHOOK_SECRET_KEY always yields the 32-byte key AES-256 requires.
@@ -135,6 +144,16 @@ export class WebhooksService implements OnApplicationShutdown {
   }
 
   async getRegistrations(): Promise<WebhookRegistration[]> {
+    const rows = await this.loadActiveRegistrations();
+    // #782/#860 — expose only the last 4 characters of the secret; the
+    // plaintext is decrypted transiently and never leaves this method.
+    return rows.map(({ storedSecret, ...rest }) => ({
+      ...rest,
+      ...(storedSecret ? { secretMasked: `****${this.decryptSecret(storedSecret).slice(-4)}` } : {}),
+    }));
+  }
+
+  private async loadActiveRegistrations(): Promise<StoredWebhookRegistration[]> {
     const rows = await this.prisma.webhookRegistration.findMany({
       where: { isActive: true },
       orderBy: { createdAt: 'asc' },
@@ -142,8 +161,7 @@ export class WebhooksService implements OnApplicationShutdown {
     return rows.map((r) => ({
       id: r.id,
       url: r.url,
-      // #606 — decrypt the stored secret before returning it for delivery signing.
-      secret: r.secret ? this.decryptSecret(r.secret) : undefined,
+      storedSecret: r.secret ?? undefined,
       events: r.events as WebhookEvent[],
       createdAt: r.createdAt,
       isActive: r.isActive,
@@ -155,9 +173,9 @@ export class WebhooksService implements OnApplicationShutdown {
    * awaiting them, so a DB failure loading registrations must be logged
    * here rather than surfacing as an unhandled rejection.
    */
-  private async getRegistrationsForEvent(event: WebhookEvent): Promise<WebhookRegistration[]> {
+  private async getRegistrationsForEvent(event: WebhookEvent): Promise<StoredWebhookRegistration[]> {
     try {
-      return (await this.getRegistrations()).filter((r) => r.events.includes(event));
+      return (await this.loadActiveRegistrations()).filter((r) => r.events.includes(event));
     } catch (err) {
       this.logger.error(`Failed to load webhook registrations for ${event}: ${(err as Error).message}`);
       return [];
@@ -323,7 +341,7 @@ export class WebhooksService implements OnApplicationShutdown {
   // #777 — tracks the actual attempt (below) in inFlightDeliveries so
   // onApplicationShutdown can drain it instead of the process exiting with
   // the retry loop's sleep/fetch cycle still running.
-  private async deliverWithRetry(registration: WebhookRegistration, payload: unknown): Promise<void> {
+  private async deliverWithRetry(registration: StoredWebhookRegistration, payload: unknown): Promise<void> {
     const attempt = this.deliverWithRetryAttempt(registration, payload);
     this.inFlightDeliveries.add(attempt);
     try {
@@ -333,7 +351,7 @@ export class WebhooksService implements OnApplicationShutdown {
     }
   }
 
-  private async deliverWithRetryAttempt(registration: WebhookRegistration, payload: unknown): Promise<void> {
+  private async deliverWithRetryAttempt(registration: StoredWebhookRegistration, payload: unknown): Promise<void> {
     let lastError: Error | undefined;
 
     // #719 — Serialize and sign the payload once before the retry loop
@@ -345,9 +363,9 @@ export class WebhooksService implements OnApplicationShutdown {
         `Webhook payload exceeds maximum size of ${MAX_WEBHOOK_PAYLOAD_BYTES} bytes`,
       );
     }
-    const signature = registration.secret
-      ? this.signPayloadString(payloadStr, registration.secret)
-      : undefined;
+    // #606/#860 — decrypt the signing secret only here, at the point of use.
+    const secret = registration.storedSecret ? this.decryptSecret(registration.storedSecret) : undefined;
+    const signature = secret ? this.signPayloadString(payloadStr, secret) : undefined;
 
     for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
       if (attempt > 0) {
@@ -361,7 +379,7 @@ export class WebhooksService implements OnApplicationShutdown {
       }
 
       try {
-        await this.deliverWebhook(registration, payloadStr, signature);
+        await this.deliverWebhook(registration, payloadStr, secret, signature);
         if (attempt > 0) {
           this.logger.log(
             `Webhook ${registration.id} → ${registration.url} succeeded on attempt ${attempt}`,
@@ -377,8 +395,9 @@ export class WebhooksService implements OnApplicationShutdown {
   }
 
   private async deliverWebhook(
-    registration: WebhookRegistration,
+    registration: StoredWebhookRegistration,
     payloadStr: string,
+    secret?: string,
     signature?: string,
   ): Promise<void> {
     const headers: Record<string, string> = {
@@ -455,12 +474,12 @@ export class WebhooksService implements OnApplicationShutdown {
     }
 
     // #613 — Verify response signature if the endpoint provides one.
-    if (registration.secret) {
+    if (secret) {
       const responseSignature = response.headers.get('x-webhook-signature-response');
       if (responseSignature) {
         const responseBody = await response.text();
         const expectedSignature = crypto
-          .createHmac('sha256', registration.secret)
+          .createHmac('sha256', secret)
           .update(responseBody)
           .digest('base64');
 

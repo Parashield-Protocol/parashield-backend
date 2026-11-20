@@ -636,6 +636,15 @@ export class StellarService {
           return txResult;
         }
 
+        // DUPLICATE: the RPC reports the hash is already known to the network, so
+        // the transaction has landed or is pending from an earlier send. Treat it as
+        // confirmed instead of polling until timeout (#848). Not part of the
+        // getTransaction status union, hence the string comparison.
+        if ((txResult.status as string) === "DUPLICATE") {
+          this.logger.log(`Transaction already known (DUPLICATE): ${txHash}`);
+          return txResult;
+        }
+
         if (txResult.status === "FAILED") {
           throw new Error(
             `Transaction ${txHash} failed on-chain: ${this.formatXdr(txResult.resultXdr) || "unknown error"}`,

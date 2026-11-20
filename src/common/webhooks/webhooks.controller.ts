@@ -88,17 +88,12 @@ export class WebhooksController {
     },
   })
   async list() {
-    // #782 — never echo the full HMAC signing secret back to API callers.
-    // Show only the last 4 characters as a hint so the subscriber can tell
-    // they got the right one without exposing it; the full secret is only
-    // ever returned (if at all) at creation time.
+    // #782/#860 — registrations never carry the full HMAC signing secret;
+    // the service already reduces it to a last-4-characters hint.
     const registrations = await this.webhooks.getRegistrations();
     return {
       success: true,
-      data: registrations.map(({ secret, ...rest }) => ({
-        ...rest,
-        ...(secret ? { secretMasked: `****${secret.slice(-4)}` } : {}),
-      })),
+      data: registrations,
     };
   }
 }

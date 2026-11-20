@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { transition, canTransition } from './policy-status.machine';
+import { transition, canTransition, VALID_TRANSITIONS } from './policy-status.machine';
 
 describe('PolicyStatusMachine', () => {
   describe('canTransition', () => {
@@ -43,6 +43,20 @@ describe('PolicyStatusMachine', () => {
     it('should not allow PROCESSING -> EXPIRED or CANCELLED', () => {
       expect(canTransition('PROCESSING', 'EXPIRED')).toBe(false);
       expect(canTransition('PROCESSING', 'CANCELLED')).toBe(false);
+    });
+  });
+
+  describe('#858 — no dead ERROR state', () => {
+    it('does not define ERROR as a state or a transition target', () => {
+      expect(VALID_TRANSITIONS).not.toHaveProperty('ERROR');
+      expect(canTransition('ACTIVE', 'ERROR')).toBe(false);
+      expect(canTransition('PROCESSING', 'ERROR')).toBe(false);
+    });
+
+    it('only uses states that exist in the Prisma PolicyStatus enum', () => {
+      const prismaStatuses = ['ACTIVE', 'EXPIRED', 'CANCELLED', 'CLAIMED', 'PROCESSING'];
+      const used = new Set([...Object.keys(VALID_TRANSITIONS), ...Object.values(VALID_TRANSITIONS).flat()]);
+      expect([...used].sort()).toEqual([...prismaStatuses].sort());
     });
   });
 

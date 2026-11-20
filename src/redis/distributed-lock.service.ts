@@ -125,6 +125,7 @@ export class DistributedLockService {
    *
    * - If lock not acquired: logs that the run was skipped because lock is held (no spinning/queueing).
    * - If lock acquired: runs task, maintains heartbeat renewal if enabled, releases in finally block.
+   * - If heartbeat renewal fails: the task is aborted to prevent data corruption from concurrent execution.
    */
   async runWithLock<T>(
     key: string,
@@ -139,6 +140,11 @@ export class DistributedLockService {
     }
 
     let heartbeatTimer: NodeJS.Timeout | undefined;
+    let lockLostReject: ((err: Error) => void) | undefined;
+    const lockLostPromise = new Promise<never>((_, reject) => {
+      lockLostReject = reject;
+    });
+
     const enableHeartbeat = options?.enableHeartbeat ?? true;
     const extendIntervalMs = options?.extendIntervalMs ?? Math.floor(ttlMs / 3);
 
@@ -146,9 +152,12 @@ export class DistributedLockService {
       heartbeatTimer = setInterval(async () => {
         const renewed = await this.renew(key, token, ttlMs);
         if (!renewed) {
-          this.logger.warn(
-            `[DistributedLock] Watchdog heartbeat failed to renew lock "${key}". Holder token may have expired.`,
+          this.logger.error(
+            `[DistributedLock] Watchdog heartbeat failed to renew lock "${key}". Lock expired — aborting task.`,
           );
+          if (lockLostReject) {
+            lockLostReject(new Error(`Lock "${key}" expired — holder token renewal failed`));
+          }
         }
       }, extendIntervalMs);
 
@@ -158,7 +167,7 @@ export class DistributedLockService {
     }
 
     try {
-      const result = await task();
+      const result = await Promise.race([task(), lockLostPromise]);
       return { executed: true, result };
     } finally {
       if (heartbeatTimer) {

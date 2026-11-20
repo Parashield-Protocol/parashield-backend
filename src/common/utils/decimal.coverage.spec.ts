@@ -50,6 +50,11 @@ describe('decimal utils coverage (#909)', () => {
       expect(parseDecimalScaled('0.5', 0)).toBe(1n);
       expect(parseDecimalScaled('-0.5', 0)).toBe(-1n);
     });
+
+    it('truncates beyond the scale when requested', () => {
+      expect(parseDecimalScaled('1.23456789', 7, 'truncate')).toBe(12_345_678n);
+      expect(parseDecimalScaled('-1.23456789', 7, 'truncate')).toBe(-12_345_678n);
+    });
   });
 
   describe('parseFixedPointBigInt', () => {
@@ -64,6 +69,10 @@ describe('decimal utils coverage (#909)', () => {
 
     it('parses a fractional number as a decimal at the default scale', () => {
       expect(parseFixedPointBigInt(2.5)).toBe(25_000_000n);
+    });
+
+    it('truncates oracle reading values beyond the scale', () => {
+      expect(parseFixedPointBigInt('0.12345675')).toBe(1_234_567n);
     });
   });
 

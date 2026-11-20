@@ -25,6 +25,9 @@ export const MAX_ORACLE_KEY_LENGTH = 128;
  * to the format regex, which only checks that they're signed decimals — same
  * reasoning as IsValidOracleKeyCoordinates in
  * src/policy/dto/oracle-key-coordinates.validator.ts.
+ *
+ * Also normalizes -0.0 to 0.0 to prevent duplicate keys for the same location
+ * (#XXX — negative zero issue).
  */
 export function isValidOracleKeyFormat(key: string): boolean {
   // Reject oversized keys before regex matching (#726).
@@ -33,8 +36,14 @@ export function isValidOracleKeyFormat(key: string): boolean {
   }
   const coordMatch = RAINFALL_OR_TEMPERATURE_KEY_RE.exec(key);
   if (coordMatch) {
-    const lat = parseFloat(coordMatch[1]);
-    const lng = parseFloat(coordMatch[2]);
+    let lat = parseFloat(coordMatch[1]);
+    let lng = parseFloat(coordMatch[2]);
+    
+    // Normalize -0.0 to 0.0 to prevent duplicate keys for the same location.
+    // While -0.0 === 0.0 in JS, the string forms differ, causing distinct keys.
+    if (lat === 0) lat = 0;
+    if (lng === 0) lng = 0;
+    
     return lat >= -90 && lat <= 90 && lng >= -180 && lng <= 180;
   }
   return FLIGHT_KEY_RE.test(key);

@@ -40,6 +40,10 @@ export interface ClaimStatusChangeEvent {
 const STATUS_EVENTS_CHANNEL = 'policy:status:events';
 const ORACLE_KEY_EVENTS_CHANNEL = 'policy:oracle_key:events';
 const DEFAULT_MAX_LISTENERS = 1000;
+// #857 — upper bound on cached policyId → policyholder entries. Least-recently
+// used entries are evicted beyond this; an evicted owner is simply re-fetched
+// from the database on the next subscription.
+const DEFAULT_POLICY_OWNER_CACHE_SIZE = 10_000;
 
 /**
  * StatusEventsService — pub/sub for policy status changes (#349).
@@ -55,6 +59,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
   private readonly emitter = new EventEmitter();
   private readonly instanceId = crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex');
   private readonly policyOwners = new Map<string, string>();
+  private readonly policyOwnerCacheSize: number;
   private subscriber?: Redis;
 
   constructor(
@@ -71,10 +76,32 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
       ? configuredMaxListeners
       : DEFAULT_MAX_LISTENERS;
     this.emitter.setMaxListeners(maxListeners);
+
+    const configuredCacheSize = Number(this.config?.get<string>('STATUS_EVENTS_OWNER_CACHE_SIZE'));
+    this.policyOwnerCacheSize = Number.isSafeInteger(configuredCacheSize) && configuredCacheSize > 0
+      ? configuredCacheSize
+      : DEFAULT_POLICY_OWNER_CACHE_SIZE;
   }
 
   setPolicyOwner(policyId: string, owner: string): void {
+    // #857 — re-insert so the entry moves to the most-recently-used end,
+    // then evict from the least-recently-used end (Map keeps insertion order).
+    this.policyOwners.delete(policyId);
     this.policyOwners.set(policyId, owner);
+    while (this.policyOwners.size > this.policyOwnerCacheSize) {
+      const oldest = this.policyOwners.keys().next().value as string;
+      this.policyOwners.delete(oldest);
+    }
+  }
+
+  private getPolicyOwner(policyId: string): string | undefined {
+    const owner = this.policyOwners.get(policyId);
+    if (owner !== undefined) {
+      // #857 — refresh recency on a cache hit.
+      this.policyOwners.delete(policyId);
+      this.policyOwners.set(policyId, owner);
+    }
+    return owner;
   }
 
   async onModuleInit(): Promise<void> {
@@ -89,10 +116,12 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
             this.handleRemoteEvent(message);
           } else if (channel === ORACLE_KEY_EVENTS_CHANNEL) {
             this.handleRemoteOracleKeyEvent(message);
+          } else if (channel === 'claim:status:events') {
+            this.handleRemoteClaimEvent(message);
           }
         });
-        await this.subscriber.subscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL);
-        this.logger.log(`Subscribed to Redis pub/sub channels: ${STATUS_EVENTS_CHANNEL}, ${ORACLE_KEY_EVENTS_CHANNEL}`);
+        await this.subscriber.subscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL, 'claim:status:events');
+        this.logger.log(`Subscribed to Redis pub/sub channels: ${STATUS_EVENTS_CHANNEL}, ${ORACLE_KEY_EVENTS_CHANNEL}, claim:status:events`);
       } catch (err) {
         this.logger.warn(
           `Failed to initialize Redis subscriber, falling back to local events: ${(err as Error).message}`,
@@ -105,7 +134,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     if (this.subscriber) {
       try {
         if (typeof this.subscriber.unsubscribe === 'function') {
-          await this.subscriber.unsubscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL);
+          await this.subscriber.unsubscribe(STATUS_EVENTS_CHANNEL, ORACLE_KEY_EVENTS_CHANNEL, 'claim:status:events');
         }
         if (typeof this.subscriber.disconnect === 'function') {
           this.subscriber.disconnect();
@@ -180,6 +209,20 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Claim status event: ${event.claimId} (${event.fromStatus} → ${event.toStatus}) by ${event.actorId}`);
     this.emitter.emit(`claim:${event.claimId}`, event);
     this.emitter.emit('claim:status', event);
+
+    // #857 — Publish claim status changes to Redis for cross-instance delivery, matching emitPolicyStatusChange
+    if (this.redis && typeof this.redis.publish === 'function') {
+      const payload = JSON.stringify({
+        ...event,
+        origin: this.instanceId,
+      });
+      const publishResult = this.redis.publish('claim:status:events', payload);
+      if (publishResult && typeof publishResult.catch === 'function') {
+        publishResult.catch((err) => {
+          this.logger.error(`Failed to publish claim status event to Redis for claim ${event.claimId}: ${err.message}`);
+        });
+      }
+    }
   }
 
   subscribeToPolicyStatus(
@@ -203,7 +246,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Check synchronous cache if available
-    const knownOwner = this.policyOwners.get(policyId);
+    const knownOwner = this.getPolicyOwner(policyId);
     if (knownOwner && subscriberWallet && knownOwner !== subscriberWallet) {
       this.logger.warn(
         `Subscriber ${subscriberWallet} does not own policy ${policyId} (owned by ${knownOwner})`,
@@ -239,7 +282,7 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
             if (unsubscribed) return;
             if (policy && policy.policyholder === subscriberWallet) {
               isAuthorized = true;
-              this.policyOwners.set(policyId, policy.policyholder);
+              this.setPolicyOwner(policyId, policy.policyholder);
               // Flush buffered events
               while (pendingEvents.length > 0) {
                 const ev = pendingEvents.shift()!;
@@ -350,6 +393,39 @@ export class StatusEventsService implements OnModuleInit, OnModuleDestroy {
       this.emitter.emit('policy:oracleKey', event);
     } catch (err) {
       this.logger.error(`Failed to parse remote oracle key event: ${(err as Error).message}`);
+    }
+  }
+
+  private handleRemoteClaimEvent(message: string): void {
+    try {
+      const data = JSON.parse(message) as {
+        origin?: string;
+        claimId: string;
+        fromStatus: string;
+        toStatus: string;
+        actorId: string;
+        timestamp: number;
+        reason?: string | null;
+      };
+
+      // Ignore events published by this instance — they were already emitted locally
+      if (data.origin === this.instanceId) {
+        return;
+      }
+
+      const event: ClaimStatusChangeEvent = {
+        claimId: data.claimId,
+        fromStatus: data.fromStatus,
+        toStatus: data.toStatus,
+        actorId: data.actorId,
+        timestamp: data.timestamp,
+        reason: data.reason,
+      };
+
+      this.emitter.emit(`claim:${event.claimId}`, event);
+      this.emitter.emit('claim:status', event);
+    } catch (err) {
+      this.logger.error(`Failed to parse remote claim status event: ${(err as Error).message}`);
     }
   }
 }

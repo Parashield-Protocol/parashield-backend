@@ -43,7 +43,7 @@ describe('WebhooksController', () => {
     const webhooks = {
       registerWebhook: jest.fn().mockResolvedValue({ id: 'wh-1', status: 'registered' }),
       getRegistrations: jest.fn().mockResolvedValue([
-        { id: 'wh-1', url: 'https://example.com/hook', secret: 'topsecret', events: [], isActive: true, createdAt: new Date() },
+        { id: 'wh-1', url: 'https://example.com/hook', secretMasked: '****cret', events: [], isActive: true, createdAt: new Date() },
       ]),
     };
     const controller = new WebhooksController(webhooks as any, {} as any);
@@ -149,7 +149,7 @@ describe('WebhooksController', () => {
 
       const result = await controller.list();
 
-      // stored secret is 'topsecret' → last 4 chars are 'cret'
+      // service masks the stored secret 'topsecret' → last 4 chars are 'cret'
       expect(result.data[0]).toHaveProperty('secretMasked', '****cret');
     });
 
@@ -157,7 +157,7 @@ describe('WebhooksController', () => {
       const webhooks = {
         registerWebhook: jest.fn(),
         getRegistrations: jest.fn().mockResolvedValue([
-          { id: 'wh-2', url: 'https://example.com/hook', secret: undefined, events: [], isActive: true, createdAt: new Date() },
+          { id: 'wh-2', url: 'https://example.com/hook', events: [], isActive: true, createdAt: new Date() },
         ]),
       };
       const controller = new WebhooksController(webhooks as any, {} as any);

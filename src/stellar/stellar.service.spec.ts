@@ -360,6 +360,47 @@ describe("StellarService", () => {
       await expect(first).resolves.toBe("tx-first");
     });
 
+    it("#845 — backs off 2s on a network error", async () => {
+      mockRpc.sendTransaction
+        .mockRejectedValueOnce(new Error("ECONNRESET: connection reset by peer"))
+        .mockResolvedValueOnce({ status: "PENDING", hash: "tx-after-network" });
+      const sleepSpy = jest.spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep");
+
+      await expect(service.invokeContract("CONTRACT_ID", "my_method", [])).resolves.toBe("tx-after-network");
+      expect(sleepSpy).toHaveBeenCalledWith(2000);
+    });
+
+    it("#845 — backs off 5s then 10s on repeated 429 rate limits", async () => {
+      mockRpc.sendTransaction
+        .mockRejectedValueOnce(new Error("429 Too Many Requests"))
+        .mockRejectedValueOnce(new Error("429 Too Many Requests"))
+        .mockResolvedValueOnce({ status: "PENDING", hash: "tx-after-429" });
+      const sleepSpy = jest.spyOn(service as unknown as { sleep: (ms: number) => Promise<void> }, "sleep");
+
+      await expect(service.invokeContract("CONTRACT_ID", "my_method", [])).resolves.toBe("tx-after-429");
+      expect(sleepSpy.mock.calls.map(([ms]) => ms)).toEqual([5000, 10000]);
+    });
+
+    it("#845 — serialises concurrent invocations from the same account", async () => {
+      let inFlight = 0;
+      let maxInFlight = 0;
+      mockRpc.sendTransaction.mockImplementation(async () => {
+        inFlight += 1;
+        maxInFlight = Math.max(maxInFlight, inFlight);
+        await new Promise((resolve) => setImmediate(resolve));
+        inFlight -= 1;
+        return { status: "PENDING", hash: `tx-${inFlight}-${maxInFlight}-${Math.random()}` };
+      });
+
+      await Promise.all([
+        service.invokeContract("CONTRACT_ID", "first", []),
+        service.invokeContract("CONTRACT_ID", "second", []),
+      ]);
+
+      expect(mockRpc.sendTransaction).toHaveBeenCalledTimes(2);
+      expect(maxInFlight).toBe(1);
+    });
+
     it("throws after all 3 attempts are exhausted and calls getAccount 3 times", async () => {
       mockRpc.sendTransaction.mockRejectedValue(new Error("Network timeout"));
 

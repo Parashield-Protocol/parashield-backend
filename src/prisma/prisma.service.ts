@@ -407,6 +407,7 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
     }
 
     const value = await queryFn();
+    if (this.queryCache.size >= 500) this.queryCache.delete(this.queryCache.keys().next().value as string);
     this.queryCache.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
     return value;
   }

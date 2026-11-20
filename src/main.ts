@@ -26,7 +26,6 @@ import { json, urlencoded } from 'express';
 import Redis from 'ioredis';
 import { validateJwtSecret } from './auth/jwt-secret.validator';
 import { validateAllSecrets } from './common/secrets/secret-validator';
-import { validatePortEnv } from './common/utils/config.utils';
 
 const REQUEST_BODY_LIMIT = '1mb';
 const SERVER_TIMEOUT_MS = 30_000;
@@ -480,10 +479,13 @@ async function bootstrap() {
 
   app.enableShutdownHooks();
 
-  const port = validatePortEnv(configService.get('PORT'));
+  const port = configService.get<number>('PORT') || 3001;
   const server = await app.listen(port);
   server.timeout = SERVER_TIMEOUT_MS;
   logger.log(`Parashield API running on http://localhost:${port}/api/v1`);
   logger.log(`Swagger docs available at http://localhost:${port}/docs`);
 }
-bootstrap();
+bootstrap().catch((err: unknown) => {
+  new Logger('Bootstrap').error(`Fatal Error: ${(err as Error).message}`);
+  process.exit(1);
+});
