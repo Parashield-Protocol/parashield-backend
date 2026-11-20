@@ -637,6 +637,7 @@ export class PolicyService {
   async getActiveProducts(
     page: number = 1,
     limit: number = 20,
+    options?: { skipCache?: boolean },
   ): Promise<{ data: ProductSummary[]; total: number; page: number; limit: number }> {
     const take = Math.min(limit, 100);
     const skip = (page - 1) * take;

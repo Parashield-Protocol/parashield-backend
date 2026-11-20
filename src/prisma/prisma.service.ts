@@ -203,6 +203,9 @@ export class PrismaService implements OnModuleInit, OnModuleDestroy {
         if (prop in target) {
           return Reflect.get(target, prop, receiver);
         }
+        if (!target.client) {
+          throw new Error('PrismaService not initialized');
+        }
         const value = Reflect.get(target.client, prop);
         return typeof value === 'function' ? value.bind(target.client) : value;
       },
