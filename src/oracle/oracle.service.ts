@@ -98,6 +98,11 @@ export class CircuitBreaker {
   }
 
   private onFailure(error: unknown): void {
+    // Release the half-open probe slot on every failure, including the client
+    // errors below that do not count toward the threshold. Otherwise a failed
+    // probe that stays under the threshold leaves probeInFlight set and blocks
+    // every later request (#825).
+    this.probeInFlight = false;
     // Only count 5xx and network errors as circuit-breaking failures.
     // 4xx client errors (bad request, invalid key, etc.) indicate a caller
     // misconfiguration, not an upstream outage — opening the circuit on
@@ -799,6 +804,9 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
     const daysInMonth = endDate.getDate();
     const observedCount = observedReadings.length;
     const coverage = observedCount / daysInMonth;
+    // Capped at 95, not 100: the top 5 points are reserved so that a complete
+    // month is never reported as fully certain, and the flight-delay reading
+    // uses the same ceiling (#826).
     const confidence = Math.round(coverage * 95);
 
     for (const daily of observedReadings) {
