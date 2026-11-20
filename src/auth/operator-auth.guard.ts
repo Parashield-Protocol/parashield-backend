@@ -74,7 +74,15 @@ export class OperatorAuthGuard implements CanActivate {
     
     if (!recordStr) return;
 
-    const record: FailureRecord = JSON.parse(recordStr);
+    let record: FailureRecord;
+    try {
+      record = JSON.parse(recordStr);
+    } catch (err) {
+      // Corrupted value in Redis — treat as "no record" and delete the key
+      this.logger.warn(`Corrupted rate limit record for ${ip}, resetting`);
+      await this.redis.del(key);
+      return;
+    }
     
     if (Date.now() > record.resetAt) {
       await this.redis.del(key);
@@ -98,7 +106,17 @@ export class OperatorAuthGuard implements CanActivate {
       const newRecord: FailureRecord = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
       await this.redis.set(key, JSON.stringify(newRecord), 'PX', RATE_LIMIT_WINDOW_MS);
     } else {
-      const record: FailureRecord = JSON.parse(recordStr);
+      let record: FailureRecord;
+      try {
+        record = JSON.parse(recordStr);
+      } catch (err) {
+        // Corrupted value — start fresh
+        this.logger.warn(`Corrupted rate limit record for ${ip} during recordFailure, resetting`);
+        const newRecord: FailureRecord = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
+        await this.redis.set(key, JSON.stringify(newRecord), 'PX', RATE_LIMIT_WINDOW_MS);
+        return;
+      }
+
       if (now > record.resetAt) {
         const newRecord: FailureRecord = { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS };
         await this.redis.set(key, JSON.stringify(newRecord), 'PX', RATE_LIMIT_WINDOW_MS);

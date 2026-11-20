@@ -36,6 +36,8 @@ export class UsdcPrecisionValidationMiddleware implements NestMiddleware {
     'payoutamount',
     'minpayout',
     'maxpayout',
+    'coveragexlm',      // BuyPolicyDto, ConfirmPolicyDto
+    'premiumpaid',      // Additional DTO fields that hold amounts
   ]);
 
   use(req: Request, res: Response, next: NextFunction) {
@@ -114,12 +116,8 @@ export class UsdcPrecisionValidationMiddleware implements NestMiddleware {
       );
     }
 
-    // #663 — Also reject numeric values that lose precision when converted
-    // to string (e.g. 0.1 + 0.2 = 0.30000000000000004).
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-      throw new BadRequestException(
-        `Invalid amount at ${path.join('.')}: "${strValue}". Must be a finite number.`
-      );
-    }
+    // Dead code removed: String(NaN) is "NaN" and String(Infinity) is "Infinity".
+    // Both fail the /^-?\d+(\.\d+)?$/ regex test above, so they're already rejected
+    // before reaching this point. The Number.isFinite check was unreachable.
   }
 }
