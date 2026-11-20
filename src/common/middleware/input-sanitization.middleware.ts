@@ -71,12 +71,15 @@ function sanitize(value: unknown): unknown {
 }
 
 function sanitizeString(value: string): string {
+  // Only escape < and > to prevent XSS from markup/script tags.
+  // Leave " and ' unescaped: JSON response format handles them naturally,
+  // and escaping them corrupts stored values (e.g., "O'Brien" would become
+  // "O&#39;Brien" in the database, visible to API consumers as literal &#39;).
+  // If HTML output is needed, use escapeHtml() at render time.
   return value
     .trim()
     .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
+    .replaceAll('>', '&gt;');
 }
 
 const HTML_ESCAPES: Record<string, string> = {
