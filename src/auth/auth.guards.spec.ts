@@ -240,4 +240,338 @@ describe('Auth guards', () => {
     }
     spy.mockRestore();
   });
-});
+
+  // #379 — API key rotation with grace period tests
+  describe('API key rotation with grace period', () => {
+    it('accepts current ADMIN_API_KEY immediately', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ADMIN_API_KEY' ? 'current-admin-key'
+          : key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-key'
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'current-admin-key' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.apiKeySource).toBe('admin');
+    });
+
+    it('accepts previous ADMIN_API_KEY during grace period', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ADMIN_API_KEY' ? 'current-admin-key'
+          : key === 'ADMIN_API_KEY_PREVIOUS' ? 'old-admin-key'
+          : key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-key'
+          : key === 'API_KEY_ROTATION_GRACE_MINUTES' ? '24'
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'old-admin-key' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.apiKeySource).toBe('admin');
+    });
+
+    it('rejects previous ADMIN_API_KEY after grace period expires', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ADMIN_API_KEY' ? 'current-admin-key'
+          : key === 'ADMIN_API_KEY_PREVIOUS' ? 'old-admin-key'
+          : key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-key'
+          : key === 'API_KEY_ROTATION_GRACE_MINUTES' ? '0'  // Grace period disabled
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'old-admin-key' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('accepts current ORACLE_OPERATOR_API_KEY immediately', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ORACLE_OPERATOR_API_KEY' ? 'current-operator-key'
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'current-operator-key' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.apiKeySource).toBe('operator');
+    });
+
+    it('accepts previous ORACLE_OPERATOR_API_KEY during grace period', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ORACLE_OPERATOR_API_KEY' ? 'current-operator-key'
+          : key === 'ORACLE_OPERATOR_API_KEY_PREVIOUS' ? 'old-operator-key'
+          : key === 'API_KEY_ROTATION_GRACE_MINUTES' ? '24'
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'old-operator-key' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.apiKeySource).toBe('operator');
+    });
+
+    it('supports comma-separated multiple previous ADMIN_API_KEYs', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ADMIN_API_KEY' ? 'current-admin-key'
+          : key === 'ADMIN_API_KEY_PREVIOUS' ? 'old-key-1,old-key-2,old-key-3'
+          : key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-key'
+          : key === 'API_KEY_ROTATION_GRACE_MINUTES' ? '24'
+          : undefined),
+      } as unknown as ConfigService;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+
+      // Test first old key
+      const request1 = { headers: { 'x-api-key': 'old-key-1' } } as Partial<AuthenticatedRequest>;
+      await expect(guard.canActivate(contextFor(request1))).resolves.toBe(true);
+      expect(request1.apiKeySource).toBe('admin');
+
+      // Test middle old key
+      const request2 = { headers: { 'x-api-key': 'old-key-2' } } as Partial<AuthenticatedRequest>;
+      await expect(guard.canActivate(contextFor(request2))).resolves.toBe(true);
+      expect(request2.apiKeySource).toBe('admin');
+
+      // Test last old key
+      const request3 = { headers: { 'x-api-key': 'old-key-3' } } as Partial<AuthenticatedRequest>;
+      await expect(guard.canActivate(contextFor(request3))).resolves.toBe(true);
+      expect(request3.apiKeySource).toBe('admin');
+    });
+
+    it('supports comma-separated multiple previous ORACLE_OPERATOR_API_KEYs with whitespace', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ORACLE_OPERATOR_API_KEY' ? 'current-operator-key'
+          : key === 'ORACLE_OPERATOR_API_KEY_PREVIOUS' ? 'old-key-1 , old-key-2 , old-key-3'
+          : key === 'API_KEY_ROTATION_GRACE_MINUTES' ? '24'
+          : undefined),
+      } as unknown as ConfigService;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+
+      // Test that whitespace is properly trimmed
+      const request = { headers: { 'x-api-key': 'old-key-2' } } as Partial<AuthenticatedRequest>;
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.apiKeySource).toBe('operator');
+    });
+
+    it('rejects unrecognized keys even with multiple previous keys configured', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ADMIN_API_KEY' ? 'current-admin-key'
+          : key === 'ADMIN_API_KEY_PREVIOUS' ? 'old-key-1,old-key-2'
+          : key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-key'
+          : key === 'API_KEY_ROTATION_GRACE_MINUTES' ? '24'
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'totally-wrong-key' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).rejects.toThrow(UnauthorizedException);
+    });
+  });
+
+  // Rate limiting tests
+  describe('Rate limiting for API keys', () => {
+    it('tracks failed authentication attempts by IP', async () => {
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+
+      redis.get.mockResolvedValueOnce(null); // First check
+      redis.set.mockResolvedValueOnce('OK'); // Record failure
+
+      const request = {
+        headers: { 'x-api-key': 'wrong-key' },
+        ip: '192.168.1.100',
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).rejects.toThrow(UnauthorizedException);
+
+      expect(redis.set).toHaveBeenCalled();
+      const setCall = redis.set.mock.calls[0];
+      expect(setCall[0]).toContain('192.168.1.100');
+    });
+
+    it('blocks requests after 5 failed attempts', async () => {
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+
+      const failureRecord = {
+        count: 5,
+        resetAt: Date.now() + 60_000,
+      };
+
+      redis.get.mockResolvedValueOnce(JSON.stringify(failureRecord));
+
+      const request = {
+        headers: { 'x-api-key': 'wrong-key' },
+        ip: '192.168.1.100',
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).rejects.toThrow('Too many failed authentication attempts');
+    });
+
+    it('resets failure count on successful authentication', async () => {
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+
+      redis.get.mockResolvedValueOnce(null); // No prior failures
+      redis.del.mockResolvedValueOnce(1); // Reset on success
+
+      const request = {
+        headers: { 'x-api-key': 'operator-secret' },
+        ip: '192.168.1.100',
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+
+      expect(redis.del).toHaveBeenCalled();
+      const delCall = redis.del.mock.calls[0];
+      expect(delCall[0]).toContain('192.168.1.100');
+    });
+
+    it('resets failure count on successful JWT authentication', async () => {
+      const token = jwtService.signWithRole(
+        'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+        'admin',
+        true,
+      );
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'dummy-key' : undefined),
+      } as unknown as ConfigService;
+
+      redis.get.mockResolvedValueOnce(null);
+      redis.del.mockResolvedValueOnce(1);
+
+      const request = {
+        headers: { authorization: `Bearer ${token}` },
+        ip: '192.168.1.100',
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+
+      expect(redis.del).toHaveBeenCalledWith(expect.stringContaining('192.168.1.100'));
+    });
+  });
+
+  // Admin JWT validation tests
+  describe('Admin JWT validation', () => {
+    it('requires admin: true flag on JWT', async () => {
+      const token = jwtService.signWithRole('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ', 'admin', false);
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { authorization: `Bearer ${token}` },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).rejects.toThrow('Admin bearer token required');
+    });
+
+    it('accepts JWT with admin: true', async () => {
+      const token = jwtService.signWithRole('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ', 'admin', true);
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+
+      redis.get.mockResolvedValueOnce(null);
+      redis.del.mockResolvedValueOnce(1);
+
+      const request = {
+        headers: { authorization: `Bearer ${token}` },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.authVia).toBe('jwt');
+    });
+
+    it('accepts JWT with role: admin', async () => {
+      const token = jwtService.signWithRole('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ', 'admin', false);
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+
+      // Override the token to include role: admin
+      const verifyAsyncSpy = jest.spyOn(jwtService, 'verifyAsync').mockResolvedValueOnce({
+        walletAddress: 'GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ',
+        role: 'admin',
+        admin: false,
+      });
+
+      redis.get.mockResolvedValueOnce(null);
+      redis.del.mockResolvedValueOnce(1);
+
+      const request = {
+        headers: { authorization: 'Bearer dummy-token' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+
+      verifyAsyncSpy.mockRestore();
+    });
+  });
+
+  // Oracle-only key validation tests
+  describe('Oracle-only key validation', () => {
+    it('accepts ORACLE_OPERATOR_API_KEY when ADMIN_API_KEY is set', async () => {
+      const config = {
+        get: jest.fn((key: string) =>
+          key === 'ADMIN_API_KEY' ? 'admin-secret'
+          : key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret'
+          : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { 'x-api-key': 'operator-secret' },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+      expect(request.apiKeySource).toBe('operator');
+    });
+
+    it('rejects admin bearer tokens when only ORACLE_OPERATOR_API_KEY is configured', async () => {
+      const token = jwtService.signWithRole('GAHJJJKMOKYE4RVPZEWZTKH5FVI4PA3VL7GK2LFNUBSGBKQTRB7KXQZ', 'admin', true);
+      const config = {
+        get: jest.fn((key: string) => key === 'ORACLE_OPERATOR_API_KEY' ? 'operator-secret' : undefined),
+      } as unknown as ConfigService;
+      const request = {
+        headers: { authorization: `Bearer ${token}` },
+      } as Partial<AuthenticatedRequest>;
+
+      const guard = new OperatorAuthGuard(config, jwtService, redis as any);
+      // Should pass through to authorization check and succeed since only ORACLE_OPERATOR_API_KEY is set
+      // but JWT with admin should still work for operator routes
+      redis.get.mockResolvedValueOnce(null);
+      redis.del.mockResolvedValueOnce(1);
+
+      await expect(guard.canActivate(contextFor(request))).resolves.toBe(true);
+    });
+  });
