@@ -2,7 +2,7 @@ import { Injectable, Logger, BadRequestException, OnApplicationShutdown } from '
 import * as crypto from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../../prisma/prisma.service';
-import { validateWebhookEndpoint } from '../webhooks/ssrf.validator';
+import { validateWebhookEndpoint, validateWebhookEndpointAtDelivery } from '../webhooks/ssrf.validator';
 
 type WebhookEvent = 'policy.status.change' | 'claim.status.change' | 'policy.oracle_key.change';
 
@@ -400,6 +400,10 @@ export class WebhooksService implements OnApplicationShutdown {
     secret?: string,
     signature?: string,
   ): Promise<void> {
+    // DNS rebinding protection: re-validate the endpoint at delivery time
+    // in case the DNS record has changed since registration.
+    await validateWebhookEndpointAtDelivery(registration.url);
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };

@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import { DistributedLockService } from './distributed-lock.service';
 import { RedisConnectionService } from './redis-connection.service';
 import { RedisStartupRetryOptions, readRedisStartupRetryOptions } from './redis-startup';
+import { ThrottlerStorageService } from './throttler-storage.service';
 
 const redisLogger = new Logger('RedisClient');
 
@@ -75,7 +76,8 @@ export function createRedisClient(
     },
     RedisConnectionService,
     DistributedLockService,
+    ThrottlerStorageService,
   ],
-  exports: ['REDIS_CLIENT', DistributedLockService],
+  exports: ['REDIS_CLIENT', DistributedLockService, ThrottlerStorageService],
 })
 export class RedisModule {}

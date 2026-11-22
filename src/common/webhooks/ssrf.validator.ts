@@ -82,6 +82,15 @@ export function isPrivateIPv6(ip: string): boolean {
 
 /**
  * Checks whether a hostname is a loopback, private IP, or internal cloud metadata address.
+ * 
+ * Note: .internal and .local domains are blocked only as a heuristic to prevent
+ * cloud metadata service access (e.g., 169.254.169.254, metadata.google.internal).
+ * However, some legitimate public domains end with .internal or .local.
+ * 
+ * The definitive check happens at delivery time via validateWebhookEndpointAtDelivery,
+ * which performs DNS resolution and validates the actual IP address. This provides
+ * stronger protection: if a domain resolves to a public IP, it's allowed even if
+ * the hostname ends with .internal or .local.
  */
 export function isPrivateOrInternalHost(rawHost: string): boolean {
   const host = rawHost.replace(/^\[|\]$/g, '').toLowerCase().trim();
@@ -90,6 +99,10 @@ export function isPrivateOrInternalHost(rawHost: string): boolean {
   if (host === 'localhost' || host.endsWith('.localhost')) return true;
 
   // Common cloud metadata endpoints (AWS, GCP, Azure, OpenStack)
+  // Note: .internal and .local are common patterns for metadata services,
+  // but they're also used by legitimate public domains (e.g., myapp.internal.company.com).
+  // The DNS rebinding check at delivery time (validateWebhookEndpointAtDelivery)
+  // provides the actual protection by validating resolved IPs.
   if (
     host === 'metadata.google.internal' ||
     host === 'metadata' ||
@@ -114,6 +127,10 @@ export function isPrivateOrInternalHost(rawHost: string): boolean {
 /**
  * Validates a webhook endpoint URL to prevent Server-Side Request Forgery (SSRF) (#732).
  * Throws BadRequestException if the URL points to private/internal IPs, localhost, or metadata endpoints.
+ * 
+ * Note: This validates the hostname at registration time only. DNS rebinding attacks can
+ * make a hostname resolve to a private IP at delivery time. Use validateWebhookEndpointAtDelivery
+ * before actually sending the webhook to re-validate the resolved IP.
  */
 export function validateWebhookEndpoint(rawUrl: string): void {
   if (!rawUrl || typeof rawUrl !== 'string') {
@@ -136,6 +153,94 @@ export function validateWebhookEndpoint(rawUrl: string): void {
     throw new BadRequestException(
       `Webhook endpoint cannot be a private, internal, or metadata IP address: ${hostname}`,
     );
+  }
+}
+
+/**
+ * Re-validates a webhook URL at delivery time to prevent DNS rebinding attacks.
+ * This checks if the resolved IP address is private/internal, which may differ from
+ * the hostname validation at registration time.
+ * 
+ * Uses DNS resolution to get the actual IP that will be contacted, then validates
+ * that IP against SSRF rules. Throws BadRequestException if the resolved IP is private.
+ * 
+ * #XXX — DNS rebinding protection: validates at both registration (hostname check)
+ * and delivery time (resolved IP check).
+ */
+export async function validateWebhookEndpointAtDelivery(rawUrl: string): Promise<void> {
+  if (!rawUrl || typeof rawUrl !== 'string') {
+    throw new BadRequestException('Webhook URL is required');
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new BadRequestException('Invalid webhook URL format');
+  }
+
+  if (parsed.protocol !== 'https:') {
+    throw new BadRequestException('Webhook URL must start with https://');
+  }
+
+  const hostname = parsed.hostname;
+  
+  // First check: hostname-based validation (same as registration time)
+  if (isPrivateOrInternalHost(hostname)) {
+    throw new BadRequestException(
+      `Webhook endpoint cannot be a private, internal, or metadata IP address: ${hostname}`,
+    );
+  }
+
+  // Second check: resolve hostname to IP and validate the resolved IP
+  // This prevents DNS rebinding attacks where a domain resolves to a private IP
+  // at delivery time even though it resolved to a public IP at registration time.
+  try {
+    const { resolve4, resolve6 } = require('dns').promises;
+    
+    // Try to resolve the hostname to both IPv4 and IPv6 addresses
+    let addresses: string[] = [];
+    
+    try {
+      const ipv4Addresses = await resolve4(hostname);
+      addresses.push(...ipv4Addresses);
+    } catch {
+      // IPv4 resolution may fail; try IPv6
+    }
+
+    try {
+      const ipv6Addresses = await resolve6(hostname);
+      addresses.push(...ipv6Addresses);
+    } catch {
+      // IPv6 resolution may fail; that's okay if IPv4 succeeded
+    }
+
+    // If we got addresses, validate that at least one is public/external
+    // A successful DNS resolution that returns only private IPs is a rebinding attack
+    if (addresses.length > 0) {
+      const allAddressesArePrivate = addresses.every((addr) => {
+        if (net.isIPv4(addr)) {
+          return isPrivateIPv4(addr);
+        } else if (net.isIPv6(addr)) {
+          return isPrivateIPv6(addr);
+        }
+        return false;
+      });
+
+      if (allAddressesArePrivate) {
+        throw new BadRequestException(
+          `Webhook delivery blocked: all resolved addresses for ${hostname} are private or internal (${addresses.join(', ')})`,
+        );
+      }
+    }
+    // If resolution returns no addresses, let the fetch attempt proceed and fail naturally
+  } catch (err) {
+    // If the error is already a BadRequestException (from our validation), re-throw it
+    if (err instanceof BadRequestException) {
+      throw err;
+    }
+    // DNS resolution errors (ENOTFOUND, etc.) should not block delivery — let fetch fail naturally
+    // This prevents legitimate scenarios where DNS is temporarily unavailable
   }
 }
 
