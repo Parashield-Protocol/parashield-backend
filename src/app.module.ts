@@ -1,4 +1,4 @@
-import { Logger, Module } from '@nestjs/common';
+import { Logger, MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
@@ -21,6 +21,14 @@ import { validateJwtSecret } from './auth/jwt-secret.validator';
 import { validateAllSecrets } from './common/secrets/secret-validator';
 import { OpenTelemetryShutdownHook } from './common/telemetry/opentelemetry';
 import { validatePortEnv } from './common/utils/config.utils';
+import { IdempotencyMiddleware } from './common/middleware/idempotency.middleware';
+import { InputSanitizationMiddleware } from './common/middleware/input-sanitization.middleware';
+import {
+  RequestTimeoutMiddleware,
+  REQUEST_TIMEOUT_MS,
+  SERVER_TIMEOUT_MS,
+} from './common/middleware/request-timeout.middleware';
+import { UsdcPrecisionValidationMiddleware } from './common/middleware/usdc-precision-validation.middleware';
 
 /**
  * Validate loaded environment configuration at startup.
@@ -237,6 +245,22 @@ function validateConfig(config: Record<string, unknown>) {
       useClass: VersioningInterceptor,
     },
     OpenTelemetryShutdownHook,
+    { provide: REQUEST_TIMEOUT_MS, useValue: SERVER_TIMEOUT_MS },
+    RequestTimeoutMiddleware,
+    InputSanitizationMiddleware,
+    UsdcPrecisionValidationMiddleware,
+    IdempotencyMiddleware,
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer
+      .apply(
+        RequestTimeoutMiddleware,
+        InputSanitizationMiddleware,
+        UsdcPrecisionValidationMiddleware,
+        IdempotencyMiddleware,
+      )
+      .forRoutes({ path: '{*path}', method: RequestMethod.ALL });
+  }
+}

@@ -114,9 +114,11 @@ describe('DistributedLockService', () => {
       expect(firstRun.executed).toBe(true);
 
       // Lock should now be free, second acquire succeeds
-      const token = await lockService.acquire('lock:test:release-success', 10000);
-      expect(token).not.toBeNull();
-      await lockService.release('lock:test:release-success', token!);
+      const acquisition = await lockService.acquire('lock:test:release-success', 10000);
+      expect(acquisition.status).toBe('acquired');
+      if (acquisition.status === 'acquired') {
+        await lockService.release('lock:test:release-success', acquisition.token);
+      }
     });
 
     it('the lock is released after failure', async () => {
@@ -129,27 +131,33 @@ describe('DistributedLockService', () => {
       ).rejects.toThrow('Task failed unexpectedly');
 
       // Lock should be released in finally block despite the exception
-      const token = await lockService.acquire('lock:test:release-failure', 10000);
-      expect(token).not.toBeNull();
-      await lockService.release('lock:test:release-failure', token!);
+      const acquisition = await lockService.acquire('lock:test:release-failure', 10000);
+      expect(acquisition.status).toBe('acquired');
+      if (acquisition.status === 'acquired') {
+        await lockService.release('lock:test:release-failure', acquisition.token);
+      }
     });
 
     it('the lock expires if the holder dies (TTL expiration)', async () => {
       jest.useFakeTimers();
       try {
         const token = await lockService.acquire('lock:test:ttl', 1000);
-        expect(token).not.toBeNull();
+        expect(token.status).toBe('acquired');
+        if (token.status !== 'acquired') throw new Error('Expected lock acquisition to succeed');
 
         // Second acquisition immediately fails
         const secondAcquire = await lockService.acquire('lock:test:ttl', 1000);
-        expect(secondAcquire).toBeNull();
+        expect(secondAcquire).toEqual({ status: 'held' });
 
         // Simulate holder crashing and time elapsing past TTL (1001ms)
         jest.advanceTimersByTime(1001);
 
         // Another instance should now acquire successfully
         const thirdAcquire = await lockService.acquire('lock:test:ttl', 1000);
-        expect(thirdAcquire).not.toBeNull();
+        expect(thirdAcquire.status).toBe('acquired');
+        if (thirdAcquire.status === 'acquired') {
+          await lockService.release('lock:test:ttl', thirdAcquire.token);
+        }
       } finally {
         jest.useRealTimers();
       }
@@ -160,23 +168,27 @@ describe('DistributedLockService', () => {
       try {
         // Holder 1 acquires with token1
         const token1 = await lockService.acquire('lock:test:stale', 1000);
-        expect(token1).not.toBeNull();
+        expect(token1.status).toBe('acquired');
+        if (token1.status !== 'acquired') throw new Error('Expected first lock acquisition to succeed');
 
         // Lock expires naturally for holder 1
         jest.advanceTimersByTime(1500);
 
         // Holder 2 acquires with token2
         const token2 = await lockService.acquire('lock:test:stale', 5000);
-        expect(token2).not.toBeNull();
-        expect(token2).not.toEqual(token1);
+        expect(token2.status).toBe('acquired');
+        if (token1.status !== 'acquired' || token2.status !== 'acquired') {
+          throw new Error('Expected both lock acquisitions to succeed');
+        }
+        expect(token2.token).not.toEqual(token1.token);
 
         // Stale holder 1 attempts to release with token1
-        const releasedByStale = await lockService.release('lock:test:stale', token1!);
+        const releasedByStale = await lockService.release('lock:test:stale', token1.token);
         expect(releasedByStale).toBe(false);
 
         // Holder 2's lock must still be active in Redis
         const remainingHolderToken = await fakeRedis.get('lock:test:stale');
-        expect(remainingHolderToken).toBe(token2);
+        expect(remainingHolderToken).toBe(token2.token);
       } finally {
         jest.useRealTimers();
       }
@@ -189,21 +201,23 @@ describe('DistributedLockService', () => {
 
       // Instance A acquires
       const tokenA = await instanceA.acquire('lock:cluster:job', 5000);
-      expect(tokenA).not.toBeNull();
+      expect(tokenA.status).toBe('acquired');
 
       // Instance B attempts to acquire same key, fails
       const tokenB = await instanceB.acquire('lock:cluster:job', 5000);
-      expect(tokenB).toBeNull();
+      expect(tokenB).toEqual({ status: 'held' });
 
       // Instance A releases
-      const released = await instanceA.release('lock:cluster:job', tokenA!);
+      if (tokenA.status !== 'acquired') throw new Error('Expected instance A to acquire the lock');
+      const released = await instanceA.release('lock:cluster:job', tokenA.token);
       expect(released).toBe(true);
 
       // Instance B now acquires successfully
       const tokenB2 = await instanceB.acquire('lock:cluster:job', 5000);
-      expect(tokenB2).not.toBeNull();
+      expect(tokenB2.status).toBe('acquired');
 
-      await instanceB.release('lock:cluster:job', tokenB2!);
+      if (tokenB2.status !== 'acquired') throw new Error('Expected instance B to acquire the lock');
+      await instanceB.release('lock:cluster:job', tokenB2.token);
     });
 
     it('when Redis is unreachable, skips execution and logs error loudly', async () => {
@@ -214,6 +228,7 @@ describe('DistributedLockService', () => {
 
       expect(result.executed).toBe(false);
       expect(task).not.toHaveBeenCalled();
+      expect(result).toEqual({ executed: false });
     });
 
     it('watchdog heartbeat extends the lock for long-running jobs', async () => {
@@ -234,11 +249,11 @@ describe('DistributedLockService', () => {
         );
 
         // Advance timers by 1000ms -> heartbeat fires
-        jest.advanceTimersByTime(1000);
+        await jest.advanceTimersByTimeAsync(1000);
         expect(renewSpy).toHaveBeenCalledTimes(1);
 
         // Advance timers by another 1000ms -> heartbeat fires again
-        jest.advanceTimersByTime(1000);
+        await jest.advanceTimersByTimeAsync(1000);
         expect(renewSpy).toHaveBeenCalledTimes(2);
 
         // Complete the task

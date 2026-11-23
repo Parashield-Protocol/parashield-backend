@@ -21,33 +21,38 @@ describe('DistributedLockService coverage (#910)', () => {
     it('returns a token and uses SET ... PX ttl NX on success', async () => {
       redis.set.mockResolvedValue('OK');
 
-      const token = await service.acquire('lock:a', 5000);
+      const result = await service.acquire('lock:a', 5000);
 
-      expect(typeof token).toBe('string');
-      expect(token).not.toBe('');
-      expect(redis.set).toHaveBeenCalledWith('lock:a', token, 'PX', 5000, 'NX');
+      expect(result.status).toBe('acquired');
+      if (result.status !== 'acquired') throw new Error('Expected lock acquisition to succeed');
+      expect(result.token).not.toBe('');
+      expect(redis.set).toHaveBeenCalledWith('lock:a', result.token, 'PX', 5000, 'NX');
     });
 
-    it('returns null on contention', async () => {
+    it('returns held on contention', async () => {
       redis.set.mockResolvedValue(null);
 
-      await expect(service.acquire('lock:a', 5000)).resolves.toBeNull();
+      await expect(service.acquire('lock:a', 5000)).resolves.toEqual({ status: 'held' });
     });
 
     it('generates a different token for each acquisition', async () => {
-      redis.set.mockResolvedValue('OK');
+      redis.set.mockResolvedValueOnce('OK').mockResolvedValueOnce('OK');
 
       const first = await service.acquire('lock:a', 5000);
       const second = await service.acquire('lock:a', 5000);
 
-      expect(first).not.toBe(second);
+      expect(first.status).toBe('acquired');
+      expect(second.status).toBe('acquired');
+      if (first.status === 'acquired' && second.status === 'acquired') {
+        expect(first.token).not.toBe(second.token);
+      }
     });
 
-    it('returns null and logs an error when Redis throws', async () => {
+    it('returns unavailable and logs an error when Redis throws', async () => {
       const errorSpy = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
       redis.set.mockRejectedValue(new Error('ECONNREFUSED'));
 
-      await expect(service.acquire('lock:a', 5000)).resolves.toBeNull();
+      await expect(service.acquire('lock:a', 5000)).resolves.toEqual({ status: 'unavailable' });
       expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Redis unreachable'));
     });
   });
@@ -132,6 +137,17 @@ describe('DistributedLockService coverage (#910)', () => {
       });
       expect(task).not.toHaveBeenCalled();
       expect(redis.eval).not.toHaveBeenCalled();
+    });
+
+    it('logs Redis unavailability separately from lock contention', async () => {
+      const logSpy = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+      redis.set.mockRejectedValue(new Error('ECONNREFUSED'));
+      const task = jest.fn();
+
+      await service.runWithLock('lock:a', 9000, task);
+
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Redis is unavailable'));
+      expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('currently held'));
     });
 
     it('releases the lock and rethrows when the task fails', async () => {

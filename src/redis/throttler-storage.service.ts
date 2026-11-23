@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { ThrottlerStorage } from '@nestjs/throttler';
 import { Redis } from 'ioredis';
 
@@ -18,7 +18,7 @@ import { Redis } from 'ioredis';
  */
 @Injectable()
 export class ThrottlerStorageService implements ThrottlerStorage {
-  constructor(private readonly redisClient: Redis) {}
+  constructor(@Inject('REDIS_CLIENT') private readonly redisClient: Redis) {}
 
   /**
    * Increment the request count for a key with a TTL.
