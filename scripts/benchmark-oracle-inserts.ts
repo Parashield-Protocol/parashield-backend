@@ -52,7 +52,7 @@ function generateSampleReadings(count: number): OracleReading[] {
       confidence: 99,
       source: 'dia',
       dataType: 'USD_PRICE',
-      status: 'ACTIVE',
+      status: 'OK',
     });
   }
   return readings;

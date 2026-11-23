@@ -121,7 +121,7 @@ export function applySecurityHeaders(
   app.use(
     helmet({
       referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-      hsts: isProduction ? {
+      strictTransportSecurity: isProduction ? {
         maxAge: 31536000,
         includeSubDomains: true,
         preload: true,
@@ -130,7 +130,7 @@ export function applySecurityHeaders(
       // Hard-code this on regardless of caller options: leaking the stack is
       // the thing this module exists to prevent.
       hidePoweredBy: true,
-    }),
+    } as HelmetOptions),
   );
 
   // 3. Strip leftover leaky headers.

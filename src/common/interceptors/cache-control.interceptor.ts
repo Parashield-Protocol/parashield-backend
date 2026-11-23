@@ -19,7 +19,7 @@ import type { Response } from "express";
 
 @Injectable()
 export class CacheControlInterceptor implements NestInterceptor {
-  constructor(private readonly directives: string = "no-store, private, max-age=0") {}
+  private readonly directives = "no-store, private, max-age=0";
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const ctx = context.switchToHttp();
