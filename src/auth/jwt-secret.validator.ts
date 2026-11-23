@@ -27,22 +27,31 @@ export function isWeakJwtSecret(secret: string): boolean {
 
 export function validateJwtSecret(
   secret: string | undefined,
-  nodeEnv: string = process.env.NODE_ENV || 'development',
+  _nodeEnv: string = process.env.NODE_ENV || 'development',
 ): { valid: boolean; error?: string } {
   if (!secret || !secret.trim()) {
     return { valid: false, error: 'JWT_SECRET environment variable is required' };
   }
 
-  const isProduction = nodeEnv.toLowerCase() === 'production';
   const result = evaluateSecretEntropy(secret, MIN_JWT_SECRET_LENGTH);
 
   if (!result.valid) {
-    if (isProduction) {
+    if (result.reason?.startsWith('insufficient length')) {
       return {
         valid: false,
-        error: `JWT_SECRET is invalid: ${result.reason}`,
+        error: 'JWT_SECRET must be at least 32 characters long',
       };
     }
+    if (result.reason?.includes('placeholder')) {
+      return {
+        valid: false,
+        error: 'JWT_SECRET contains weak or placeholder values',
+      };
+    }
+    return {
+      valid: false,
+      error: `JWT_SECRET is invalid: ${result.reason}`,
+    };
   }
 
   return { valid: true };
