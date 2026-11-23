@@ -24,6 +24,18 @@ export class InvalidDecimalError extends BadRequestException {
   }
 }
 
+/**
+ * Maximum exponent magnitude allowed in expandExponent. Values like 1e1000000
+ * would expand to multi-megabyte strings causing memory exhaustion.
+ * 
+ * The practical threshold for oracle/decimal operations is around 10-20 digits
+ * of exponent magnitude. We allow up to 1000 to account for extreme but
+ * legitimate use cases (1e1000 = 10^1000, a valid large number).
+ * 
+ * #XXX — DoS protection: inputs with |exponent| > MAX_EXPONENT_MAGNITUDE are rejected.
+ */
+const MAX_EXPONENT_MAGNITUDE = 1000;
+
 /** `true` if the value has an exponent, e.g. `1e-7` / `1.2E+3`. */
 const EXPONENT_PATTERN = /^[+-]?(?:\d+\.?\d*|\.\d+)[eE][+-]?\d+$/;
 /** `true` if the value is a plain (non-exponent) decimal, e.g. `-12.34` / `.5` / `5.`. */
@@ -32,6 +44,9 @@ const PLAIN_DECIMAL_PATTERN = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/;
 /**
  * Rewrite scientific notation (`1e-7`, `2.5E+3`) into plain decimal notation
  * without any rounding, so the caller's regexes never need to know about it.
+ * 
+ * #XXX — DoS protection: rejects exponents with magnitude > MAX_EXPONENT_MAGNITUDE
+ * to prevent memory exhaustion via inputs like 1e999999999.
  */
 function expandExponent(input: string): string {
   if (!EXPONENT_PATTERN.test(input)) return input;
@@ -43,6 +58,14 @@ function expandExponent(input: string): string {
   const intPart = match[2] ?? '';
   const fracPart = match[3] ?? '';
   const exponent = parseInt(match[4], 10);
+
+  // DoS protection: reject exponents that would create multi-megabyte strings
+  if (Math.abs(exponent) > MAX_EXPONENT_MAGNITUDE) {
+    throw new InvalidDecimalError(
+      `Exponent magnitude ${Math.abs(exponent)} exceeds maximum allowed (${MAX_EXPONENT_MAGNITUDE}). ` +
+      `Value would expand to an unreasonably large decimal string.`,
+    );
+  }
 
   const digits = intPart + fracPart;
   const pointPosition = intPart.length + exponent;

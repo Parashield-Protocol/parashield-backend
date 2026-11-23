@@ -3,7 +3,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
-import { ThrottlerStorageRedisService } from '@nest-lab/throttler-storage-redis';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { PolicyModule }  from './policy/policy.module';
 import { OracleModule }  from './oracle/oracle.module';
@@ -13,6 +12,7 @@ import { PrismaModule }  from './prisma/prisma.module';
 import { AuthModule }    from './auth/auth.module';
 import { HealthModule }  from './health/health.module';
 import { RedisModule }   from './redis/redis.module';
+import { ThrottlerStorageService } from './redis/throttler-storage.service';
 import { VersioningInterceptor } from './common/interceptors/versioning.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { BigIntSerializerInterceptor } from './common/interceptors/bigint-serializer.interceptor';
@@ -196,20 +196,20 @@ function validateConfig(config: Record<string, unknown>) {
   imports: [
     ConfigModule.forRoot({ isGlobal: true, validate: validateConfig }),
     ScheduleModule.forRoot(),
+    RedisModule,
     ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
+      imports: [RedisModule],
+      inject: [ThrottlerStorageService],
+      useFactory: (storage: ThrottlerStorageService) => ({
         throttlers: [
           {
             ttl: 60000,
             limit: 60,
           },
         ],
-        storage: new ThrottlerStorageRedisService(config.get<string>('REDIS_URL') || 'redis://localhost:6379'),
+        storage,
       }),
     }),
-    RedisModule,
     PrismaModule,
     StellarModule,
     AuthModule,
