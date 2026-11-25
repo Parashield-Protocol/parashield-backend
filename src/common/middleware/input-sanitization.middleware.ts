@@ -28,7 +28,7 @@ const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
  * any consumer that interpolates these values into HTML — the frontend, an
  * email template, a server-rendered page — must encode them for that
  * context. Server-side code that builds HTML must use `escapeHtml()` below.
- * Registered globally on the Express adapter in main.ts, right after the
+ * Registered globally through AppModule middleware configuration, right after the
  * body parsers, so every route is covered without route-pattern wildcards.
  *
  * Query params are not rewritten: Express 5 exposes `req.query` as a

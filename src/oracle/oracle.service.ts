@@ -4,6 +4,8 @@ import {
   Logger,
   BadRequestException,
   ServiceUnavailableException,
+  OnApplicationShutdown,
+  OnModuleDestroy,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import axios from "axios";
@@ -349,9 +351,9 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
       const check = this.validateReading(reading, nowSeconds);
       if (!check.ok) {
         // Batches skip rejected readings rather than failing the whole batch (#804).
-        if (check.reason === "mock") {
+        if ("reason" in check && check.reason === "mock") {
           this.logger.warn(check.log);
-        } else {
+        } else if ("reason" in check) {
           this.logger.error(check.log);
         }
         continue;
@@ -402,12 +404,12 @@ export class OracleService implements OnApplicationShutdown, OnModuleDestroy {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const check = this.validateReading(reading, nowSeconds);
     if (!check.ok) {
-      if (check.reason === "mock") {
+      if ("reason" in check && check.reason === "mock") {
         this.logger.warn(check.log);
-      } else {
+      } else if ("reason" in check) {
         this.logger.error(check.log);
       }
-      if (check.reason === "future") {
+      if ("reason" in check && check.reason === "future") {
         // #703 — a future-dated reading would corrupt claim triggers, so the caller hears about it.
         throw new BadRequestException(
           `Reading timestamp ${reading.timestamp} is in the future (max ${FUTURE_SKEW_TOLERANCE_SECONDS}s clock skew allowed)`,

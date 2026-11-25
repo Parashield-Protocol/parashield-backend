@@ -13,6 +13,7 @@ import {
   rpc as StellarRpc,
   Horizon,
   xdr,
+  Memo,
 } from "@stellar/stellar-sdk";
 import {
   HorizonCircuitBreaker,
@@ -266,7 +267,7 @@ export class StellarService {
             .addOperation(contract.call(method, ...args))
             .setTimeout(30);
           if (validMemo) {
-            builder = builder.addMemo(xdr.Memo.text(validMemo));
+            builder = builder.addMemo(Memo.text(validMemo));
           }
           const tx = builder.build();
 

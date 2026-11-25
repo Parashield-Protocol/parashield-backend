@@ -1,4 +1,4 @@
-import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
+import { Inject, Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import { buildProblemDetails } from '../errors/problem-details';
 
@@ -7,6 +7,8 @@ import { buildProblemDetails } from '../errors/problem-details';
 // hanging until the TCP idle-timeout fires. The value is intentionally kept
 // in sync with SERVER_TIMEOUT_MS in main.ts (30 s) so both layers agree.
 const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
+export const REQUEST_TIMEOUT_MS = 'REQUEST_TIMEOUT_MS';
+export const SERVER_TIMEOUT_MS = 30_000;
 
 /**
  * RequestTimeoutMiddleware (#409)
@@ -19,7 +21,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 25_000;
  * The timer is cleared on the response `finish` event so normal requests are
  * not affected.
  *
- * Registered globally in main.ts alongside the other Express middleware,
+ * Registered globally through AppModule middleware configuration,
  * immediately after the body parsers so every route is covered.
  */
 @Injectable()
@@ -27,7 +29,9 @@ export class RequestTimeoutMiddleware implements NestMiddleware {
   private readonly logger = new Logger(RequestTimeoutMiddleware.name);
   private readonly timeoutMs: number;
 
-  constructor(timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS) {
+  constructor(
+    @Inject(REQUEST_TIMEOUT_MS) timeoutMs: number = DEFAULT_REQUEST_TIMEOUT_MS,
+  ) {
     this.timeoutMs = timeoutMs;
   }
 

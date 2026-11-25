@@ -116,10 +116,10 @@ export class ClaimsController {
   @ApiErrorResponse(403, 'Wallet query parameter does not match the authenticated wallet.', undefined, 'Wallet address does not match authenticated user')
   async getClaimsByWalletQuery(
     @Query('wallet') wallet: string,
+    @Req() req: AuthenticatedRequest,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
-    @Query('cursor') cursor: string | undefined,
-    @Req() req: AuthenticatedRequest,
+    @Query('cursor') cursor?: string,
   ) {
 
     const authedWallet = req?.user?.walletAddress || req?.wallet;
@@ -219,10 +219,10 @@ export class ClaimsController {
   })
   async getClaimHistory(
     @Param('wallet') wallet: string,
+    @Req() req: AuthenticatedRequest,
     @Query('page') page?: string,
     @Query('limit') limit?: string,
-    @Query('cursor') cursor: string | undefined,
-    @Req() req: AuthenticatedRequest,
+    @Query('cursor') cursor?: string,
   ) {
 
     const authedWallet = req?.user?.walletAddress || req?.wallet;
@@ -236,6 +236,12 @@ export class ClaimsController {
     const parsedPage = page ? parseInt(page, 10) || 1 : 1;
     const parsedLimit = limit ? parseInt(limit, 10) || 20 : 20;
 
-    return this.getClaimsByWalletQuery(targetWallet, String(parsedPage), String(parsedLimit), cursor, req);
+    return this.getClaimsByWalletQuery(
+      targetWallet,
+      req,
+      String(parsedPage),
+      String(parsedLimit),
+      cursor,
+    );
   }
 }

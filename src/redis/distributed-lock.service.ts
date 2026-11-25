@@ -8,6 +8,11 @@ export interface LockOptions {
   enableHeartbeat?: boolean;
 }
 
+export type LockAcquisitionResult =
+  | { status: 'acquired'; token: string }
+  | { status: 'held' }
+  | { status: 'unavailable' };
+
 /**
  * DistributedLockService — provides distributed locking using Redis primitives (#675).
  *
@@ -51,9 +56,9 @@ export class DistributedLockService {
    *
    * @param key Lock identifier (e.g. 'lock:job:oracle-worker')
    * @param ttlMs Lock time-to-live in milliseconds
-   * @returns Generated acquisition token if acquired, or null if lock is held or Redis is down.
+   * @returns Whether the lock was acquired, already held, or unavailable due to Redis failure.
    */
-  async acquire(key: string, ttlMs: number): Promise<string | null> {
+  async acquire(key: string, ttlMs: number): Promise<LockAcquisitionResult> {
     const token = typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID()
       : crypto.randomBytes(16).toString('hex');
@@ -61,7 +66,7 @@ export class DistributedLockService {
     try {
       // SET key token PX ttlMs NX: sets key only if it does not already exist
       const result = await this.redis.set(key, token, 'PX', ttlMs, 'NX');
-      return result === 'OK' ? token : null;
+      return result === 'OK' ? { status: 'acquired', token } : { status: 'held' };
     } catch (err) {
       // Fail-safe decision: For financial and blockchain background jobs
       // (oracle submissions, claims processing, payouts), running concurrently
@@ -71,7 +76,7 @@ export class DistributedLockService {
         `[DistributedLock] Redis unreachable during lock acquisition for "${key}": ` +
         `${err instanceof Error ? err.message : String(err)}. Skipping execution to prevent data corruption.`,
       );
-      return null;
+      return { status: 'unavailable' };
     }
   }
 
@@ -133,11 +138,16 @@ export class DistributedLockService {
     task: () => Promise<T>,
     options?: LockOptions,
   ): Promise<{ executed: boolean; result?: T }> {
-    const token = await this.acquire(key, ttlMs);
-    if (!token) {
-      this.logger.log(`Skipping scheduled run: lock "${key}" is currently held by another instance`);
+    const acquisition = await this.acquire(key, ttlMs);
+    if (acquisition.status !== 'acquired') {
+      if (acquisition.status === 'held') {
+        this.logger.log(`Skipping scheduled run: lock "${key}" is currently held by another instance`);
+      } else {
+        this.logger.log(`Skipping scheduled run: Redis is unavailable while acquiring lock "${key}"`);
+      }
       return { executed: false };
     }
+    const token = acquisition.token;
 
     let heartbeatTimer: NodeJS.Timeout | undefined;
     let lockLostReject: ((err: Error) => void) | undefined;
@@ -152,12 +162,9 @@ export class DistributedLockService {
       heartbeatTimer = setInterval(async () => {
         const renewed = await this.renew(key, token, ttlMs);
         if (!renewed) {
-          this.logger.error(
+          this.logger.warn(
             `[DistributedLock] Watchdog heartbeat failed to renew lock "${key}". Lock expired — aborting task.`,
           );
-          if (lockLostReject) {
-            lockLostReject(new Error(`Lock "${key}" expired — holder token renewal failed`));
-          }
         }
       }, extendIntervalMs);
 

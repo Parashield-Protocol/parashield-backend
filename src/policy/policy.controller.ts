@@ -48,6 +48,7 @@ import { AdminRoleGuard } from '../auth/admin-role.guard';
 import { AuthenticatedRequest } from '../auth/authenticated-request';
 import { StatusEventsService } from '../common/events/status-events.service';
 import { PolicyStatusEventDto } from '../common/events/dto/sse-event.dto';
+import { CacheControlInterceptor } from '../common/interceptors/cache-control.interceptor';
 
 // #491 — how often the policy SSE stream writes a heartbeat. Writing to a
 // socket whose peer vanished without a FIN (crashed client, dropped network)

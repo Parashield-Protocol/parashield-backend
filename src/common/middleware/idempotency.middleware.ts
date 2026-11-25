@@ -1,4 +1,4 @@
-import { Injectable, NestMiddleware, Logger } from '@nestjs/common';
+import { Inject, Injectable, NestMiddleware, Logger } from '@nestjs/common';
 import { Request, Response, NextFunction } from 'express';
 import Redis from 'ioredis';
 import { randomUUID } from 'crypto';
@@ -44,15 +44,13 @@ return 0
  * Requests without the header pass through unchanged, so the middleware is
  * completely opt-in and does not affect existing clients.
  *
- * Register in main.ts after body parsers:
- *   const idempotency = new IdempotencyMiddleware(redisClient);
- *   app.use((req, res, next) => idempotency.use(req, res, next));
+ * Registered globally through AppModule middleware configuration after body parsers.
  */
 @Injectable()
 export class IdempotencyMiddleware implements NestMiddleware {
   private readonly logger = new Logger(IdempotencyMiddleware.name);
 
-  constructor(private readonly redis: Redis) {}
+  constructor(@Inject('REDIS_CLIENT') private readonly redis: Redis) {}
 
   use(req: Request, res: Response, next: NextFunction): void {
     const MUTATING_METHODS = ['POST', 'PUT', 'PATCH'];
