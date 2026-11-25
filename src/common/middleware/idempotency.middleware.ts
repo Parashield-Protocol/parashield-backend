@@ -130,25 +130,37 @@ export class IdempotencyMiddleware implements NestMiddleware {
         return;
       }
 
-      if (Date.now() >= deadline) {
-        this.logger.warn(`Timed out waiting for in-flight request with idempotency key=${rawKey}`);
-        res.setHeader('Content-Type', 'application/problem+json');
-        res.status(409).json(
-          buildProblemDetails({
-            status: 409,
-            errorCode: 'IDEMPOTENCY_CONFLICT',
-            message: 'A request with this Idempotency-Key is still being processed. Retry later.',
-            error: 'A request with this Idempotency-Key is still being processed. Retry later.',
-            path: req.originalUrl || req.url,
-            correlationId: (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined,
-          }),
-        );
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        this.sendConflictResponse(rawKey, req, res);
         return;
       }
 
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(IDEMPOTENCY_POLL_INTERVAL_MS, remainingMs)),
+      );
 
-      await new Promise((resolve) => setTimeout(resolve, IDEMPOTENCY_POLL_INTERVAL_MS));
+      if (Date.now() >= deadline) {
+        if (await this.replayCached(storeKey, rawKey, res)) return;
+        this.sendConflictResponse(rawKey, req, res);
+        return;
+      }
     }
+  }
+
+  private sendConflictResponse(rawKey: string, req: Request, res: Response): void {
+    this.logger.warn(`Timed out waiting for in-flight request with idempotency key=${rawKey}`);
+    res.setHeader('Content-Type', 'application/problem+json');
+    res.status(409).json(
+      buildProblemDetails({
+        status: 409,
+        errorCode: 'IDEMPOTENCY_CONFLICT',
+        message: 'A request with this Idempotency-Key is still being processed. Retry later.',
+        error: 'A request with this Idempotency-Key is still being processed. Retry later.',
+        path: req.originalUrl || req.url,
+        correlationId: (req.headers['x-correlation-id'] || req.headers['x-request-id']) as string | undefined,
+      }),
+    );
   }
 
   /** Send the cached response for `storeKey` if present. Returns true if replayed. */
@@ -243,4 +255,20 @@ export class IdempotencyMiddleware implements NestMiddleware {
       );
     }
   }
+}
+function sanitizeConnectionError(error: unknown): string {
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? '');
+
+  return (
+    rawMessage
+      // Redact credentials in connection URIs: scheme://user:pass@host -> scheme://[REDACTED]@host
+      .replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:@\s/]+):([^@\s/]+)@/g, '$1[REDACTED]@')
+      // Redact user:pass@ fragments without a scheme
+      .replace(/(^|[\s'"])([^:@\s/]+):([^@\s/]+)@/g, '$1[REDACTED]@')
+      // Redact PostgreSQL `for user "<name>"` / `for user '<name>'`
+      .replace(/\b(for\s+user\s+)(["'])([^"']+)\2/gi, '$1$2[REDACTED]$2')
+      // Redact `user="<name>"` or `user=<name>` key-value forms
+      .replace(/\b(user=)("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[REDACTED]')
+  );
 }

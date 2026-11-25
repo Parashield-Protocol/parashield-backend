@@ -1,17 +1,17 @@
 import { Logger, MiddlewareConsumer, Module, NestModule, RequestMethod } from '@nestjs/common';
-import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ConfigModule } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { PolicyModule }  from './policy/policy.module';
-import { OracleModule }  from './oracle/oracle.module';
-import { ClaimsModule }  from './claims/claims.module';
+import { PolicyModule } from './policy/policy.module';
+import { OracleModule } from './oracle/oracle.module';
+import { ClaimsModule } from './claims/claims.module';
 import { StellarModule } from './stellar/stellar.module';
-import { PrismaModule }  from './prisma/prisma.module';
-import { AuthModule }    from './auth/auth.module';
-import { HealthModule }  from './health/health.module';
-import { RedisModule }   from './redis/redis.module';
+import { PrismaModule } from './prisma/prisma.module';
+import { AuthModule } from './auth/auth.module';
+import { HealthModule } from './health/health.module';
+import { RedisModule } from './redis/redis.module';
 import { ThrottlerStorageService } from './redis/throttler-storage.service';
 import { VersioningInterceptor } from './common/interceptors/versioning.interceptor';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -31,15 +31,16 @@ import {
 import { UsdcPrecisionValidationMiddleware } from './common/middleware/usdc-precision-validation.middleware';
 
 /**
- * Validate loaded environment configuration at startup.
- * Throws on missing or invalid required values.
+ * Validate loaded environment configuration at startup without mutating input.
+ * Throws on missing or invalid required values and returns a validated config object.
  */
-function validateConfig(config: Record<string, unknown>) {
+function validateConfig(config: Record<string, unknown>): Record<string, unknown> {
   const errors: string[] = [];
-  const logger = new Logger('ConfigValidation');
+  const configLogger = new Logger('ConfigValidation');
+  let validatedPort = config['PORT'];
 
   try {
-    config['PORT'] = validatePortEnv(config['PORT']);
+    validatedPort = validatePortEnv(config['PORT']);
   } catch (err) {
     errors.push((err as Error).message);
   }
@@ -49,7 +50,7 @@ function validateConfig(config: Record<string, unknown>) {
   // which is easy to miss in a real deployment that meant to point at a
   // shared Redis instance.
   if (!config['REDIS_URL']) {
-    logger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
+    configLogger.warn('REDIS_URL is not set — falling back to redis://localhost:6379');
   }
 
   // #710 — Validate Redis startup-retry tuning. All optional; defaults live in
@@ -152,7 +153,6 @@ function validateConfig(config: Record<string, unknown>) {
     }
   }
 
-
   if (!config['STELLAR_RPC_URL']) {
     errors.push('STELLAR_RPC_URL is required');
   }
@@ -197,7 +197,10 @@ function validateConfig(config: Record<string, unknown>) {
     throw new Error(`Configuration validation failed:\n${errors.join('\n')}`);
   }
 
-  return config;
+  return {
+    ...config,
+    PORT: validatedPort,
+  };
 }
 
 @Module({
