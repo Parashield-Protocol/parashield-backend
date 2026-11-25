@@ -256,3 +256,19 @@ export class IdempotencyMiddleware implements NestMiddleware {
     }
   }
 }
+function sanitizeConnectionError(error: unknown): string {
+  const rawMessage =
+    error instanceof Error ? error.message : String(error ?? '');
+
+  return (
+    rawMessage
+      // Redact credentials in connection URIs: scheme://user:pass@host -> scheme://[REDACTED]@host
+      .replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:@\s/]+):([^@\s/]+)@/g, '$1[REDACTED]@')
+      // Redact user:pass@ fragments without a scheme
+      .replace(/(^|[\s'"])([^:@\s/]+):([^@\s/]+)@/g, '$1[REDACTED]@')
+      // Redact PostgreSQL `for user "<name>"` / `for user '<name>'`
+      .replace(/\b(for\s+user\s+)(["'])([^"']+)\2/gi, '$1$2[REDACTED]$2')
+      // Redact `user="<name>"` or `user=<name>` key-value forms
+      .replace(/\b(user=)("[^"]*"|'[^']*'|[^\s,;]+)/gi, '$1[REDACTED]')
+  );
+}
